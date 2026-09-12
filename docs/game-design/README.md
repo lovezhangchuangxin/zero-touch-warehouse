@@ -13,7 +13,8 @@
 | [05 编程与调试体验](05-programming-and-debugging.md) | Python / JavaScript、loop、状态和调试 |
 | [06 经营、商店与成长](06-economy-and-progression.md) | 金币、购买、销毁、教学与试错 |
 | [07 首期范围与待定事项](07-scope-and-open-questions.md) | 首期边界、未定规则、后续扩展 |
-| [08 API 设计基线](08-api-design.md) | `Game` 入口、对象字段、动作签名、管理操作与错误码 |
+| [08 API 设计基线](08-api-design.md) | `Game` 入口、对象字段、动作签名、管理操作与结果码 |
+| [09 货物与市场参数](09-goods-and-market.md) | 货物类型、价格模型、经济不变量与数值锚点 |
 
 ## 设计状态
 
