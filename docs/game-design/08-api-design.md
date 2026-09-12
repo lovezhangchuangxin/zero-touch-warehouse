@@ -6,7 +6,7 @@
 
 1. **一切经 `Game`**：查询、管理操作、辅助工具和常量都挂在全局 `Game` 对象上，玩家只需记住 `Game`，编辑器输入 `Game.` 即可提示全部能力。唯一例外是入口函数 `loop()`。
 2. **两种语言同一张接口表**：统一 snake_case，同名同拼写，文档与教程一份两用。关键字参数在 JS 中以选项对象传递，如 `Game.vehicles({kind: "in"})`、`r.move_to(x, y, {range: 1})`。
-3. **一切对象有 `id`**：id 是日志、`Game.memory`、结果记录中的规范引用；`Game.get_object_by_id(id)` 解析任意 id。凡接受 id 的参数同样接受对象本身。
+3. **一切对象有 `id`**：id 为全局自增整数——创建时分配的序号，跨类型唯一、单调递增、永不复用，顺序即创建顺序，也用作机器人冲突裁决的优先级依据。id 是日志、`Game.memory`、结果记录中的规范引用；`Game.get_object_by_id(id)` 解析任意 id（跨类型唯一，故无须类型信息）。凡接受 id 的参数同样接受对象本身。
 4. **坐标采用 Position 值对象**：原点左上，x 向右，y 向下，语义见下文「Position」。
 5. **结果码为大写蛇形字符串**：比较使用 `Game.E` 常量（如 `Game.E.NOT_ADJACENT`），避免手打字符串出错。反馈模型沿用 [Tick、动作与电力](03-simulation-and-actions.md)：动作调用立即返回受理码，结算结果下一 tick 经 `last_result` 查询；管理操作即时生效、立即返回准确结果（见下文）。
 
@@ -153,7 +153,8 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 | 受理 | `CELL_OCCUPIED` | drop/buy：目标地面格已被占用（drop 亦可出现在结算阶段） |
 | 受理 | `NO_SUCH_OBJECT` | id 不存在或已销毁 |
 | 受理 | `NO_PATH` | move_to 目的地不可达 |
-| 结算 | `CELL_CONTESTED` | 争抢同格，全部失败 |
+| 结算 | `CELL_CONTESTED` | 争抢同一格失败：被 id 更小的机器人取得 |
+| 结算 | `TARGET_CONTESTED` | 争抢同一货物或容器空位失败：被 id 更小的机器人取得 |
 | 结算 | `CHAIN_BLOCKED` | 移动链受阻 |
 | 受理/结算 | `CHARGER_BUSY` | 充电桩被占用：受理期＝已有持续充电，结算期＝同 tick 争抢 |
 | 结算 | `TARGET_MOVED` | 交互目标的机器人同 tick 移动，转交失败 |
