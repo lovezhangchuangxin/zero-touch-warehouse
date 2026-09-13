@@ -1,0 +1,6 @@
+# Python 宿主（ztw-runtime-py）内嵌 CPython 的构建配置：
+# pyo3 经 PYO3_CONFIG_FILE 使用 vendored python-build-standalone 发行物
+# （scripts/fetch-python.mjs 生成该文件与 target/python/install）。
+# 缺失时先运行：just python-dist（或 node scripts/fetch-python.mjs）。
+[env]
+PYO3_CONFIG_FILE = { value = "target/python/pyo3-config.txt", relative = true }

@@ -13,6 +13,11 @@ hooks:
     git config core.hooksPath .githooks
     @echo "git hooks 已挂载到 .githooks/（pre-commit / commit-msg / pre-push）"
 
+# 获取钉版本的 python-build-standalone（Python 宿主内嵌 CPython）。
+# 幂等：已就绪时秒回。cargo 任何编译前需要它（.cargo/config.toml 指向）。
+python-dist:
+    node scripts/fetch-python.mjs
+
 # 快速检查（pre-commit 同款，不分流全量跑；oxlint ~17ms / oxfmt ~3ms）
 lint:
     cargo fmt --all --check
@@ -22,7 +27,7 @@ lint:
 # 完整门禁（检查集合与 CI 同口径；顺序相反——CI 先跑快的 web，本地先
 # cargo 后 web 属习惯取舍。--timings 与 pnpm install 是 CI 专属，本地假设
 # 已在 web/ 执行过 pnpm install；推送前或手动跑）
-gate:
+gate: python-dist
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
@@ -33,5 +38,5 @@ gate:
     pnpm -C web build
 
 # 开发模式：构建宿主后启动 Tauri 桌面壳（vite dev 于 :5180）
-dev:
+dev: python-dist
     pnpm -C web app:dev

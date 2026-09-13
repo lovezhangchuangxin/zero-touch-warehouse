@@ -5,6 +5,7 @@ members = [
     "crates/sim",
     "crates/api",
     "crates/runtime",
+    "crates/runtime-py",
     "crates/desktop",
 ]
 

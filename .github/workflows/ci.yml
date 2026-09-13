@@ -57,6 +57,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # vendored CPython（python-build-standalone，A1 Python 宿主）缓存：
+      # 钉版内容在 scripts/fetch-python.mjs（TAG/SHA256），缓存键只随脚本
+      # 变化；未命中时 fetch 步骤下载（约 25-47MB）。
+      - name: python dist cache
+        uses: actions/cache@v4
+        with:
+          path: target/python
+          key: py-dist-${{ runner.os }}-${{ hashFiles('scripts/fetch-python.mjs') }}
+
+      # Python 宿主的地基：必须在任何 cargo 编译前就绪（.cargo/config.toml
+      # 的 PYO3_CONFIG_FILE 指向其中文件，pyo3 的 build script 先于宿主
+      # crate 的 build.rs 运行）。脚本幂等，缓存命中时秒回。
+      - name: fetch python-build-standalone
+        run: node scripts/fetch-python.mjs
+
       # web/ pnpm 依赖缓存（store 按 OS 分目录；oxlint/oxfmt/vite 均为平台二进制）。
       - name: pnpm store cache
         uses: actions/cache@v4
