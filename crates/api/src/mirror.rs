@@ -352,7 +352,7 @@ impl WorldRevision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ztw_model::Position;
+    use ztw_model::{OrderSide, Position};
 
     #[test]
     fn mirror_shape() {
@@ -368,5 +368,86 @@ mod tests {
         assert_eq!(m.robots.len(), 1);
         assert_eq!(m.sell_orders.len(), 1);
         assert_eq!(m.blocked.len(), 2); // 货架 + 装卸口
+    }
+
+    /// 增量 JSON 形状契约：宿主 applyDelta 逐字段回放（bootstrap.js），
+    /// 序列化属性与字段名的任何改动都必须同步此处。
+    #[test]
+    fn delta_shapes() {
+        // take：标签 + 挂单移除 + 已接订单回填。
+        let mut w = World::new_empty(6, 5, 123_000);
+        w.add_port(Position::new(0, 4));
+        let o = w.add_listing(OrderSide::Sell, "battery", 2, 5_000);
+        let (code, eff) = w.manage_take(o);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_take(&w, &eff.unwrap())).unwrap();
+        assert_eq!(j["kind"], "take");
+        assert_eq!(j["gold_milli"], "113000"); // 字符串防浮点
+        assert_eq!(j["remove_listing"], o);
+        assert_eq!(j["add_my_order"]["id"], o);
+        assert_eq!(j["add_my_order"]["port"], *w.ports.keys().next().unwrap());
+
+        // cancel（未到场）：remove_vehicle / update_port 为 null。
+        let (code, eff) = w.manage_cancel(o);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_cancel(&w, &eff.unwrap())).unwrap();
+        assert_eq!(j["kind"], "cancel");
+        assert_eq!(j["gold_milli"], "122000"); // 123 - 10 + 退 9（手续费 1）
+        assert_eq!(j["debt_milli"], "0");
+        assert_eq!(j["remove_my_order"], o);
+        assert!(j["remove_vehicle"].is_null());
+        // 未到场取消：车辆为 null，但预留口的补丁对象仍在（清 docked 语义）。
+        assert_eq!(j["update_port"]["id"], *w.ports.keys().next().unwrap());
+        assert!(j["update_port"]["docked_vehicle"].is_null());
+
+        // cancel（到场后）：车辆移除与装卸口清空补丁。
+        let mut w2 = World::new_empty(6, 5, 123_000);
+        let port = w2.add_port(Position::new(0, 4));
+        let o2 = w2.add_listing(OrderSide::Sell, "battery", 1, 5_000);
+        w2.manage_take(o2);
+        w2.end_tick();
+        w2.boundary_events();
+        let vid = w2.ports[&port].docked_vehicle.unwrap();
+        let (code, eff) = w2.manage_cancel(o2);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_cancel(&w2, &eff.unwrap())).unwrap();
+        assert_eq!(j["remove_vehicle"], vid);
+        assert_eq!(j["update_port"]["id"], port);
+        assert!(j["update_port"]["docked_vehicle"].is_null());
+
+        // destroy：对象类别、blocked 补丁（元组序列化为 [x,y] 数组）、退款。
+        let mut w3 = World::new_empty(6, 5, 123_000);
+        let shelf = w3.add_shelf(Position::new(3, 3));
+        let (code, eff) = w3.manage_destroy(shelf);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_destroy(&w3, &eff.unwrap())).unwrap();
+        assert_eq!(j["kind"], "destroy");
+        assert_eq!(j["object"], "shelf");
+        assert_eq!(j["id"], shelf);
+        assert_eq!(j["gold_milli"], "210500"); // 123 + 87.5（设备价 175 的一半）
+        assert_eq!(j["unblock"], serde_json::json!([[3, 3]]));
+        assert_eq!(j["rebuild"], false);
+
+        // destroy 被携带货物：无地面格 → rebuild 置位走整体重建。
+        let mut w4 = World::new_empty(6, 5, 123_000);
+        let r = w4.add_robot(Position::new(1, 1));
+        let bx = w4.next_id;
+        w4.next_id += 1;
+        w4.ground_boxes.insert(
+            bx,
+            ztw_model::GroundBox {
+                id: bx,
+                goods_type: "water".into(),
+                pos: Position::new(1, 1),
+                holder: Some(r),
+            },
+        );
+        w4.robots.get_mut(&r).unwrap().carry = Some(bx);
+        let (code, eff) = w4.manage_destroy(bx);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_destroy(&w4, &eff.unwrap())).unwrap();
+        assert_eq!(j["object"], "box");
+        assert_eq!(j["rebuild"], true);
+        assert_eq!(j["unblock"], serde_json::json!([]));
     }
 }

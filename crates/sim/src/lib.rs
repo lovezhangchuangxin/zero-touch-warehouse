@@ -396,10 +396,12 @@ impl World {
     // -----------------------------------------------------------------------
 
     pub fn boundary_events(&mut self) {
+        // 到期判定含迟到补发（<=）：宿主跳过某 tick 的边界处理后，排定
+        // 事件在下次调用时补上车，不因迟到而丢失（否则装卸口永久悬挂）。
         let mut due: Vec<Id> = self
             .arrivals
             .iter()
-            .filter(|a| a.arrive_tick == self.tick)
+            .filter(|a| a.arrive_tick <= self.tick)
             .map(|a| a.order_id)
             .collect();
         due.sort_unstable(); // 同边界多辆车：按订单 id 升序到场（遍历序规则）
@@ -897,7 +899,14 @@ impl World {
         if let Some(b) = self.ground_boxes.get(&target_id) {
             let holder = b.holder;
             let pos = b.pos;
-            if holder.is_some_and(|h| self.vehicles.contains_key(&h)) {
+            // 仅入库（购入）车上的货物不可销毁（docs/game-design/04「买入的
+            // 货物在卸离车辆前不可销毁」）；出库车上的箱是玩家自有履约货，
+            // 销毁后仍可补同类型箱完成订单，允许止损。
+            if holder.is_some_and(|h| {
+                self.vehicles
+                    .get(&h)
+                    .is_some_and(|v| v.kind == VehicleKind::In)
+            }) {
                 return (codes::ON_VEHICLE, None);
             }
             self.ground_boxes.remove(&target_id);
@@ -909,6 +918,8 @@ impl World {
                     }
                 } else if let Some(s) = self.shelves.get_mut(&h) {
                     s.box_ids.retain(|b| b != &target_id);
+                } else if let Some(v) = self.vehicles.get_mut(&h) {
+                    v.box_ids.retain(|b| b != &target_id);
                 }
             }
             // 货物无设备价，销毁止损无退款。
@@ -1054,7 +1065,12 @@ impl World {
                     }
                 }
                 Intent::Take { target, box_id, .. } => {
-                    let holds = self.ground_boxes.contains_key(box_id)
+                    // 先判目标存活再查持有，两段判定与 give 分支一致：
+                    // target_holds 对已删目标直接索引，不依赖「销毁必空、
+                    // cancel 必恢复」的跨操作不变量。
+                    let alive = self.target_alive(*target);
+                    let holds = alive
+                        && self.ground_boxes.contains_key(box_id)
                         && self.target_holds(*target, *box_id);
                     if holds {
                         res_acts.push(Res::Take {
@@ -1063,7 +1079,7 @@ impl World {
                             box_id: *box_id,
                         });
                     } else {
-                        let code = if !self.target_alive(*target) {
+                        let code = if !alive {
                             codes::TARGET_GONE
                         } else {
                             codes::BOX_NOT_FOUND
@@ -1187,10 +1203,22 @@ impl World {
         drop_winners.sort_by_key(|d| d.robot);
 
         // 移动依赖求解（只读推演）：成功 = 目标格 tick 开始无机器人，或占位
-        // 者的候选移动成功离开。二元交换是长度 2 的依赖环 → CHAIN_BLOCKED；
-        // 长度 ≥3 的环允许。迭代传播失败直到不动点（候选失败不递补）。
+        // 者的候选移动成功离开。迭代传播失败直到不动点（候选失败不递补）。
         let mut move_ok: BTreeMap<Id, bool> =
             move_winners.iter().map(|m| (m.robot, true)).collect();
+        // 二元交换先判负（长度 2 的依赖环 → CHAIN_BLOCKED；长度 ≥3 的环允许），
+        // 再进入不动点迭代——交换失败沿链统一传播，正确性不依赖落点竞争
+        // 排他性的非局部论证。不动点初值全 true 时互相依赖不会自行传播，
+        // 故必须在迭代前显式判负。
+        for i in 0..move_winners.len() {
+            for j in (i + 1)..move_winners.len() {
+                let (a, b) = (&move_winners[i], &move_winners[j]);
+                if a.from == b.to && b.from == a.to {
+                    move_ok.insert(a.robot, false);
+                    move_ok.insert(b.robot, false);
+                }
+            }
+        }
         loop {
             let mut changed = false;
             for m in &move_winners {
@@ -1208,16 +1236,6 @@ impl World {
             }
             if !changed {
                 break;
-            }
-        }
-        // 二元交换显式判负：不动点初值全 true 时互相依赖不会自行传播。
-        for i in 0..move_winners.len() {
-            for j in (i + 1)..move_winners.len() {
-                let (a, b) = (&move_winners[i], &move_winners[j]);
-                if a.from == b.to && b.from == a.to {
-                    move_ok.insert(a.robot, false);
-                    move_ok.insert(b.robot, false);
-                }
             }
         }
         for m in &move_winners {
@@ -1588,7 +1606,10 @@ impl World {
     }
 
     /// 结算后收尾（阶段 5 最小版）：tick +1。计息 / 渲染快照不在 B1。
+    /// 正常时序为 settle → end_tick；若跳过结算直接推进，防御性丢弃未结算
+    /// 意图，防止陈旧意图在后续 tick 照常执行（公开 API 脚枪加固）。
     pub fn end_tick(&mut self) {
+        self.intents.clear();
         self.tick += 1;
     }
 
@@ -1609,6 +1630,9 @@ impl World {
         mix(self.debt_milli as u64, &mut h);
         mix(self.next_id, &mut h);
         mix(self.seed, &mut h);
+        // 地图维度影响出界判定，是行为字段（契约：tick 边界调用）。
+        mix(self.map_w as u64, &mut h);
+        mix(self.map_h as u64, &mut h);
         for w in self.rng_port.state_words() {
             mix(w, &mut h);
         }
@@ -2156,5 +2180,79 @@ mod tests {
         assert_eq!(w.gold_milli, gold + PRICE_SHELF / 2);
         assert_eq!(w.manage_destroy(999).0, codes::NO_SUCH_OBJECT);
         assert_eq!(w.manage_destroy(1).0, codes::OK); // 空载机器人可毁
+    }
+
+    // ------------------------------------------------------------------
+    // code review 加固回归（P1/P2 修复锁定）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn end_tick_drops_stale_intents() {
+        // 跳过 settle 直接 end_tick：陈旧意图不跨 tick 执行、不锁死行动机会。
+        let mut w = demo_world();
+        assert_eq!(w.accept_move(1, 1, 0), codes::OK); // EAST
+        w.end_tick();
+        assert_eq!(w.accept_move(1, 0, 1), codes::OK); // SOUTH 未被 ALREADY_ACTED 挡
+        let res = w.settle();
+        assert_eq!(res[&1].code, codes::OK);
+        assert_eq!(w.robots[&1].pos, Position::new(1, 2)); // 执行 SOUTH，EAST 未复活
+    }
+
+    #[test]
+    fn late_boundary_event_still_arrives() {
+        // 跳过一次 boundary_events 后，迟到事件补发、装卸口不悬挂。
+        let mut w = World::new_empty(10, 10, 1_000_000);
+        let port = w.add_port(Position::new(0, 5));
+        let o = w.add_listing(OrderSide::Sell, "battery", 1, 5000);
+        w.manage_take(o);
+        w.end_tick();
+        w.end_tick(); // 跳过 tick 1 的边界处理
+        w.boundary_events(); // tick 2 补发
+        let vid = w.ports[&port].docked_vehicle;
+        assert!(vid.is_some(), "迟到到场事件应补发");
+        assert_eq!(w.my_orders[&o].vehicle, vid);
+    }
+
+    #[test]
+    fn swap_pair_with_follower_both_id_orders() {
+        // 交换对 A↔B 与跟进 C（目标 = A 原格）：交换判负在不动点前完成，
+        // 失败沿链传播。两种 id 次序的结局都必须确定。
+        //
+        // C id 最小：C 赢 (1,1) 落点候选，B 出局 CELL_CONTESTED → 交换配对
+        // 消失；A 的目标 (2,1) 仍被 B 占据且 B 不离开 → A CHAIN_BLOCKED；
+        // C 依赖 A 离开 → 链传播同样失败。
+        {
+            let mut w = World::new_empty(10, 10, 0);
+            let c = w.add_robot(Position::new(0, 1)); // id 最小，向东进 (1,1)
+            let a = w.add_robot(Position::new(1, 1)); // 向东
+            let b = w.add_robot(Position::new(2, 1)); // 向西（与 A 交换）
+            assert_eq!(w.accept_move(a, 1, 0), codes::OK);
+            assert_eq!(w.accept_move(b, -1, 0), codes::OK);
+            assert_eq!(w.accept_move(c, 1, 0), codes::OK);
+            let res = w.settle();
+            assert_eq!(res[&c].code, codes::CHAIN_BLOCKED);
+            assert_eq!(res[&a].code, codes::CHAIN_BLOCKED);
+            assert_eq!(res[&b].code, codes::CELL_CONTESTED);
+            assert_eq!(w.robots[&a].pos, Position::new(1, 1));
+            assert_eq!(w.robots[&b].pos, Position::new(2, 1));
+            assert_eq!(w.robots[&c].pos, Position::new(0, 1));
+        }
+        // C id 最大：B 赢 (1,1) 候选 → 交换判负传播，C 落点竞争出局。
+        {
+            let mut w = World::new_empty(10, 10, 0);
+            let a = w.add_robot(Position::new(1, 1));
+            let b = w.add_robot(Position::new(2, 1));
+            let c = w.add_robot(Position::new(0, 1)); // id 最大
+            assert_eq!(w.accept_move(a, 1, 0), codes::OK);
+            assert_eq!(w.accept_move(b, -1, 0), codes::OK);
+            assert_eq!(w.accept_move(c, 1, 0), codes::OK);
+            let res = w.settle();
+            assert_eq!(res[&a].code, codes::CHAIN_BLOCKED);
+            assert_eq!(res[&b].code, codes::CHAIN_BLOCKED);
+            assert_eq!(res[&c].code, codes::CELL_CONTESTED);
+            assert_eq!(w.robots[&a].pos, Position::new(1, 1));
+            assert_eq!(w.robots[&b].pos, Position::new(2, 1));
+            assert_eq!(w.robots[&c].pos, Position::new(0, 1));
+        }
     }
 }

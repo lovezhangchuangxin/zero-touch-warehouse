@@ -34,3 +34,8 @@ cargo test -p ztw-runtime --test a0_measure -- --nocapture   # 量测（写入 r
 - 快速引擎结论（中断不可捕获、OOM 可捕获等）见 `records/a0-engine-findings.md`。
 - 伪造 InternalError 可触发环境重建（误用自伤，非安全边界）。
 - 平台：当前仅 macOS arm64 实测；Windows 构建冒烟属原型 D。
+- B1 code review 遗留技术债（低危，后续随相关里程碑处理）：take-from-robot
+  结算草稿不更新被动方 carry（transferred 封锁使其当前无害）；挂单 qty 无
+  上限校验（构造场景限定）；退款加法未统一 saturating；JS pick/drop 缺参
+  静默视为 (0,0)；销毁已预留装卸口复用 HAS_VEHICLE 码；满电充电返回 OK
+  且增益 0；世界不变量断言器不校验悬挂引用（docked_vehicle 等）。

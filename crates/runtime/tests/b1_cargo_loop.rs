@@ -56,6 +56,7 @@ fn accepted_take_survives_host_termination() {
     // 世界预先推进到车辆到场（等价于上一阶段已完成接单）。
     let mut w = loop_world();
     let sell = w.listings.keys().next().copied().unwrap();
+    assert_eq!(w.listings[&sell].side, OrderSide::Sell); // 不依赖 add_listing 的 id 序
     let (code, _) = w.manage_take(sell);
     assert_eq!(code, ztw_model::codes::OK);
     w.end_tick();
@@ -111,4 +112,54 @@ function loop() {
         "上一 tick 的 take 结算结果应可见：{}",
         s.logs.back().unwrap().1
     );
+}
+
+#[test]
+fn cancel_and_destroy_visible_same_tick_via_delta() {
+    // cancel / destroy 的镜像增量同 tick 可见（docs/architecture/03）：
+    // my_orders、gold、shelves 在调用后的同 tick 查询立即反映。
+    let mut w = World::new_empty(12, 8, 200_000);
+    w.add_robot(Position::new(1, 1));
+    w.add_shelf(Position::new(3, 1));
+    w.add_port(Position::new(0, 4));
+    w.add_listing(OrderSide::Sell, "battery", 1, 5_000);
+    let mut s = Session::new(SessionConfig::new(host_bin()), w);
+    let code = r#"
+function loop() {
+  if (Game.tick === 0) {
+    const o = Game.market.sell_orders()[0];
+    Game.log("take", Game.market.take(o.id));
+    Game.log("after-take", Game.my_orders().length, Game.gold);
+    Game.log("cancel", Game.market.cancel(o.id));
+    Game.log("after-cancel", Game.my_orders().length, Game.gold);
+  } else if (Game.tick === 1) {
+    const sh = Game.shelves()[0];
+    Game.log("destroy", Game.destroy(sh));
+    Game.log("after-destroy", Game.shelves().length, Game.gold);
+  }
+}
+"#;
+    assert!(s.load_code(code).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+    // 接单即付 5 → 195；取消退 4.5（手续费 0.5）→ 199.5。
+    let logs: Vec<String> = s.logs.iter().map(|(_, l)| l.clone()).collect();
+    assert!(
+        logs.iter().any(|l| l == "after-take 1 195"),
+        "take 增量同 tick 可见：{logs:?}"
+    );
+    assert!(
+        logs.iter().any(|l| l == "after-cancel 0 199.5"),
+        "cancel 增量同 tick 可见：{logs:?}"
+    );
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+    let logs: Vec<String> = s.logs.iter().map(|(_, l)| l.clone()).collect();
+    // 销毁货架退款 87.5 → 287。
+    assert!(
+        logs.iter().any(|l| l == "after-destroy 0 287"),
+        "destroy 增量同 tick 可见：{logs:?}"
+    );
+    assert_eq!(s.world.shelves.len(), 0);
+    assert_eq!(s.world.gold_milli, 287_000);
 }

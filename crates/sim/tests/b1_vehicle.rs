@@ -207,7 +207,7 @@ fn restore_out_vehicle_by_taking_back_then_cancel() {
 
 #[test]
 fn boxes_on_vehicle_cannot_be_destroyed() {
-    // 买入的货物在卸离车辆前不可销毁。
+    // 买入的货物在卸离购入（入库）车辆前不可销毁。
     let mut w = World::new_empty(10, 10, 1_000_000);
     let (_o, vid, _port) = docked_vehicle(&mut w, OrderSide::Sell, 1, 5000);
     let bx = w.vehicles[&vid].box_ids[0];
@@ -220,6 +220,27 @@ fn boxes_on_vehicle_cannot_be_destroyed() {
     assert_eq!(w.manage_destroy(bx).0, codes::OK);
     assert!(!w.ground_boxes.contains_key(&bx));
     assert_eq!(w.robots[&r].carry, None);
+    check_invariants(&w);
+}
+
+#[test]
+fn out_vehicle_boxes_can_be_destroyed() {
+    // 出库车上的箱子是玩家自有履约货：销毁后仍可补同类型箱完成订单，
+    // 允许止损（ON_VEHICLE 仅限购入车，docs/game-design/04）。
+    let mut w = World::new_empty(10, 10, 1_000_000);
+    let (o, vid, _port) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
+    let r = w.add_robot(Position::new(1, 5));
+    let b1 = w.add_ground_box("battery", Position::new(1, 4));
+    assert_eq!(w.accept_pick(r, 1, 4), codes::OK);
+    w.settle();
+    w.end_tick();
+    assert_eq!(w.accept_give(r, vid, Some(b1)), codes::OK);
+    w.settle();
+    assert_eq!(w.vehicles[&vid].box_ids, vec![b1]);
+    // 车上销毁放行，车辆引用同步清理。
+    assert_eq!(w.manage_destroy(b1).0, codes::OK);
+    assert_eq!(w.vehicles[&vid].box_ids.len(), 0);
+    assert!(w.my_orders.contains_key(&o), "订单仍可履约");
     check_invariants(&w);
 }
 
