@@ -5,6 +5,7 @@ members = [
     "crates/sim",
     "crates/api",
     "crates/runtime",
+    "crates/desktop",
 ]
 
 # 依赖里的 C 代码（quickjs-ng）即使在本仓库 debug 构建下也要开优化：
