@@ -4,6 +4,8 @@
 
 已定：仅支持 Windows 与 macOS，不支持 Linux（含 Steam Deck）。
 
+排除依据是首期测试矩阵与 Python 分发成本，不是技术不可行（Rust / Tauri / python-build-standalone 均有 Linux 发行物）；编程游戏受众与 Linux / Steam Deck 重叠偏高，该排除按发行数据重评：愿望单或试玩反馈中 Linux 占比显著、或双平台发布链路一次走通且有余量时，显式评审是否追加。
+
 | 平台 | 支持范围 |
 | --- | --- |
 | Windows | Windows 10（64 位）及以上与 Windows 11；x86_64 |
