@@ -248,6 +248,12 @@ fn full_loop_completes_orders_with_diag_events() {
         std::thread::sleep(Duration::from_millis(20));
     }
     h.ctrl(Ctrl::Pause).expect("cmd");
+    // 暂停生效后再采样：世界线程每 tick 先推诊断环、后序列化整帧存
+    // latest——从环里看到第 6 个完成事件时，付款 tick 的帧可能仍在序列
+    // 化，抢读 latest 会恰好差最后一笔收款（Windows CI 抖动实录：六事件
+    // 齐但金币少一笔买单收入）。暂停命令自身触发发布，等 running=false
+    // 即可保证 latest 已含最终 tick。
+    wait_status(&h, |s| !s.running, "闭环后暂停生效");
     assert!(manage >= 6, "六次接单事件应被采集：{manage}");
     assert!(settle_ok > 0, "成功结算事件应被采集：{settle_ok}");
     let snap = snapshot(&h);

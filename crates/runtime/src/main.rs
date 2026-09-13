@@ -174,7 +174,7 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
 // ---------------------------------------------------------------------------
 
 struct Env {
-    _rt: Runtime,
+    rt: Runtime,
     ctx: Context,
 }
 
@@ -230,7 +230,7 @@ fn build_env(
             .expect("注册 __nowUs");
         cx.eval::<Value, _>(BOOTSTRAP_JS).expect("bootstrap 求值");
     });
-    Env { _rt: rt, ctx }
+    Env { rt, ctx }
 }
 
 struct FaultOut {
@@ -240,8 +240,17 @@ struct FaultOut {
     stack: String,
 }
 
-fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, _heap_limit: usize) -> FaultOut {
-    env.ctx.with(|cx| classify_fault(&cx, interrupt_fired))
+fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usize) -> FaultOut {
+    // 堆耗尽时连读取异常对象属性都可能失败（getter / 字符串分配），
+    // classify_fault 的 .ok().unwrap_or_default() 会把 InternalError 读成
+    // 全空形态，误判 SCRIPT_ERROR "(无消息)"（mac CI 两次抖动实录：无限
+    // 分类的故障记录 name/message 双空）。读异常前临时解除堆上限：
+    // pending exception 本身存活于堆上、证据不损；读毕恢复原限，脚本级
+    // 故障路径的后续语义不变。
+    env.rt.set_memory_limit(usize::MAX);
+    let out = env.ctx.with(|cx| classify_fault(&cx, interrupt_fired));
+    env.rt.set_memory_limit(heap_limit);
+    out
 }
 
 fn classify_fault(cx: &Ctx, interrupt_fired: &AtomicBool) -> FaultOut {
@@ -571,7 +580,7 @@ fn drain_microtasks(
     heap_limit: usize,
 ) -> Result<(), FaultOut> {
     loop {
-        match env._rt.execute_pending_job() {
+        match env.rt.execute_pending_job() {
             Ok(true) => continue,
             Ok(false) => return Ok(()),
             Err(_) => {
