@@ -56,9 +56,14 @@ pub struct LimitAllocator {
     state: AllocState,
 }
 
+/// 舍入到 ALLOC_ALIGN；请求本身贴近 usize::MAX 时圆整会溢出，返回 None
+/// 拒绝分配（quickjs 侧本就传不进这种尺寸，纯防御，比上游多一步）。
 #[inline]
-fn round_size(size: usize) -> usize {
-    size.div_ceil(ALLOC_ALIGN) * ALLOC_ALIGN
+fn round_size(size: usize) -> Option<usize> {
+    if size > usize::MAX - (ALLOC_ALIGN - 1) {
+        return None;
+    }
+    Some(size.div_ceil(ALLOC_ALIGN) * ALLOC_ALIGN)
 }
 
 impl LimitAllocator {
@@ -98,7 +103,9 @@ unsafe impl Allocator for LimitAllocator {
         let Some(user) = count.checked_mul(size) else {
             return ptr::null_mut();
         };
-        let user = round_size(user);
+        let Some(user) = round_size(user) else {
+            return ptr::null_mut();
+        };
         let Some(alloc_size) = HEADER_SIZE.checked_add(user) else {
             return ptr::null_mut();
         };
@@ -121,7 +128,9 @@ unsafe impl Allocator for LimitAllocator {
     }
 
     fn alloc(&mut self, size: usize) -> *mut u8 {
-        let user = round_size(size);
+        let Some(user) = round_size(size) else {
+            return ptr::null_mut();
+        };
         let Some(alloc_size) = HEADER_SIZE.checked_add(user) else {
             return ptr::null_mut();
         };
@@ -159,7 +168,9 @@ unsafe impl Allocator for LimitAllocator {
     }
 
     unsafe fn realloc(&mut self, ptr: *mut u8, new_size: usize) -> *mut u8 {
-        let new_user = round_size(new_size);
+        let Some(new_user) = round_size(new_size) else {
+            return ptr::null_mut();
+        };
         let new_alloc = HEADER_SIZE + new_user;
         unsafe {
             let base = ptr.sub(HEADER_SIZE);

@@ -250,6 +250,9 @@ struct FaultOut {
     code: String,
     message: String,
     stack: String,
+    /// 全空形态标记：pending exception 未能物化（name/message/stack 全
+    /// 空）。分类互证据此判定，不匹配展示文案。
+    bare: bool,
 }
 
 fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usize) -> FaultOut {
@@ -258,7 +261,13 @@ fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usiz
     // 堆极限压住错误对象自身构造时返回裸 JS_EXCEPTION，mac CI 实录）与
     // 分配器的限额拒绝标志互证：标志由分配器在拒绝那一刻置位，不随
     // 异常展开释放堆而失效——确定性判据，不依赖消息文本与事后读数。
-    if out.class == "script" && out.code == "SCRIPT_ERROR" && out.message == "(无消息)" {
+    //
+    // limit_hit 是粘性标志（随执行复位），且 quickjs 的 OOM InternalError
+    // 可被玩家 try/catch 吞掉——捕获后 throw undefined 也会落进本分支判
+    // 环境级。这在既定教义内（限额确实被命中过，环境重建无损，属 OOM
+    // 自伤可接受一类）；文案因此只陈述"执行中发生过拒绝"，不与分类时刻
+    // 的总额数字相互矛盾（展开后堆已释放）。
+    if out.bare {
         let hit = env.alloc_state.limit_hit.load(Ordering::SeqCst);
         let total = env.alloc_state.total.load(Ordering::SeqCst);
         if hit {
@@ -266,9 +275,10 @@ fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usiz
                 class: "environment",
                 code: "MEMORY_LIMIT".into(),
                 message: format!(
-                    "JS 内存超限（分配器拒绝分配，总额 {total}/上限 {heap_limit} 字节）"
+                    "JS 内存超限（本次执行中发生过限额拒绝；当前总额 {total}/上限 {heap_limit}，异常展开后可能已释放）"
                 ),
                 stack: out.stack,
+                bare: false,
             };
         }
         out.message = format!("(无消息；分配器总额 {total}/{heap_limit}，无限额拒绝记录)");
@@ -276,8 +286,10 @@ fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usiz
     out
 }
 
-/// rquickjs 调用失败按变体分流：`Allocation` 是绑定层自身分配失败的
-/// 无歧义信号，直接判环境级 OOM；其余（JS 异常等）走常规分类。
+/// rquickjs 调用失败按变体分流。`Allocation` 变体在 rquickjs 0.13 中
+/// 仅由 Runtime/Context 构造路径产生（本宿主对构造失败直接 expect），
+/// 运行期 eval/call 失败恒为 `Error::Exception`——本分支实际不可达，
+/// 作为对未来 rquickjs 版本把分配失败透传到调用面的防御保留。
 fn classify_call_err(
     env: &Env,
     interrupt_fired: &AtomicBool,
@@ -290,6 +302,7 @@ fn classify_call_err(
             code: "MEMORY_LIMIT".into(),
             message: "JS 内存超限（宿主绑定层分配失败）".into(),
             stack: String::new(),
+            bare: false,
         };
     }
     classify_exec_fault(env, interrupt_fired, heap_limit)
@@ -318,6 +331,7 @@ fn classify_fault(cx: &Ctx, interrupt_fired: &AtomicBool) -> FaultOut {
             code: "INTERRUPTED".into(),
             message: "执行超预算，运行时内中断生效".into(),
             stack,
+            bare: false,
         };
     }
     // OOM 判定信任引擎抛出的 InternalError：异常展开后 GC 往往已释放堆，
@@ -342,12 +356,16 @@ fn classify_fault(cx: &Ctx, interrupt_fired: &AtomicBool) -> FaultOut {
                 format!("JS 内存超限：{message}")
             },
             stack,
+            bare: false,
         };
     }
     let code = match name.as_str() {
         "" => "SCRIPT_ERROR".to_string(),
         other => other.to_string(),
     };
+    // pending exception 为 undefined / 空对象时三字段全空：异常未能物化
+    // 的形态标记，供 classify_exec_fault 与限额标志互证。
+    let bare = name.is_empty() && message.is_empty() && stack.is_empty();
     FaultOut {
         class: "script",
         code,
@@ -357,6 +375,7 @@ fn classify_fault(cx: &Ctx, interrupt_fired: &AtomicBool) -> FaultOut {
             message
         },
         stack,
+        bare,
     }
 }
 
@@ -373,6 +392,14 @@ fn main() {
             "--frame-limit" => frame_limit = val.parse().unwrap_or(frame_limit),
             _ => {}
         }
+    }
+    // 旧 quickjs 语义 limit=0 表示不限；分配器语义 0 = 拒绝一切分配，
+    // 会让 Runtime 构造直接 panic——显式传 0 时以可读错误退出。
+    if heap_limit == 0 {
+        eprintln!(
+            "ztw-host: --heap-limit 0 无效（分配器语义下将拒绝一切分配；省略该参数使用默认 256MiB）"
+        );
+        std::process::exit(2);
     }
     let faults = parse_faults(std::env::var("ZTW_FAULT").ok());
     HOST.with(|h| {
@@ -569,6 +596,7 @@ fn run_player(
                 code: "ENTRY_MISSING".into(),
                 message: "入口 loop 不再是函数（被玩家代码覆写？）".into(),
                 stack: String::new(),
+                bare: false,
             });
         }
         match env.ctx.with(|cx| {

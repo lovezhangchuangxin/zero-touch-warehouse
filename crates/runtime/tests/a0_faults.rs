@@ -198,7 +198,7 @@ fn oom_triggers_env_fault_then_memory_accessible() {
     // INTERRUPTED——quickjs 在堆增长途中反复 mark-sweep，总 GC 开销随
     // 堆上限平方增长，小核 runner 并行跑进程级测试时 10s 内到不了 64MiB。
     // 修法三管齐下：分配块加大 10 倍（GC 轮次骤减）、堆 32MiB（平方项
-    // 减半再减半）、预算 30s（余量 12 倍于本地实测 ~0.2s）。
+    // 减半再减半）、预算 30s（余量百倍于本地实测 ~0.2s）。
     //
     // 终局（根因）：预算竞态修掉后 mac CI 五连挂于另一形态——quickjs 的
     // JS_ThrowOutOfMemory 重入保护在堆极限压住错误对象自身构造时返回
