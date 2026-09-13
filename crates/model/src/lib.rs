@@ -124,7 +124,7 @@ pub struct Robot {
     pub pos: Position,
     pub energy: u32,
     pub energy_max: u32,
-    /// 携带货物 id；A0 机器人无取放动作，恒为 None。
+    /// 携带货物 id；首期为单箱携带（None 即空载）。
     pub carry: Option<Id>,
 }
 

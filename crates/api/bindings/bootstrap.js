@@ -138,12 +138,44 @@
         return;
       }
       if (typeof d.gold_milli === "string") M.gold_milli = d.gold_milli;
-      const gone = d.remove_listing;
-      if (typeof gone === "number") {
-        M.sell_orders = (M.sell_orders || []).filter(function (o) { return o.id !== gone; });
-        M.buy_orders = (M.buy_orders || []).filter(function (o) { return o.id !== gone; });
-        const already = (M.my_orders || []).some(function (o) { return o.id === d.add_my_order.id; });
-        if (!already) M.my_orders.push(d.add_my_order);
+      if (d.kind === "take") {
+        const gone = d.remove_listing;
+        if (typeof gone === "number") {
+          M.sell_orders = (M.sell_orders || []).filter(function (o) { return o.id !== gone; });
+          M.buy_orders = (M.buy_orders || []).filter(function (o) { return o.id !== gone; });
+          const already = (M.my_orders || []).some(function (o) { return o.id === d.add_my_order.id; });
+          if (!already) M.my_orders.push(d.add_my_order);
+        }
+      } else if (d.kind === "cancel") {
+        if (typeof d.debt_milli === "string") M.debt_milli = d.debt_milli;
+        M.my_orders = (M.my_orders || []).filter(function (o) { return o.id !== d.remove_my_order; });
+        if (typeof d.remove_vehicle === "number") {
+          M.vehicles = (M.vehicles || []).filter(function (v) { return v.id !== d.remove_vehicle; });
+        }
+        if (d.update_port) {
+          const port = (M.ports || []).find(function (p) { return p.id === d.update_port.id; });
+          if (port) port.docked_vehicle = d.update_port.docked_vehicle;
+        }
+      } else if (d.kind === "destroy") {
+        if (d.rebuild) {
+          stale = true; // 嵌套视图受影响（如销毁被携带货物），整体重建
+          return;
+        }
+        const list = {
+          robot: "robots", shelf: "shelves", charger: "chargers",
+          port: "ports", box: "ground_boxes",
+        }[d.object];
+        if (!list) {
+          stale = true;
+          return;
+        }
+        M[list] = (M[list] || []).filter(function (o) { return o.id !== d.id; });
+        if (Array.isArray(d.unblock) && d.unblock.length) {
+          const drop = new Set(d.unblock.map(function (c) { return c[0] + "," + c[1]; }));
+          M.blocked = (M.blocked || []).filter(function (c) { return !drop.has(c[0] + "," + c[1]); });
+        }
+      } else {
+        stale = true; // 未知增量种类不猜测
       }
     } catch (e) {
       stale = true;
@@ -195,7 +227,44 @@
       const res = rt("robot.move", { robot_id: r.id, dx: p[0], dy: p[1] });
       return res.code;
     };
+    view.charge = function () {
+      const res = rt("robot.charge", { robot_id: r.id });
+      return res.code;
+    };
+    view.take = function (target, boxId) {
+      const t = idOf(target);
+      const b = idOf(boxId);
+      if (t === null || b === null) return E.INVALID_ARGUMENT;
+      const res = rt("robot.take", { robot_id: r.id, target_id: t, box_id: b });
+      return res.code;
+    };
+    view.give = function (target, boxId) {
+      const t = idOf(target);
+      if (t === null) return E.INVALID_ARGUMENT;
+      const payload = { robot_id: r.id, target_id: t };
+      const b = idOf(boxId);
+      if (b !== null) payload.box_id = b; // 缺省 = 当前携带物
+      const res = rt("robot.give", payload);
+      return res.code;
+    };
+    view.pick = function (x, y) {
+      const res = rt("robot.pick", { robot_id: r.id, x: x | 0, y: y | 0 });
+      return res.code;
+    };
+    view.drop = function (x, y, boxId) {
+      const payload = { robot_id: r.id, x: x | 0, y: y | 0 };
+      const b = idOf(boxId);
+      if (b !== null) payload.box_id = b; // 缺省 = 当前携带物
+      const res = rt("robot.drop", payload);
+      return res.code;
+    };
     return view;
+  }
+  // 目标 / 货物参数接受对象或 id（docs/game-design/08 API 设计）。
+  function idOf(x) {
+    if (x === null || x === undefined) return null;
+    if (typeof x === "number") return x;
+    return typeof x.id === "number" ? x.id : null;
   }
   function isUnitStep(p) {
     const dx = p[0], dy = p[1];
@@ -481,6 +550,18 @@
         if (res.delta) applyDelta(res.delta);
         return res.code;
       },
+      cancel(orderId) {
+        const res = rt("market.cancel", { order_id: Number(orderId) });
+        if (res.delta) applyDelta(res.delta);
+        return res.code;
+      },
+    },
+
+    // 管理操作（即时生效；docs/game-design/08）。购买属后续里程碑。
+    destroy(id) {
+      const res = rt("manage.destroy", { target_id: idOf(id) });
+      if (res.delta) applyDelta(res.delta);
+      return res.code;
     },
 
     log(...args) {

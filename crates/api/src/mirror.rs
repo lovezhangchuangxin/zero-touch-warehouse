@@ -10,7 +10,7 @@
 
 use serde::Serialize;
 use ztw_model::{Id, MilliGold, Order, OrderSide, Position};
-use ztw_sim::{TakeEffect, World};
+use ztw_sim::{CancelEffect, DestroyEffect, DestroyedKind, TakeEffect, World};
 
 fn money(v: MilliGold) -> String {
     v.to_string()
@@ -244,25 +244,91 @@ impl MirrorView {
     }
 }
 
-/// take 的镜像同步增量：宿主按 FIFO 回放到本地镜像。
-/// take 的镜像同步增量。宿主按 FIFO 回放；字段必须与宿主回放逻辑一一对应
-///（docs/architecture/03）。装卸口占用不由增量表达：PortView 不含
-/// reserved_for（docs/game-design/08 字段表），预留期仅一个 tick，
-/// 下一 tick 全量镜像即一致；接单权威以 take 结果码为准。
+/// 管理操作的镜像同步增量：宿主按同一 FIFO 回放到本地镜像，字段与宿主
+/// 回放逻辑一一对应（docs/architecture/03）。装卸口预留不进增量：
+/// PortView 不含 reserved_for（docs/game-design/08 字段表），预留期仅一个
+/// tick，下一 tick 全量镜像即一致；接单权威以 take 结果码为准。
 #[derive(Serialize, Debug, Clone)]
-pub struct MirrorDelta {
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MirrorDelta {
+    Take(TakeDelta),
+    Cancel(CancelDelta),
+    Destroy(DestroyDelta),
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct TakeDelta {
     pub gold_milli: String,
     pub remove_listing: Id,
     pub add_my_order: OrderView,
 }
 
+#[derive(Serialize, Debug, Clone)]
+pub struct CancelDelta {
+    pub gold_milli: String,
+    pub debt_milli: String,
+    pub remove_my_order: Id,
+    pub remove_vehicle: Option<Id>,
+    pub update_port: Option<PortPatch>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct PortPatch {
+    pub id: Id,
+    pub docked_vehicle: Option<Id>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct DestroyDelta {
+    /// 对象类别：robot / shelf / charger / port / box。
+    pub object: String,
+    pub id: Id,
+    pub gold_milli: String,
+    /// 释放的静态障碍格（blocked 数组补丁，保同 tick 可见）。
+    pub unblock: Vec<(i32, i32)>,
+    /// 嵌套视图受影响（销毁被携带 / 在架货物）→ 增量不猜测，宿主整体重建。
+    pub rebuild: bool,
+}
+
 impl MirrorDelta {
     pub fn from_take(world_after: &World, eff: &TakeEffect) -> MirrorDelta {
-        MirrorDelta {
+        MirrorDelta::Take(TakeDelta {
             gold_milli: money(world_after.gold_milli),
             remove_listing: eff.order_id,
             add_my_order: order_view(&eff.order),
-        }
+        })
+    }
+
+    pub fn from_cancel(world_after: &World, eff: &CancelEffect) -> MirrorDelta {
+        MirrorDelta::Cancel(CancelDelta {
+            gold_milli: money(world_after.gold_milli),
+            debt_milli: money(world_after.debt_milli),
+            remove_my_order: eff.order_id,
+            remove_vehicle: eff.vehicle_id,
+            update_port: eff.port_id.map(|id| PortPatch {
+                id,
+                docked_vehicle: world_after.ports.get(&id).and_then(|p| p.docked_vehicle),
+            }),
+        })
+    }
+
+    pub fn from_destroy(world_after: &World, eff: &DestroyEffect) -> MirrorDelta {
+        let object = match eff.kind {
+            DestroyedKind::Robot => "robot",
+            DestroyedKind::Shelf => "shelf",
+            DestroyedKind::Charger => "charger",
+            DestroyedKind::Port => "port",
+            DestroyedKind::GroundBox => "box",
+        };
+        MirrorDelta::Destroy(DestroyDelta {
+            object: object.to_string(),
+            id: eff.target_id,
+            gold_milli: money(world_after.gold_milli),
+            unblock: eff.freed_cell.map(|p| vec![(p.x, p.y)]).unwrap_or_default(),
+            // 无地面格的货物 = 被携带 / 在架，影响嵌套视图（robot.carry /
+            // shelf.boxes），增量无法补丁，置 rebuild 走整体重建。
+            rebuild: matches!(eff.kind, DestroyedKind::GroundBox) && eff.freed_cell.is_none(),
+        })
     }
 
     pub fn to_json(&self) -> String {
@@ -270,16 +336,16 @@ impl MirrorDelta {
     }
 }
 
-/// 世界修订号：A0 以 tick 与 take 计数合成（镜像内容纯函数仍成立）。
+/// 世界修订号：以 tick 与管理操作计数合成（镜像内容纯函数仍成立）。
 #[derive(Debug, Clone, Default)]
 pub struct WorldRevision {
     pub tick: u64,
-    pub take_count: u64,
+    pub mgmt_count: u64,
 }
 
 impl WorldRevision {
     pub fn get(&self) -> u64 {
-        self.tick.wrapping_mul(1_000_003) ^ self.take_count
+        self.tick.wrapping_mul(1_000_003) ^ self.mgmt_count
     }
 }
 

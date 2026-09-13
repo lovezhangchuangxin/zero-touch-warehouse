@@ -13,6 +13,7 @@ pub fn host_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ztw-host-js")
 }
 
+#[allow(dead_code)] // 各测试二进制独立编译，未用到该助手的套件不告警
 pub fn demo_world() -> World {
     let mut w = World::new_empty(12, 8, 200_000);
     w.add_robot(Position::new(1, 1));

@@ -1049,6 +1049,73 @@ impl Session {
                 let code = self.world.accept_move(robot_id, dx as i32, dy as i32);
                 ok_result(serde_json::json!({ "code": code }))
             }
+            "robot.charge" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let Some(robot_id) = p["robot_id"].as_u64() else {
+                    return err_result("BAD_PAYLOAD", "robot.charge 参数缺失");
+                };
+                let code = self.world.accept_charge(robot_id);
+                ok_result(serde_json::json!({ "code": code }))
+            }
+            "robot.take" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let (Some(robot_id), Some(target_id), Some(box_id)) = (
+                    p["robot_id"].as_u64(),
+                    p["target_id"].as_u64(),
+                    p["box_id"].as_u64(),
+                ) else {
+                    return err_result("BAD_PAYLOAD", "robot.take 参数缺失");
+                };
+                let code = self.world.accept_take(robot_id, target_id, box_id);
+                ok_result(serde_json::json!({ "code": code }))
+            }
+            "robot.give" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let (Some(robot_id), Some(target_id)) =
+                    (p["robot_id"].as_u64(), p["target_id"].as_u64())
+                else {
+                    return err_result("BAD_PAYLOAD", "robot.give 参数缺失");
+                };
+                let box_id = p["box_id"].as_u64(); // 缺省 = 当前携带物
+                let code = self.world.accept_give(robot_id, target_id, box_id);
+                ok_result(serde_json::json!({ "code": code }))
+            }
+            "robot.pick" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let (Some(robot_id), Some(x), Some(y)) =
+                    (p["robot_id"].as_u64(), p["x"].as_i64(), p["y"].as_i64())
+                else {
+                    return err_result("BAD_PAYLOAD", "robot.pick 参数缺失");
+                };
+                let code = self.world.accept_pick(robot_id, x as i32, y as i32);
+                ok_result(serde_json::json!({ "code": code }))
+            }
+            "robot.drop" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let (Some(robot_id), Some(x), Some(y)) =
+                    (p["robot_id"].as_u64(), p["x"].as_i64(), p["y"].as_i64())
+                else {
+                    return err_result("BAD_PAYLOAD", "robot.drop 参数缺失");
+                };
+                let box_id = p["box_id"].as_u64(); // 缺省 = 当前携带物
+                let code = self.world.accept_drop(robot_id, x as i32, y as i32, box_id);
+                ok_result(serde_json::json!({ "code": code }))
+            }
             "market.take" => {
                 let p = parse!();
                 if self.in_init {
@@ -1060,13 +1127,42 @@ impl Session {
                 let (code, eff) = self.world.manage_take(order_id);
                 if code == ztw_model::codes::OK {
                     let eff = eff.expect("OK 必带影响摘要");
-                    self.revision.take_count += 1;
                     let delta = MirrorDelta::from_take(&self.world, &eff);
-                    let delta_json = delta.to_json();
-                    self.stats.delta_bytes.push(delta_json.len());
-                    let delta_val: serde_json::Value =
-                        serde_json::from_str(&delta_json).unwrap_or(serde_json::Value::Null);
-                    ok_result(serde_json::json!({ "code": code, "delta": delta_val }))
+                    self.mgmt_ok(delta)
+                } else {
+                    ok_result(serde_json::json!({ "code": code }))
+                }
+            }
+            "market.cancel" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let Some(order_id) = p["order_id"].as_u64() else {
+                    return err_result("BAD_PAYLOAD", "market.cancel 参数缺失");
+                };
+                let (code, eff) = self.world.manage_cancel(order_id);
+                if code == ztw_model::codes::OK {
+                    let eff = eff.expect("OK 必带影响摘要");
+                    let delta = MirrorDelta::from_cancel(&self.world, &eff);
+                    self.mgmt_ok(delta)
+                } else {
+                    ok_result(serde_json::json!({ "code": code }))
+                }
+            }
+            "manage.destroy" => {
+                let p = parse!();
+                if self.in_init {
+                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                }
+                let Some(target_id) = p["target_id"].as_u64() else {
+                    return err_result("BAD_PAYLOAD", "manage.destroy 参数缺失");
+                };
+                let (code, eff) = self.world.manage_destroy(target_id);
+                if code == ztw_model::codes::OK {
+                    let eff = eff.expect("OK 必带影响摘要");
+                    let delta = MirrorDelta::from_destroy(&self.world, &eff);
+                    self.mgmt_ok(delta)
                 } else {
                     ok_result(serde_json::json!({ "code": code }))
                 }
@@ -1102,6 +1198,17 @@ impl Session {
             _ if op.starts_with("mem.") => self.handle_mem_op(op, payload),
             _ => err_result("UNKNOWN_OP", &format!("未知操作 {op}")),
         }
+    }
+
+    /// 管理操作成功路径的统一回复：递增世界修订号并携带镜像同步增量
+    /// （docs/architecture/03 管理操作当 tick 可见）。
+    fn mgmt_ok(&mut self, delta: MirrorDelta) -> String {
+        self.revision.mgmt_count += 1;
+        let delta_json = delta.to_json();
+        self.stats.delta_bytes.push(delta_json.len());
+        let delta_val: serde_json::Value =
+            serde_json::from_str(&delta_json).unwrap_or(serde_json::Value::Null);
+        ok_result(serde_json::json!({ "code": ztw_model::codes::OK, "delta": delta_val }))
     }
 
     fn handle_mem_op(&mut self, op: &str, payload: &str) -> String {
