@@ -177,7 +177,15 @@ function loop() {
 
 #[test]
 fn oom_triggers_env_fault_then_memory_accessible() {
-    let mut s = session(demo_world());
+    // 专属预算（同 long_uninterruptible 先例）：默认 256MiB 堆 + 200ms tick 预算
+    // 在慢 CI 机器上是竞态——分配速率低时预算中断先于堆上限触发，结局变成
+    // INTERRUPTED（脚本级）。本测试验收的是「无限分配触发资源限制」：
+    // 小堆 + 宽预算保证堆上限确定先到，与机器快慢无关。
+    let mut cfg = SessionConfig::new(host_bin());
+    cfg.heap_limit = 64 * 1024 * 1024;
+    cfg.tick_budget_base_ms = 10_000;
+    cfg.tick_budget_cap_ms = 10_000;
+    let mut s = ztw_api::harness::Session::new(cfg, demo_world());
     assert!(s.load_code(&fixture("oom_alloc.js")).ok);
     let t0 = Instant::now();
     let out = s.tick();
