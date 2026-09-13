@@ -1,5 +1,9 @@
 // 试玩示例脚本（与 records/b2-playthrough.md 记录对应）。
-// demo_one：单机六单全闭环（接卖单→卸车地面暂存→接买单→逐箱交付）。
+// 脚本本体放 demos/ 下的 .js 文件，经 Vite ?raw 内联——同一份文本
+// 既是编辑器示例，也是桌面端集成测试 include_str! 的对象（单一事实源）。
+import demoOne from "./demos/demo_one.js?raw";
+import demoFiveLanes from "./demos/demo_five_lanes.js?raw";
+import demoFiveNaive from "./demos/demo_five_naive.js?raw";
 
 export interface DemoScript {
   id: string;
@@ -8,94 +12,23 @@ export interface DemoScript {
   code: string;
 }
 
-const DEMO_ONE = `
-// 单机全闭环：吃卖单 → 卸车到地面暂存 → 吃买单 → 逐箱交付。
-// 装卸口在西墙，交互站位 = 车辆格东侧一格。
-let phase = "idle";
-
-function standNear(v) {
-  return [v.interact_pos.x + 1, v.interact_pos.y];
-}
-
-function stepToward(r, tx, ty) {
-  const dx = tx - r.pos.x, dy = ty - r.pos.y;
-  const sx = Math.sign(dx), sy = Math.sign(dy);
-  const tries = Math.abs(dx) >= Math.abs(dy) ? [[sx, 0], [0, sy]] : [[0, sy], [sx, 0]];
-  for (const [mx, my] of tries) {
-    if ((mx !== 0 || my !== 0) && r.move([mx, my]) === Game.E.OK) return true;
-  }
-  return false;
-}
-
-// 地面暂存表：[格x, 格y, 站位x, 站位y]；站位行与暂存行分离，互不阻挡。
-const PARK = [
-  [2, 5, 2, 4], [2, 3, 2, 4],
-  [3, 5, 3, 4], [3, 3, 3, 4],
-  [4, 5, 4, 4],
-];
-
-function parkBox(r) {
-  const occ = new Set();
-  for (const b of Game.ground_boxes()) occ.add(b.location.x + "," + b.location.y);
-  for (const [cx, cy, sx, sy] of PARK) {
-    if (occ.has(cx + "," + cy)) continue;
-    if (r.pos.x === sx && r.pos.y === sy) { r.drop(cx, cy); return; }
-    stepToward(r, sx, sy);
-    return;
-  }
-}
-
-function loop() {
-  const r = Game.robots()[0];
-  const vin = Game.vehicles("in")[0];
-  const vout = Game.vehicles("out")[0];
-
-  if (vout) {
-    if (r.carry && r.carry.goods_type !== vout.goods_type) {
-      parkBox(r);
-      return;
-    }
-    if (r.carry) {
-      const [tx, ty] = standNear(vout);
-      if (r.pos.x === tx && r.pos.y === ty) { r.give(vout); return; }
-      if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
-      stepToward(r, tx, ty);
-      return;
-    }
-    const boxes = Game.ground_boxes().filter(function (b) {
-      return b.goods_type === vout.goods_type;
-    });
-    if (!boxes.length) return;
-    const b = boxes[0];
-    const bx = b.location.x, by = b.location.y;
-    if (Math.abs(r.pos.x - bx) + Math.abs(r.pos.y - by) === 1) { r.pick(bx, by); return; }
-    if (r.pos.x > bx && r.move(Game.WEST) === Game.E.OK) return;
-    if (r.pos.y !== by) { stepToward(r, 1, by); return; }
-    if (r.pos.x < bx) r.move(Game.EAST);
-    return;
-  }
-
-  if (vin) {
-    if (r.carry) { parkBox(r); return; }
-    const [tx, ty] = standNear(vin);
-    if (r.pos.x === tx && r.pos.y === ty) { r.take(vin, vin.boxes[0].id); return; }
-    if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
-    stepToward(r, tx, ty);
-    return;
-  }
-
-  const asks = Game.market.sell_orders();
-  if (asks.length) { Game.market.take(asks[0].id); return; }
-  const bids = Game.market.buy_orders();
-  if (bids.length) { Game.market.take(bids[0].id); return; }
-}
-`.trimStart();
-
 export const DEMO_SCRIPTS: DemoScript[] = [
   {
     id: "demo-one",
     name: "单机全闭环",
     desc: "一台机器人跑完六张订单（约 80 tick）",
-    code: DEMO_ONE,
+    code: demoOne,
+  },
+  {
+    id: "demo-five-naive",
+    name: "五机贪心（堵塞）",
+    desc: "五台机器人无分工抢道：看事件面板里的争抢码",
+    code: demoFiveNaive,
+  },
+  {
+    id: "demo-five-lanes",
+    name: "五机分流（对比）",
+    desc: "认领分工 + 专属暂存格，同一地图吞吐显著改善",
+    code: demoFiveLanes,
   },
 ];

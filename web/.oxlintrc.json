@@ -3,7 +3,8 @@
   "ignorePatterns": [
     "**/dist/**",
     "**/node_modules/**",
-    "apps/game/public/sprites/**"
+    "apps/game/public/sprites/**",
+    "apps/game/src/scripts/demos/**"
   ],
   "categories": {
     "correctness": "error"

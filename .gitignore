@@ -1,5 +1,7 @@
 /target
-records/
+# 验收记录入库（b2-playthrough.md）；其余本地草稿仍忽略
+records/*
+!records/b2-playthrough.md
 .DS_Store
 .zcode/
 
