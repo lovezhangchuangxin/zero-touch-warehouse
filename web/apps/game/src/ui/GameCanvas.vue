@@ -1,15 +1,48 @@
 <script setup lang="ts">
-// 画布占位：Pixi 8 渲染在下一提交接入（本组件持有 Pixi Application，
-// 对象不进 Vue 响应式系统，docs/architecture/05）。
+// 画布挂载：Vue 侧只做桥接（挂载/卸载与快照喂入），Pixi 对象与渲染
+// 节奏全部在 render/Stage 内，不进响应式系统（docs/architecture/05）。
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Stage } from "../render/Stage";
 import { store } from "../store";
+
+const el = ref<HTMLDivElement>();
+const ready = ref(false);
+let stage: Stage | null = null;
+
+onMounted(async () => {
+  if (!el.value) {
+    return;
+  }
+  stage = await Stage.create(el.value);
+  stage.setStatic(store.static);
+  if (store.snapshot) {
+    stage.render(store.snapshot, store.selectedRobot);
+  }
+  ready.value = true;
+});
+
+onBeforeUnmount(() => {
+  stage?.destroy();
+  stage = null;
+});
+
+watch(
+  () => store.static,
+  (s) => stage?.setStatic(s),
+);
+watch(
+  () => [store.snapshot, store.selectedRobot] as const,
+  ([s, sel]) => {
+    if (s) {
+      stage?.render(s, sel);
+    }
+  },
+);
 </script>
 
 <template>
-  <div class="canvas">
-    <div v-if="store.snapshot" class="meta mono">
-      {{ store.snapshot.map_w }}×{{ store.snapshot.map_h }} · tick {{ store.snapshot.tick }}
-    </div>
-    <div class="placeholder">Pixi 画布将在下一步接入</div>
+  <div ref="el" class="canvas">
+    <div v-if="!ready" class="loading">加载精灵…</div>
   </div>
 </template>
 
@@ -19,18 +52,14 @@ import { store } from "../store";
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
-  display: grid;
-  place-items: center;
   min-height: 0;
   overflow: hidden;
 }
-.placeholder {
-  color: var(--dim);
-}
-.meta {
+.loading {
   position: absolute;
-  top: 8px;
-  left: 10px;
+  inset: 0;
+  display: grid;
+  place-items: center;
   color: var(--dim);
 }
 </style>
