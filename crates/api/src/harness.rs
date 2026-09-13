@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ztw_model::MemValue;
+use serde::Serialize;
+use ztw_model::{MemValue, OrderSide};
 use ztw_sim::World;
 
 use crate::memory::{MemoryLimits, MemoryTree, NodeKind, ReadResult};
@@ -126,6 +127,69 @@ pub struct InitOutcome {
     pub ok: bool,
     pub fault: Option<FaultRecord>,
     pub has_loop: bool,
+}
+
+// ---------------------------------------------------------------------------
+// 诊断采集口（docs/architecture/02 §状态快照与诊断事件）
+// ---------------------------------------------------------------------------
+
+/// 诊断采集事件：受理失败、管理操作结果与订单完成只在本层可见
+/// （受理码在 handle_op 应答、订单完成发生在 settle 内部），桌面壳的
+/// 世界线程每 tick 排空后并入自己的诊断环形缓冲。
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagTap {
+    pub tick: u64,
+    pub kind: DiagTapKind,
+    /// 来源操作（robot.* / market.* / manage.*；订单完成为 settle.order_done）。
+    pub op: String,
+    pub code: String,
+    /// 机器人 / 订单 / 目标 id。
+    pub subject: Option<ztw_model::Id>,
+    /// 人读摘要（参数、金额、效果）。
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagTapKind {
+    /// 动作 / 管理操作受理失败（含初始化阶段的 INIT_PHASE 拒绝）。
+    AcceptFail,
+    /// 管理操作成功（接单 / 取消 / 销毁的效果摘要）。
+    Manage,
+    /// 结算内车辆离场触发的订单完成与收款。
+    OrderDone,
+}
+
+/// 采集环容量（桌面侧按 tick 排空，256 仅防单 tick 内刷爆）。
+const DIAG_TAP_CAP: usize = 256;
+
+// ---------------------------------------------------------------------------
+// 终止按钮独立控制路径（docs/architecture/03：不排队在 Game 请求之后）
+// ---------------------------------------------------------------------------
+
+/// 宿主进程的外部控制柄：从任意线程直接终止宿主，不经过世界线程的
+/// Game 请求队列。置位 killed 后杀进程，世界线程在消息循环出口按
+/// `killed_by_us` 将故障分类为 `KILLED_BY_MAIN`。
+#[derive(Debug, Clone, Default)]
+pub struct HostControl {
+    child: Option<Arc<Mutex<Child>>>,
+    killed: Arc<AtomicBool>,
+}
+
+impl HostControl {
+    /// 标记为主进程主动终止并杀死宿主（幂等；宿主不在场则仅置位标记，
+    /// 下一次执行的写失败 / EOF 路径据此分类）。
+    pub fn kill(&self) {
+        self.killed.store(true, Ordering::SeqCst);
+        if let Some(child) = &self.child {
+            kill_and_reap(child);
+        }
+    }
+
+    /// 是否已被标记为主进程主动终止。
+    pub fn is_marked(&self) -> bool {
+        self.killed.load(Ordering::SeqCst)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +402,8 @@ pub struct Session {
     killed_by_us: Arc<AtomicBool>,
     /// 最近一次已应答的 Game 操作名（诊断用）。
     last_op: String,
+    /// 诊断采集环（B2 桌面壳排空；docs/architecture/02 §诊断事件）。
+    pub diag: VecDeque<DiagTap>,
 }
 
 impl Session {
@@ -363,6 +429,48 @@ impl Session {
             in_init: false,
             killed_by_us: Arc::new(AtomicBool::new(false)),
             last_op: String::new(),
+            diag: VecDeque::new(),
+        }
+    }
+
+    // -- 对外：诊断采集与控制柄 ----------------------------------------------
+
+    /// 排空诊断采集环（桌面世界线程每 tick 调用）。
+    pub fn take_diag(&mut self) -> Vec<DiagTap> {
+        self.diag.drain(..).collect()
+    }
+
+    /// 当前世界修订号（渲染快照派生用，docs/architecture/02）。
+    pub fn world_revision(&self) -> WorldRevision {
+        self.revision.clone()
+    }
+
+    /// 宿主进程外部控制柄（终止按钮：从任意线程直杀，不经 Game 队列）。
+    pub fn host_control(&self) -> HostControl {
+        HostControl {
+            child: self.host.as_ref().map(|h| h.child.clone()),
+            killed: self.killed_by_us.clone(),
+        }
+    }
+
+    fn diag_push(
+        &mut self,
+        kind: DiagTapKind,
+        op: &str,
+        code: &str,
+        subject: Option<ztw_model::Id>,
+        detail: String,
+    ) {
+        self.diag.push_back(DiagTap {
+            tick: self.world.tick,
+            kind,
+            op: op.to_string(),
+            code: code.to_string(),
+            subject,
+            detail,
+        });
+        while self.diag.len() > DIAG_TAP_CAP {
+            self.diag.pop_front();
         }
     }
 
@@ -525,14 +633,46 @@ impl Session {
             }
         }
         // 阶段 4：统一结算（受理 → 只读求解 → 原子提交）。
+        // 结算前快照已接订单：settle 期间 my_orders 只会因车辆离场完成而
+        // 移除（取消发生在阶段 3 管理操作、有自己的采集），消失者即完成。
+        let pre_orders: Vec<(ztw_model::Id, OrderSide, u32, ztw_model::MilliGold)> = self
+            .world
+            .my_orders
+            .values()
+            .map(|o| (o.id, o.side, o.qty, o.unit_price_milli))
+            .collect();
         let settle_map = self.world.settle();
+        for (order_id, side, qty, unit_price_milli) in pre_orders {
+            if !self.world.my_orders.contains_key(&order_id) {
+                let pay_milli = if side == OrderSide::Buy {
+                    qty as ztw_model::MilliGold * unit_price_milli
+                } else {
+                    0
+                };
+                self.diag_push(
+                    DiagTapKind::OrderDone,
+                    "settle.order_done",
+                    ztw_model::codes::OK,
+                    Some(order_id),
+                    format!(
+                        "订单完成 {}×{} @{} milli，收款 {} milli，余额 {} milli",
+                        side.as_str(),
+                        qty,
+                        unit_price_milli,
+                        pay_milli,
+                        self.world.gold_milli
+                    ),
+                );
+            }
+        }
         let settle: Vec<(ztw_model::Id, String)> = settle_map
             .iter()
             .map(|(id, r)| (*id, r.code.clone()))
             .collect();
-        // 阶段 5：收尾（计息 / 渲染快照不在 A0）。
-        self.revision.tick = self.world.tick;
+        // 阶段 5：收尾（计息 / 渲染快照不在 A0）。修订号的 tick 分量与
+        // 发布后的世界 tick 对齐（B2 快照派生用它区分帧）。
         self.world.end_tick();
+        self.revision.tick = self.world.tick;
         let requests_served = self.stats.last_exec.ipc_count;
         let outcome = match fault {
             None => TickOutcome {
@@ -1026,6 +1166,26 @@ impl Session {
 
     // -- Game 请求处理 -------------------------------------------------------
 
+    /// 初始化阶段禁用动作与管理操作（docs/architecture/03），统一记录诊断。
+    fn reject_init_phase(&mut self, op: &str, subject: Option<ztw_model::Id>) -> String {
+        self.diag_push(
+            DiagTapKind::AcceptFail,
+            op,
+            ztw_model::codes::INIT_PHASE,
+            subject,
+            "初始化阶段禁止动作与管理操作".to_string(),
+        );
+        ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}))
+    }
+
+    /// 动作受理结果记录：受理失败进诊断；成功受理的最终成败由结算事件
+    /// （last_results）承担，不重复记录。
+    fn diag_accept(&mut self, op: &str, code: &str, robot_id: ztw_model::Id, detail: String) {
+        if code != ztw_model::codes::OK {
+            self.diag_push(DiagTapKind::AcceptFail, op, code, Some(robot_id), detail);
+        }
+    }
+
     fn handle_op(&mut self, op: &str, payload: &str) -> String {
         macro_rules! parse {
             () => {
@@ -1039,7 +1199,7 @@ impl Session {
             "robot.move" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("robot.move", p["robot_id"].as_u64());
                 }
                 let (Some(robot_id), Some(dx), Some(dy)) =
                     (p["robot_id"].as_u64(), p["dx"].as_i64(), p["dy"].as_i64())
@@ -1047,23 +1207,25 @@ impl Session {
                     return err_result("BAD_PAYLOAD", "robot.move 参数缺失");
                 };
                 let code = self.world.accept_move(robot_id, dx as i32, dy as i32);
+                self.diag_accept("robot.move", code, robot_id, format!("dx={dx},dy={dy}"));
                 ok_result(serde_json::json!({ "code": code }))
             }
             "robot.charge" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("robot.charge", p["robot_id"].as_u64());
                 }
                 let Some(robot_id) = p["robot_id"].as_u64() else {
                     return err_result("BAD_PAYLOAD", "robot.charge 参数缺失");
                 };
                 let code = self.world.accept_charge(robot_id);
+                self.diag_accept("robot.charge", code, robot_id, String::new());
                 ok_result(serde_json::json!({ "code": code }))
             }
             "robot.take" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("robot.take", p["robot_id"].as_u64());
                 }
                 let (Some(robot_id), Some(target_id), Some(box_id)) = (
                     p["robot_id"].as_u64(),
@@ -1073,12 +1235,13 @@ impl Session {
                     return err_result("BAD_PAYLOAD", "robot.take 参数缺失");
                 };
                 let code = self.world.accept_take(robot_id, target_id, box_id);
+                self.diag_accept("robot.take", code, robot_id, format!("box={box_id}"));
                 ok_result(serde_json::json!({ "code": code }))
             }
             "robot.give" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("robot.give", p["robot_id"].as_u64());
                 }
                 let (Some(robot_id), Some(target_id)) =
                     (p["robot_id"].as_u64(), p["target_id"].as_u64())
@@ -1087,12 +1250,13 @@ impl Session {
                 };
                 let box_id = p["box_id"].as_u64(); // 缺省 = 当前携带物
                 let code = self.world.accept_give(robot_id, target_id, box_id);
+                self.diag_accept("robot.give", code, robot_id, format!("box={box_id:?}"));
                 ok_result(serde_json::json!({ "code": code }))
             }
             "robot.pick" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("robot.pick", p["robot_id"].as_u64());
                 }
                 let (Some(robot_id), Some(x), Some(y)) =
                     (p["robot_id"].as_u64(), p["x"].as_i64(), p["y"].as_i64())
@@ -1100,12 +1264,13 @@ impl Session {
                     return err_result("BAD_PAYLOAD", "robot.pick 参数缺失");
                 };
                 let code = self.world.accept_pick(robot_id, x as i32, y as i32);
+                self.diag_accept("robot.pick", code, robot_id, format!("x={x},y={y}"));
                 ok_result(serde_json::json!({ "code": code }))
             }
             "robot.drop" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("robot.drop", p["robot_id"].as_u64());
                 }
                 let (Some(robot_id), Some(x), Some(y)) =
                     (p["robot_id"].as_u64(), p["x"].as_i64(), p["y"].as_i64())
@@ -1114,12 +1279,13 @@ impl Session {
                 };
                 let box_id = p["box_id"].as_u64(); // 缺省 = 当前携带物
                 let code = self.world.accept_drop(robot_id, x as i32, y as i32, box_id);
+                self.diag_accept("robot.drop", code, robot_id, format!("x={x},y={y}"));
                 ok_result(serde_json::json!({ "code": code }))
             }
             "market.take" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("market.take", p["order_id"].as_u64());
                 }
                 let Some(order_id) = p["order_id"].as_u64() else {
                     return err_result("BAD_PAYLOAD", "market.take 参数缺失");
@@ -1127,16 +1293,38 @@ impl Session {
                 let (code, eff) = self.world.manage_take(order_id);
                 if code == ztw_model::codes::OK {
                     let eff = eff.expect("OK 必带影响摘要");
+                    self.diag_push(
+                        DiagTapKind::Manage,
+                        "market.take",
+                        code,
+                        Some(order_id),
+                        format!(
+                            "接单 {} {}×{} @{} milli，装卸口 #{}，余额 {} milli",
+                            eff.order.side.as_str(),
+                            eff.order.goods_type,
+                            eff.order.qty,
+                            eff.order.unit_price_milli,
+                            eff.port_id,
+                            self.world.gold_milli
+                        ),
+                    );
                     let delta = MirrorDelta::from_take(&self.world, &eff);
                     self.mgmt_ok(delta)
                 } else {
+                    self.diag_push(
+                        DiagTapKind::AcceptFail,
+                        "market.take",
+                        code,
+                        Some(order_id),
+                        String::new(),
+                    );
                     ok_result(serde_json::json!({ "code": code }))
                 }
             }
             "market.cancel" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("market.cancel", p["order_id"].as_u64());
                 }
                 let Some(order_id) = p["order_id"].as_u64() else {
                     return err_result("BAD_PAYLOAD", "market.cancel 参数缺失");
@@ -1144,16 +1332,33 @@ impl Session {
                 let (code, eff) = self.world.manage_cancel(order_id);
                 if code == ztw_model::codes::OK {
                     let eff = eff.expect("OK 必带影响摘要");
+                    self.diag_push(
+                        DiagTapKind::Manage,
+                        "market.cancel",
+                        code,
+                        Some(order_id),
+                        format!(
+                            "取消订单，手续费 {} milli，退款 {} milli，移除车辆 {:?}，释放装卸口 {:?}",
+                            eff.fee_milli, eff.refund_milli, eff.vehicle_id, eff.port_id
+                        ),
+                    );
                     let delta = MirrorDelta::from_cancel(&self.world, &eff);
                     self.mgmt_ok(delta)
                 } else {
+                    self.diag_push(
+                        DiagTapKind::AcceptFail,
+                        "market.cancel",
+                        code,
+                        Some(order_id),
+                        String::new(),
+                    );
                     ok_result(serde_json::json!({ "code": code }))
                 }
             }
             "manage.destroy" => {
                 let p = parse!();
                 if self.in_init {
-                    return ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}));
+                    return self.reject_init_phase("manage.destroy", p["target_id"].as_u64());
                 }
                 let Some(target_id) = p["target_id"].as_u64() else {
                     return err_result("BAD_PAYLOAD", "manage.destroy 参数缺失");
@@ -1161,9 +1366,26 @@ impl Session {
                 let (code, eff) = self.world.manage_destroy(target_id);
                 if code == ztw_model::codes::OK {
                     let eff = eff.expect("OK 必带影响摘要");
+                    self.diag_push(
+                        DiagTapKind::Manage,
+                        "manage.destroy",
+                        code,
+                        Some(target_id),
+                        format!(
+                            "销毁 {:?} #{}，退款 {} milli，释放格 {:?}",
+                            eff.kind, eff.target_id, eff.refund_milli, eff.freed_cell
+                        ),
+                    );
                     let delta = MirrorDelta::from_destroy(&self.world, &eff);
                     self.mgmt_ok(delta)
                 } else {
+                    self.diag_push(
+                        DiagTapKind::AcceptFail,
+                        "manage.destroy",
+                        code,
+                        Some(target_id),
+                        String::new(),
+                    );
                     ok_result(serde_json::json!({ "code": code }))
                 }
             }
