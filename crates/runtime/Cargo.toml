@@ -1,0 +1,17 @@
+[package]
+name = "ztw-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ztw-host-js"
+path = "src/main.rs"
+
+[dependencies]
+ztw-api = { path = "../api" }
+rquickjs = { version = "0.13", features = ["bindgen"] }
+serde_json = "1"
+
+[dev-dependencies]
+ztw-model = { path = "../model" }
+ztw-sim = { path = "../sim" }
