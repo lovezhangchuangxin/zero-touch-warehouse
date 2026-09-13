@@ -1,0 +1,84 @@
+# 双平台 CI 门禁（原型 D「双平台构建冒烟」，docs/architecture/08 里程碑 1）。
+#
+# 平台范围按 docs/architecture/07：仅 Windows（x86_64 MSVC）与 macOS（arm64），不做 Linux。
+# 门禁内容 = A0 全部验收测试 + fmt/clippy 零警告；runner 预装 Rust stable（当前 1.98.1，
+# 含 rustfmt/clippy），与提交时本地验证过的版本一致；镜像 stable 随时间升级，clippy
+# 新增 lint 若致红，按 lint 建议修代码或改用 pinned toolchain，不降 -D warnings。
+#
+# Windows libclang 备选路径（rquickjs 0.13 开着 bindgen feature，bindgen 需要 libclang）：
+#   a) 当前采用：windows-latest（Server 2025）镜像自带 LLVM（含 libclang.dll），直接构建。
+#      若镜像未来移除 LLVM，按下述顺序切换：
+#   b) checkout 前加一步 `choco install llvm -y --no-progress`，并设
+#      LIBCLANG_PATH=C:\Program Files\LLVM\bin；
+#   c) 最后手段：rquickjs-sys 0.13 自带 x86_64-pc-windows-msvc 预生成绑定，可在
+#      crates/runtime/Cargo.toml 用 [target.'cfg(windows)'.dependencies] 关闭 bindgen、
+#      仅 macOS 保留（docs/architecture/08：「失败先解决发行方式，再扩大运行时绑定」）。
+#
+# 时序敏感测试不许删：a0_faults 看门狗时间窗（350ms–5s）、long_sort 初始化预算 8s、
+# a0_measure 整 tick p99 < 50ms 与看门狗 p95 < 4s。CI 慢机器若超时抖动，放宽常数并在
+# records/ 记录理由。a0_measure 会写 records/（已 gitignore，目录不存在时自建，无害）。
+
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  acceptance:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Windows runner 的 git 默认 core.autocrlf=true 会把 LF 检出为 CRLF，
+      # 可能使 cargo fmt --check 与本地（LF）结果不一致；统一按原样检出。
+      - name: Force LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v5
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 环境留痕：验收记录需要 runner 规格与工具链版本（docs/architecture/08）。
+      - name: Environment info
+        run: |
+          uname -a
+          rustc -vV | sed -n '1,2p'
+          clang --version | sed -n '1p' || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ls "/c/Program Files/LLVM/bin" 2>/dev/null | grep -i 'libclang' || echo "LLVM bin 下未见 libclang（若构建报错走备选路径 b/c）"
+          fi
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --timings 产出 per-crate 编译耗时 HTML（含 rquickjs-sys/rquickjs，
+      # 原型 D 要求记录构建耗时），随构建产物上传供 records/ 引用。
+      - name: cargo test
+        run: cargo test --workspace --timings
+
+      - name: Upload cargo timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-${{ runner.os }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
