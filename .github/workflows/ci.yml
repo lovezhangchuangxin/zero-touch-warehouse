@@ -1,9 +1,10 @@
 # 双平台 CI 门禁（原型 D「双平台构建冒烟」，docs/architecture/08 里程碑 1）。
 #
 # 平台范围按 docs/architecture/07：仅 Windows（x86_64 MSVC）与 macOS（arm64），不做 Linux。
-# 门禁内容 = A0 全部验收测试 + fmt/clippy 零警告；runner 预装 Rust stable（当前 1.98.1，
-# 含 rustfmt/clippy），与提交时本地验证过的版本一致；镜像 stable 随时间升级，clippy
-# 新增 lint 若致红，按 lint 建议修代码或改用 pinned toolchain，不降 -D warnings。
+# 门禁内容 = A0 全部验收测试 + fmt/clippy 零警告；B2 起追加 web 前端四项
+# （oxlint / oxfmt --check / typecheck / vite build）。runner 预装 Rust stable（当前 1.98.1，
+# 含 rustfmt/clippy）与 Node 20 + pnpm 10，与提交时本地验证过的版本一致；镜像 stable 随时间
+# 升级，clippy 新增 lint 若致红，按 lint 建议修代码或改用 pinned toolchain，不降 -D warnings。
 #
 # Windows libclang 备选路径（rquickjs 0.13 开着 bindgen feature，bindgen 需要 libclang）：
 #   a) 当前采用：windows-latest（Server 2025）镜像自带 LLVM（含 libclang.dll），直接构建。
@@ -54,16 +55,61 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # web/ pnpm 依赖缓存（store 按 OS 分目录；oxlint/oxfmt/vite 均为平台二进制）。
+      - name: pnpm store cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/pnpm/store
+            ~\AppData\Local\pnpm\store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
       # 环境留痕：验收记录需要 runner 规格与工具链版本（docs/architecture/08）。
       - name: Environment info
         run: |
           uname -a
           rustc -vV | sed -n '1,2p'
           clang --version | sed -n '1p' || true
+          node --version
+          pnpm --version
           if [ "$RUNNER_OS" = "Windows" ]; then
             ls "/c/Program Files/LLVM/bin" 2>/dev/null | grep -i 'libclang' || echo "LLVM bin 下未见 libclang（若构建报错走备选路径 b/c）"
           fi
 
+      # ---- web 前端门禁（B2 起；与 cargo 门禁相互独立，先跑快的）----
+      # corepack 按 package.json 的 packageManager 固定 pnpm 版本
+      # （lockfile 由 pnpm 10 生成，runner 预装版本不可控）。
+      - name: corepack enable
+        run: corepack enable
+
+      - name: web install
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+
+      # 精灵不入库（.gitignore 指向 docs/art/sprites 为单一事实源），构建前同步。
+      - name: web sync sprites
+        run: pnpm sync:sprites
+        working-directory: web
+
+      - name: web lint (oxlint)
+        run: pnpm lint
+        working-directory: web
+
+      - name: web format check (oxfmt)
+        run: pnpm format:check
+        working-directory: web
+
+      - name: web typecheck (vue-tsc)
+        run: pnpm typecheck
+        working-directory: web
+
+      - name: web build (vite)
+        run: pnpm build
+        working-directory: web
+
+      # ---- cargo 门禁（desktop 已入 workspace，test --workspace 即双平台构建覆盖；
+      #      tauri frontendDist 指向仓库内静态 stub，与 vite 产物无关）----
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
