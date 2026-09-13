@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"主窗口默认能力：核心事件与 IPC（B2 无插件权限）。","local":true,"windows":["main"],"permissions":["core:default"]}}

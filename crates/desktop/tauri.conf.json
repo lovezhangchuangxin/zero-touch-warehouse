@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "zero-touch-warehouse",
+  "version": "0.1.0",
+  "identifier": "dev.ztw.b2",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../../web dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm --dir ../../web build",
+    "frontendDist": "../web/apps/game/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "无人仓库 · 原型 B2",
+        "label": "main",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

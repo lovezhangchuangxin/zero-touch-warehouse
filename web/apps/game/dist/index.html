@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>无人仓库（占位页）</title>
+  </head>
+  <body>
+    <!--
+      构建产物占位：保证无 node 环境下 cargo fmt/clippy/test --workspace 可编译
+      Tauri 壳（generate_context 在 release 下内嵌 frontendDist）。真实构建
+      （web/ 下 pnpm build）会整体覆盖本目录；.gitignore 只保留本文件。
+    -->
+    <p>前端尚未构建：在 web/ 目录执行 pnpm install &amp;&amp; pnpm build，或 pnpm app:dev 进入开发模式。</p>
+  </body>
+</html>
