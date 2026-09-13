@@ -1,0 +1,27 @@
+{
+  "name": "ztw-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "无人仓库前端 monorepo：Vue 3 + Pixi 应用与玩家 API 类型包。",
+  "scripts": {
+    "dev": "pnpm --filter game dev",
+    "build": "pnpm --filter game build",
+    "preview": "pnpm --filter game preview",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "oxlint apps packages scripts",
+    "format": "oxfmt apps packages scripts",
+    "format:check": "oxfmt --check apps packages scripts",
+    "sync:sprites": "node scripts/sync-sprites.mjs",
+    "build:host": "cargo build --manifest-path ../Cargo.toml -p ztw-runtime",
+    "app:dev": "pnpm build:host && tauri --config ../crates/desktop/tauri.conf.json dev",
+    "app:build": "pnpm build:host && tauri --config ../crates/desktop/tauri.conf.json build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "oxfmt": "^0.16.0",
+    "oxlint": "^1.14.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

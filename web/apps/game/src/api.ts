@@ -1,0 +1,68 @@
+// Tauri command 封装（docs/architecture/05 §与 Rust 的通信）：
+// 快照经 channel 推送 + 收到即 ack（世界线程侧合并丢旧）；诊断与日志按
+// 游标分页拉取 / 确认；控制命令入队后即返回，状态以快照/轮询为准。
+
+import { Channel, invoke } from "@tauri-apps/api/core";
+import type { DiagPage, Snapshot, StatusView, StaticInfo } from "./types";
+
+export function attachChannel(onMessage: (s: Snapshot) => void): Promise<void> {
+  const channel = new Channel<Snapshot>();
+  channel.onmessage = (s) => onMessage(s);
+  return invoke("attach", { channel });
+}
+
+export function ackSnapshot(): Promise<void> {
+  return invoke("ack_snapshot");
+}
+
+export function latestSnapshot(): Promise<string | null> {
+  return invoke("latest_snapshot");
+}
+
+export function fetchStatus(): Promise<StatusView> {
+  return invoke("status");
+}
+
+export function fetchStaticInfo(): Promise<StaticInfo> {
+  return invoke("static_info");
+}
+
+export function pause(): Promise<void> {
+  return invoke("pause");
+}
+
+export function resume(tps: number): Promise<void> {
+  return invoke("resume", { tps });
+}
+
+export function step(): Promise<void> {
+  return invoke("step");
+}
+
+export function hotReload(code: string): Promise<void> {
+  return invoke("hot_reload", { code });
+}
+
+export function resetScenario(scenario: string): Promise<void> {
+  return invoke("reset", { scenario });
+}
+
+export function killHost(): Promise<void> {
+  return invoke("kill_host");
+}
+
+export function diagPull(cursor: number, limit: number): Promise<DiagPage> {
+  return invoke("diag_pull", { cursor, limit });
+}
+
+export function diagAck(cursor: number): Promise<void> {
+  return invoke("diag_ack", { cursor });
+}
+
+export function logsPull(cursor: number, limit: number): Promise<DiagPage> {
+  return invoke("logs_pull", { cursor, limit });
+}
+
+export function logsAck(cursor: number): Promise<void> {
+  return invoke("logs_ack", { cursor });
+}

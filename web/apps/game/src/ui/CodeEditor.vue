@@ -1,0 +1,89 @@
+<script setup lang="ts">
+import { ref } from "vue";
+import * as api from "../api";
+import { store } from "../store";
+import { DEMO_SCRIPTS } from "../scripts";
+
+// 代码输入（B2 为纯 textarea；Monaco / CodeMirror 选型属后续里程碑）。
+// “保存并重载”= 热重载：当前 tick 结束后暂停 → 保存即重建执行环境
+// （docs/architecture/05 §代码编辑器）。
+const local = ref(store.code);
+const demoSel = ref("");
+const busy = ref(false);
+
+async function save() {
+  busy.value = true;
+  try {
+    store.code = local.value;
+    await api.hotReload(local.value);
+  } finally {
+    busy.value = false;
+  }
+}
+function loadDemo() {
+  const d = DEMO_SCRIPTS.find((s) => s.id === demoSel.value);
+  if (d) {
+    local.value = d.code;
+    demoSel.value = "";
+  }
+}
+</script>
+
+<template>
+  <section class="editor">
+    <div class="tools">
+      <select v-model="demoSel" @change="loadDemo">
+        <option value="" disabled>载入示例…</option>
+        <option v-for="d in DEMO_SCRIPTS" :key="d.id" :value="d.id">{{ d.name }}</option>
+      </select>
+      <button :disabled="busy" @click="save">保存并重载</button>
+      <span class="dim hint">重载会暂停世界并重建执行环境；Game.memory 保留，普通全局变量重置</span>
+    </div>
+    <textarea
+      v-model="local"
+      spellcheck="false"
+      class="code mono"
+      placeholder="function loop() { … }"
+    />
+  </section>
+</template>
+
+<style scoped>
+.editor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-height: 0;
+}
+.tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  flex-wrap: wrap;
+}
+.tools select {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.hint {
+  font-size: 11px;
+}
+.code {
+  margin: 0 8px 8px;
+  background: #171a1f;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px;
+  resize: none;
+  tab-size: 2;
+  min-height: 0;
+}
+.dim {
+  color: var(--dim);
+}
+</style>

@@ -1,4 +1,0 @@
-# 构建产物整体忽略，仅保留占位 index.html（见文件内说明）。
-*
-!index.html
-!.gitignore
