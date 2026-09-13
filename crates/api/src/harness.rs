@@ -737,10 +737,33 @@ impl Session {
         let write_failed = write_frame(&mut stdin, &frame).is_err();
         let mut requests_served = 0u64;
         let result = if write_failed {
+            // 写失败只说明管道断了，不代表原因：SIGKILL 后宿主 fd 关闭与本次写
+            // 的先后是竞态（快机器上写先成功再走 EOF，慢机器上直接 EPIPE）。
+            // 与下方 EOF 路径同优先级归类，主动终止 / 看门狗的因果优先于症状。
+            let watchdog = fired.load(Ordering::SeqCst);
+            let killed = self.killed_by_us.swap(false, Ordering::SeqCst);
+            let (reason, code, message) = if watchdog {
+                (
+                    "watchdog",
+                    "WATCHDOG_KILL",
+                    "执行超预算与宽限期，主进程终止宿主",
+                )
+            } else if killed {
+                (
+                    "killed",
+                    "KILLED_BY_MAIN",
+                    "主进程主动终止宿主（终止按钮路径）",
+                )
+            } else {
+                ("write", "HOST_WRITE_FAILED", "写入执行请求失败")
+            };
             ExecResult::Faulted {
-                class: FaultClass::HostTerminated("write"),
-                code: "HOST_WRITE_FAILED".into(),
-                message: "写入执行请求失败".into(),
+                class: FaultClass::HostTerminated(reason),
+                code: code.into(),
+                message: format!(
+                    "{message}（tick {}，最后已提交请求 #{}/{}）",
+                    self.world.tick, self.last_request_id, self.last_op
+                ),
                 stack: String::new(),
                 stats: ExecStats::default(),
                 requests_served,
@@ -805,14 +828,36 @@ impl Session {
                         )
                         .is_err()
                         {
+                            // 同上：回复写失败可能只是宿主刚被看门狗 / 终止按钮
+                            // 杀掉的下游症状，因果优先于症状归类。
+                            let watchdog = fired.load(Ordering::SeqCst);
+                            let killed = self.killed_by_us.swap(false, Ordering::SeqCst);
+                            let (reason, code, message) = if watchdog {
+                                (
+                                    "watchdog",
+                                    "WATCHDOG_KILL",
+                                    "执行超预算与宽限期，主进程终止宿主",
+                                )
+                            } else if killed {
+                                (
+                                    "killed",
+                                    "KILLED_BY_MAIN",
+                                    "主进程主动终止宿主（终止按钮路径）",
+                                )
+                            } else {
+                                ("write", "REPLY_WRITE_FAILED", "回复写入失败")
+                            };
                             break ExecResult::Faulted {
-                                class: FaultClass::HostTerminated("write"),
-                                code: "REPLY_WRITE_FAILED".into(),
-                                message: "回复写入失败".into(),
+                                class: FaultClass::HostTerminated(reason),
+                                code: code.into(),
+                                message: format!(
+                                    "{message}（tick {}，最后已提交请求 #{}/{}）",
+                                    self.world.tick, self.last_request_id, self.last_op
+                                ),
                                 stack: String::new(),
                                 stats: ExecStats::default(),
                                 requests_served,
-                                last_request_id: request_id,
+                                last_request_id: self.last_request_id,
                             };
                         }
                     }

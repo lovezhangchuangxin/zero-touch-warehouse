@@ -212,6 +212,18 @@ function loop() { Game.memory["persist"] = Game.memory["persist"] + 1; }
         mem_read(&mut s, "persist"),
         ztw_api::memory::ReadResult::Scalar(ztw_model::MemValue::Num(8.0))
     );
+    // 竞态回归（CI 首跑发现）：kill 后宿主 fd 关闭与下一次写的先后不定——
+    // 快机器写先成功再走 EOF，慢机器直接 EPIPE。两条路径都必须归类为主动终止；
+    // 这里等 150ms 让内核收尾 fd，确定性地覆盖 EPIPE 分支。
+    s.kill_host_now();
+    std::thread::sleep(Duration::from_millis(150));
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("killed")),
+        "EPIPE 路径同样应归类主动终止：{:?}",
+        s.fault
+    );
 }
 
 fn mem_read(s: &mut Session, key: &str) -> ztw_api::memory::ReadResult {
