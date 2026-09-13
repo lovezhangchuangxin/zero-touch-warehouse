@@ -49,7 +49,13 @@ export class Stage {
   private bank: SpriteBank;
   private info: StaticInfo | null = null;
   private robots = new Map<number, RobotAnim>();
+  /** 世界层（worldW）当前渲染的场景 id。 */
   private scenario = "";
+  /** 快照内容（sceneL/robotL）最近已绘制的场景 id。 */
+  private drawnScenario = "";
+  /** 最新收到的快照：场景切换竞态中被丢弃的帧，待 setStatic 补渲染。 */
+  private lastSnap: Snapshot | null = null;
+  private lastSel: number | null = null;
   private resizeOb: ResizeObserver | null = null;
 
   private constructor(app: Application, bank: SpriteBank) {
@@ -133,47 +139,59 @@ export class Stage {
     if (!info) {
       return;
     }
-    if (info.id === this.scenario) {
-      this.layout();
-      return;
-    }
-    this.scenario = info.id;
-    destroyChildren(this.worldW);
-    const w = info.map_w * CELL;
-    const h = info.map_h * CELL;
+    if (info.id !== this.scenario) {
+      this.scenario = info.id;
+      destroyChildren(this.worldW);
+      const w = info.map_w * CELL;
+      const h = info.map_h * CELL;
 
-    // 地面由引擎绘制（纯色 + 网格线，docs/art/atlas-v4：地砖精灵已弃用）。
-    const floor = new Graphics().rect(0, 0, w, h).fill(0x2a2f37);
-    const lines = new Graphics();
-    for (let x = 0; x <= info.map_w; x++) {
-      lines.moveTo(x * CELL, 0).lineTo(x * CELL, h);
-    }
-    for (let y = 0; y <= info.map_h; y++) {
-      lines.moveTo(0, y * CELL).lineTo(w, y * CELL);
-    }
-    lines.stroke({ width: 1, color: 0x323743, alpha: 0.55 });
-    this.worldW.addChild(floor, lines);
-
-    // 墙瓦贴边直铺：门洞 = 该格不铺（装卸口足迹已从 walls 剔除）。
-    for (const [x, y] of info.walls) {
-      const kind = wallKind(x, y, info.map_w, info.map_h);
-      if (!kind) {
-        continue;
+      // 地面由引擎绘制（纯色 + 网格线，docs/art/atlas-v4：地砖精灵已弃用）。
+      const floor = new Graphics().rect(0, 0, w, h).fill(0x2a2f37);
+      const lines = new Graphics();
+      for (let x = 0; x <= info.map_w; x++) {
+        lines.moveTo(x * CELL, 0).lineTo(x * CELL, h);
       }
-      const id =
-        kind.length === 2 ? `wall_corner_${kind}` : wallTile(kind as "n" | "s" | "w" | "e", x, y);
-      const [cx, cy] = this.cellCenter(x, y);
-      this.worldW.addChild(this.sprite(id, cx, cy));
+      for (let y = 0; y <= info.map_h; y++) {
+        lines.moveTo(0, y * CELL).lineTo(w, y * CELL);
+      }
+      lines.stroke({ width: 1, color: 0x323743, alpha: 0.55 });
+      this.worldW.addChild(floor, lines);
+
+      // 墙瓦贴边直铺：门洞 = 该格不铺（装卸口足迹已从 walls 剔除）。
+      for (const [x, y] of info.walls) {
+        const kind = wallKind(x, y, info.map_w, info.map_h);
+        if (!kind) {
+          continue;
+        }
+        const id =
+          kind.length === 2 ? `wall_corner_${kind}` : wallTile(kind as "n" | "s" | "w" | "e", x, y);
+        const [cx, cy] = this.cellCenter(x, y);
+        this.worldW.addChild(this.sprite(id, cx, cy));
+      }
     }
     this.layout();
+    // 切场景（含切回旧场景）时，新场景快照先于静态信息到达会被
+    // render() 的场景比对丢弃；暂停状态下没有后续 tick 产生新帧，
+    // 不补渲染画布将冻结在旧场景精灵上。此处用缓存的最新快照补绘。
+    if (this.lastSnap && this.lastSnap.scenario === info.id && this.drawnScenario !== info.id) {
+      this.drawnScenario = info.id;
+      this.sceneL.sortableChildren = true;
+      this.rebuildScene(this.lastSnap, this.lastSel);
+      this.updateRobots(this.lastSnap);
+    }
   }
 
   // -- 快照渲染 ------------------------------------------------------------
 
   render(snap: Snapshot, selected: number | null): void {
+    // 缓存最新快照：静态信息未就绪 / 场景切换竞态时被丢弃的帧，
+    // 由 setStatic 在场景信息就绪后补渲染。
+    this.lastSnap = snap;
+    this.lastSel = selected;
     if (!this.info || snap.scenario !== this.info.id) {
       return; // 静态信息未就绪 / 场景切换竞态：等下一次 setStatic
     }
+    this.drawnScenario = snap.scenario;
     this.sceneL.sortableChildren = true; // 选中框置顶
     this.rebuildScene(snap, selected);
     this.updateRobots(snap);
