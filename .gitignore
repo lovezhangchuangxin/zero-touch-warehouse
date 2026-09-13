@@ -2,3 +2,6 @@
 records/
 .DS_Store
 .zcode/
+
+# tauri-build 生成的能力 schema（构建时再生）
+crates/desktop/gen/

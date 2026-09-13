@@ -18,7 +18,7 @@ fn status(h: &WorldHandle) -> StatusView {
 }
 
 fn wait_status(h: &WorldHandle, pred: impl Fn(&StatusView) -> bool, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(30); // CI 慢机留余量
     while Instant::now() < deadline {
         if pred(&status(h)) {
             return;
@@ -189,7 +189,7 @@ fn full_loop_completes_orders_with_diag_events() {
     h.ctrl(Ctrl::Resume { tps: 200 }).expect("cmd");
 
     // 闭环完成：六张订单全部了结 + 金币净增。
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + Duration::from_secs(120); // CI 慢机留余量
     let mut cursor = 0;
     let mut done = 0usize;
     let mut manage = 0usize;
