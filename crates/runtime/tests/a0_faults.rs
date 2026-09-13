@@ -181,10 +181,16 @@ fn oom_triggers_env_fault_then_memory_accessible() {
     // 在慢 CI 机器上是竞态——分配速率低时预算中断先于堆上限触发，结局变成
     // INTERRUPTED（脚本级）。本测试验收的是「无限分配触发资源限制」：
     // 小堆 + 宽预算保证堆上限确定先到，与机器快慢无关。
+    //
+    // 常数沿革（CI 抖动记录）：64MiB/10s 首版后 mac CI 仍抖出一次
+    // INTERRUPTED——quickjs 在堆增长途中反复 mark-sweep，总 GC 开销随
+    // 堆上限平方增长，小核 runner 并行跑进程级测试时 10s 内到不了 64MiB。
+    // 修法三管齐下：分配块加大 10 倍（GC 轮次骤减）、堆 32MiB（平方项
+    // 减半再减半）、预算 30s（余量 12 倍于本地实测 ~0.2s）。
     let mut cfg = SessionConfig::new(host_bin());
-    cfg.heap_limit = 64 * 1024 * 1024;
-    cfg.tick_budget_base_ms = 10_000;
-    cfg.tick_budget_cap_ms = 10_000;
+    cfg.heap_limit = 32 * 1024 * 1024;
+    cfg.tick_budget_base_ms = 30_000;
+    cfg.tick_budget_cap_ms = 30_000;
     let mut s = ztw_api::harness::Session::new(cfg, demo_world());
     assert!(s.load_code(&fixture("oom_alloc.js")).ok);
     let t0 = Instant::now();
@@ -194,7 +200,7 @@ fn oom_triggers_env_fault_then_memory_accessible() {
     assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Environment));
     let rec = s.fault.as_ref().unwrap();
     assert_eq!(rec.code, "MEMORY_LIMIT");
-    assert!(dt < Duration::from_secs(5), "堆上限应快速触发：{dt:?}");
+    assert!(dt < Duration::from_secs(10), "堆上限应快速触发：{dt:?}");
     assert!(s.host_alive(), "环境级故障不重启宿主进程");
     // 世界推进、已提交 memory 保留。
     assert_eq!(s.world.tick, 1);
