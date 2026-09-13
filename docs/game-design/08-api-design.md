@@ -18,7 +18,7 @@
 Game.robots()                # -> list[Robot]
 Game.shelves()               # -> list[Shelf]
 Game.chargers()              # -> list[Charger]
-Game.ports()                 # -> list[Port]
+Game.docks()                 # -> list[Dock]，装卸位；锚点格在墙上，ext 指向库内第二格
 Game.vehicles(kind=None)     # -> list[Vehicle]，占用装卸位的车辆；kind 过滤 "in"/"out"
 Game.market.sell_orders()    # -> list[Order]，卖单：对方卖出，玩家买入，车送货来
 Game.market.buy_orders()     # -> list[Order]，买单：对方收购，玩家卖出，车来取货
@@ -34,7 +34,7 @@ Game.tick                    # 当前 tick 序号
 # 管理操作（即时生效，返回码即最终结果）
 Game.market.take(order_id)   # 接单：预留空装卸位，下一 tick 车到；买入即扣款
 Game.market.cancel(order_id) # 取消：车辆恢复出现时状态即可，收手续费、释放装卸位
-Game.buy(kind, x, y)         # kind: "robot" / "shelf" / "charger" / "port"
+Game.buy(kind, x, y)         # kind: "robot" / "shelf" / "charger" / "dock"
 Game.destroy(id)             # 销毁对象或货物，见经营与商店
 Game.borrow(amount)          # 借款即时到账，受信用额度限制
 Game.repay(amount)           # 归还部分或全部，金额以欠款为上限
@@ -59,11 +59,11 @@ Game.NORTH / SOUTH / WEST / EAST
 | Shelf | `id` `pos` `boxes`（list[Box]，基线容量 4）`capacity` |
 | Box | `id` `goods_type` `holder`（所在容器 id，地面为 None）`location`（Position） |
 | Charger | `id` `pos` |
-| Port | `id` `pos`（占地 1×2 格，坐标锚点与朝向表达待定）`docked_vehicle` |
-| Vehicle | `id` `kind`（"in"/"out"）`goods_type` `interact_pos`（装卸交互格）`order_id` `boxes`（车上现存：入库=待卸，出库=已装） |
-| Order | `id` `side`（"sell"/"buy"）`goods_type` `qty` `unit_price`；已接订单另有 `vehicle` 与 `port` |
+| Dock | `id` `pos`（靠墙缺口锚点格）`ext`（指向库内第二格的单位偏移向量，Position；占地 1×2 格、两格均为障碍）`docked_vehicle` |
+| Vehicle | `id` `kind`（"in"/"out"）`goods_type` `interact_pos`（装卸交互格 = 所停靠装卸位的第二格）`dock`（停靠装卸位 id）`order_id` `boxes`（车上现存：入库=待卸，出库=已装） |
+| Order | `id` `side`（"sell"/"buy"）`goods_type` `qty` `unit_price`；已接订单另有 `vehicle` 与 `dock` |
 
-货架不区分货位：存储是"格子里最多 4 箱"的集合语义，货物以 id 寻址。出库车待装数量 = 订单 `qty` − `len(boxes)`。车辆接单后出现并占用装卸位，见 [市场与交易](04-orders-and-logistics.md)。跨对象引用字段（`docked_vehicle`、`vehicle`、`port`、`holder`）一律为 id，经 `Game.get_object_by_id` 解析；`Box.location` 为该箱当前所在格，随容器移动更新。
+货架不区分货位：存储是"格子里最多 4 箱"的集合语义，货物以 id 寻址。出库车待装数量 = 订单 `qty` − `len(boxes)`。车辆接单后出现并占用装卸位，见 [市场与交易](04-orders-and-logistics.md)。跨对象引用字段（`docked_vehicle`、`vehicle`、`dock`、`holder`）一律为 id，经 `Game.get_object_by_id` 解析；`Box.location` 为该箱当前所在格，随容器移动更新。
 
 ### Position
 
@@ -89,7 +89,7 @@ path = Game.find_path(r.pos, goal)          # opts 例：{"range": 1}
 ```
 
 - start 与 goal 接受坐标或对象；对象取坐标的规则与 move_to 一致。
-- 可通行格为界内非建筑格；障碍是边界、货架、充电桩、装卸口占地与地面货物。机器人不算障碍——寻路回答"物理可达"，动态避让由玩家代码负责。
+- 可通行格为界内非建筑格；障碍是边界、货架、充电桩、装卸位占地与地面货物。机器人不算障碍——寻路回答"物理可达"，动态避让由玩家代码负责。
 - 一切可通行格等代价，返回最短路径之一；相同世界状态下结果确定，便于复现与调试。
 - `opts.range` 为到达判定半径（正交距离）：与目的格正交距离 ≤ range 的可通行格构成到达集，到达集为空即不可达；默认 0，即目的格本身须可通行。`move_to` 默认以 1 调用。其余 opts 留作扩展（如地形代价），`move_to` 原样转发。
 - 纯查询，不消耗行动机会，可用于规划与试探。空值判断需显式三分支：JS 中 `[]` 为 truthy，`if (path)` 会把"已到达"当成"有路径"；Python 中 `if path:` 会把"已到达"并入"不可达"。两端都以 `path === null` / `path is None` 判不可达，以空列表判"无需移动"。
@@ -120,7 +120,7 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 
 - `r.memory` 是 `Game.memory["robots"][str(r.id)]`（JS 使用 `String(r.id)`） 的快捷引用，自动创建，读写同一份数据，跨代码重载持久；其中 `_move` 为 move_to 保留键，玩家不应占用，`robots` 同为 `Game.memory` 的保留键。
 - move_to 是 `find_path` + `move` 的复合封装：已到达（判定优先于行动占用检查）返回 `"ARRIVED"`，不提交动作、不占用行动机会，可当 tick 继续取放或充电；未到达则沿缓存路径提交一步 `move`，返回其受理码。所有返回值（含 `ARRIVED`）均为 `Game.E` 常量。
-- 目的地接受 `move_to(x, y, opts)` 或 `move_to(target, opts)`，target 为坐标或对象：货架/充电桩/装卸口/机器人取 `pos`，车辆取 `interact_pos`，地面货物取所在格。
+- 目的地接受 `move_to(x, y, opts)` 或 `move_to(target, opts)`，target 为坐标或对象：货架/充电桩/装卸位/机器人取 `pos`，车辆取 `interact_pos`，地面货物取所在格。
 - 到达判定默认 `opts.range = 1`，抵达目的地或与其正交相邻即算到达——游戏内一切交互都按相邻进行；其余 opts 原样转发 `find_path`。
 - 路径、目的地与 opts 缓存于 `r.memory._move`：当目的地或 opts 变化、当前位置偏离缓存路径、下一步被静态障碍（新建筑、地面货物）占据时重新寻路；结算失败（如 `CELL_CONTESTED`）不使缓存失效，下一 tick 原路重试。缓存只按实际位置推进，不在受理成功时提前消费路径。
 - 目的地不可达返回 `"NO_PATH"`，不占用行动机会。
@@ -130,7 +130,7 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 接单、取消、购买、销毁与借贷是"老板"的操作，不与机器人的同时意图竞争，因此即时校验、即时执行、立即返回准确结果，无须下一 tick 确认：
 
 - 调用即完成资金校验扣除、放置、状态变更；返回 `"OK"` 即已生效。
-- `Game.market.take` 接单即时校验并预留空闲装卸位，买入单即时扣款，车辆下一 tick 出现；多装卸口时随机占用一个空位，见 [市场与交易](04-orders-and-logistics.md)。
+- `Game.market.take` 接单即时校验并预留空闲装卸位，买入单即时扣款，车辆下一 tick 出现；多装卸位时随机占用一个空位，见 [市场与交易](04-orders-and-logistics.md)。
 - `Game.market.cancel` 取消已接订单，条件与手续费见 [市场与交易](04-orders-and-logistics.md)；车辆未恢复出现时状态返回 `GOODS_MOVED`。
 - `Game.borrow` / `Game.repay` 即时到账与扣减：每 tick 结算完成后按欠款 × 利率复利计入，`Game.debt` 即时可见；借款受信用额度限制，超额返回 `CREDIT_EXCEEDED`。借贷的定位见 [经营、商店与成长](06-economy-and-progression.md)。
 - **快照纯度的唯一例外**：tick 内查询立即可见管理操作的效果；机器人动作仍然不可见，结算前查询不变。
@@ -169,7 +169,7 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 | 管理 | `NO_FUNDS` | 金币不足（buy、take 买入单、repay）；不自动借贷 |
 | 管理 | `CREDIT_EXCEEDED` | borrow：超出信用额度 |
 | 管理 | `ON_VEHICLE` | destroy：货物尚未卸离购入车辆 |
-| 管理 | `NO_FREE_PORT` | 接单：没有空闲装卸位 |
+| 管理 | `NO_FREE_DOCK` | 接单：没有空闲装卸位 |
 | 管理 | `NOT_EMPTY` / `HAS_VEHICLE` | 销毁前提不满足（含货、占用中等） |
 | 管理 | `ORDER_GONE` | 接单/取消：挂单已离开市场或订单已完成 |
 | 管理 | `GOODS_MOVED` | 取消：车辆未恢复出现时的状态 |
@@ -235,7 +235,7 @@ def loop():
                  if b.goods_type == "battery")
     stock += sum(o.qty for o in Game.my_orders()
                  if o.side == "sell" and o.goods_type == "battery")
-    if stock < 4 and any(p.docked_vehicle is None for p in Game.ports()):
+    if stock < 4 and any(p.docked_vehicle is None for p in Game.docks()):
         asks = [o for o in Game.market.sell_orders()
                 if o.goods_type == "battery"]
         if len(asks) > 0:
@@ -261,7 +261,6 @@ def loop():
 
 - `last_result` 的最终字段结构；`buy` 的 `kind` 取值表。
 - `find_path` 与 `move_to` 的调用成本限制；`_move` 缓存格式；是否需要按 tick 的路径过期（类似 Screeps `reusePath`）；是否内建路径可视化。
-- `interact_pos` 与 1×2 格装卸口占地/交互面的关系，以及坐标锚点与朝向表达。
 - 市场生成参数，见 [市场与交易](04-orders-and-logistics.md)。
 - 是否在 `Game` 之外为常用常量提供顶层快捷别名（如裸 `E`）；基线只认 `Game`。
 - 两种语言运行时细节、序列化与沙箱限制，属技术设计。

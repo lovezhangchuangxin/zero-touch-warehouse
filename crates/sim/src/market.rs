@@ -6,14 +6,14 @@ use ztw_model::{Id, MilliGold, Order, OrderSide, Position, VehicleKind, codes};
 use crate::world::{PendingArrival, World};
 use crate::{
     CANCEL_FEE_DENOMINATOR, CANCEL_FEE_NUMERATOR, DESTROY_REFUND_DENOMINATOR,
-    DESTROY_REFUND_NUMERATOR, PRICE_CHARGER, PRICE_PORT, PRICE_ROBOT, PRICE_SHELF,
+    DESTROY_REFUND_NUMERATOR, PRICE_CHARGER, PRICE_DOCK, PRICE_ROBOT, PRICE_SHELF,
 };
 
 /// take 的镜像同步增量素材（api 层据此构造宿主回放增量）。
 #[derive(Debug, Clone)]
 pub struct TakeEffect {
     pub order_id: Id,
-    pub port_id: Id,
+    pub dock_id: Id,
     pub order: Order,
 }
 
@@ -22,7 +22,7 @@ pub struct TakeEffect {
 pub struct CancelEffect {
     pub order_id: Id,
     pub vehicle_id: Option<Id>,
-    pub port_id: Option<Id>,
+    pub dock_id: Option<Id>,
     /// 卖单（买入）取消的退款；买单为 0。
     pub refund_milli: MilliGold,
     pub fee_milli: MilliGold,
@@ -33,7 +33,7 @@ pub enum DestroyedKind {
     Robot,
     Shelf,
     Charger,
-    Port,
+    Dock,
     GroundBox,
 }
 
@@ -43,13 +43,14 @@ pub struct DestroyEffect {
     pub kind: DestroyedKind,
     pub target_id: Id,
     pub refund_milli: MilliGold,
-    /// 释放的静态障碍格（镜像 blocked 增量用）；被携带 / 在架货物无地面格。
-    pub freed_cell: Option<Position>,
+    /// 释放的静态障碍格（镜像 blocked 增量用；装卸位为两格，被携带 /
+    /// 在架货物无地面格）。
+    pub freed_cells: Vec<Position>,
 }
 
 impl World {
     /// 接单：校验并预留空闲装卸位；卖单（玩家买入）即时扣款；车辆下一 tick
-    /// 边界到场。空闲口由装卸位分配流随机占用（docs/game-design/04）。
+    /// 边界到场。空闲位由装卸位分配流随机占用（docs/game-design/04）。
     pub fn manage_take(&mut self, order_id: Id) -> (&'static str, Option<TakeEffect>) {
         let Some(order) = self.listings.get(&order_id) else {
             return (codes::ORDER_GONE, None);
@@ -57,18 +58,18 @@ impl World {
         let side = order.side;
         let qty = order.qty;
         let unit_price = order.unit_price_milli;
-        let mut free_ports: Vec<Id> = self
-            .ports
+        let mut free_docks: Vec<Id> = self
+            .docks
             .values()
-            .filter(|p| p.docked_vehicle.is_none() && p.reserved_for.is_none())
-            .map(|p| p.id)
+            .filter(|d| d.docked_vehicle.is_none() && d.reserved_for.is_none())
+            .map(|d| d.id)
             .collect();
-        free_ports.sort_unstable(); // 遍历序规则：按 id 升序后抽样
-        if free_ports.is_empty() {
-            return (codes::NO_FREE_PORT, None);
+        free_docks.sort_unstable(); // 遍历序规则：按 id 升序后抽样
+        if free_docks.is_empty() {
+            return (codes::NO_FREE_DOCK, None);
         }
-        let idx = self.rng_port.below(free_ports.len());
-        let port_id = free_ports[idx];
+        let idx = self.rng_dock.below(free_docks.len());
+        let dock_id = free_docks[idx];
         // 卖单（玩家买入）需即时扣款：成本只算一次，校验与扣款同源。
         let cost = match side {
             OrderSide::Sell => (qty as i64).checked_mul(unit_price),
@@ -82,9 +83,9 @@ impl World {
         if side == OrderSide::Sell {
             self.gold_milli -= cost;
         }
-        self.ports.get_mut(&port_id).expect("存在").reserved_for = Some(order_id);
+        self.docks.get_mut(&dock_id).expect("存在").reserved_for = Some(order_id);
         let mut taken = order;
-        taken.port = Some(port_id);
+        taken.dock = Some(dock_id);
         self.my_orders.insert(order_id, taken.clone());
         self.arrivals.push(PendingArrival {
             order_id,
@@ -92,7 +93,7 @@ impl World {
         });
         let effect = TakeEffect {
             order_id,
-            port_id,
+            dock_id,
             order: taken,
         };
         (codes::OK, Some(effect))
@@ -109,7 +110,7 @@ impl World {
         let qty = order.qty;
         let amount = (qty as i64).saturating_mul(order.unit_price_milli);
         let vehicle_id = order.vehicle;
-        let port_id = order.port;
+        let dock_id = order.dock;
         let fee = amount / CANCEL_FEE_DENOMINATOR * CANCEL_FEE_NUMERATOR;
         // 车辆到场后校验可恢复性；未到场（arrival 待定）即初态。
         if let Some(vid) = vehicle_id {
@@ -143,14 +144,14 @@ impl World {
         } else {
             self.arrivals.retain(|a| a.order_id != order_id);
         }
-        if let Some(pid) = port_id
-            && let Some(p) = self.ports.get_mut(&pid)
+        if let Some(did) = dock_id
+            && let Some(d) = self.docks.get_mut(&did)
         {
-            if p.docked_vehicle == vehicle_id {
-                p.docked_vehicle = None;
+            if d.docked_vehicle == vehicle_id {
+                d.docked_vehicle = None;
             }
-            if p.reserved_for == Some(order_id) {
-                p.reserved_for = None;
+            if d.reserved_for == Some(order_id) {
+                d.reserved_for = None;
             }
         }
         self.my_orders.remove(&order_id);
@@ -159,7 +160,7 @@ impl World {
             Some(CancelEffect {
                 order_id,
                 vehicle_id,
-                port_id,
+                dock_id,
                 refund_milli: refund,
                 fee_milli: fee,
             }),
@@ -176,7 +177,7 @@ impl World {
             }
             let pos = r.pos;
             self.robots.remove(&target_id);
-            return self.finish_destroy(DestroyedKind::Robot, target_id, Some(pos), PRICE_ROBOT);
+            return self.finish_destroy(DestroyedKind::Robot, target_id, vec![pos], PRICE_ROBOT);
         }
         if let Some(s) = self.shelves.get(&target_id) {
             if !s.box_ids.is_empty() {
@@ -184,7 +185,7 @@ impl World {
             }
             let pos = s.pos;
             self.shelves.remove(&target_id);
-            return self.finish_destroy(DestroyedKind::Shelf, target_id, Some(pos), PRICE_SHELF);
+            return self.finish_destroy(DestroyedKind::Shelf, target_id, vec![pos], PRICE_SHELF);
         }
         if let Some(c) = self.chargers.get(&target_id) {
             let pos = c.pos;
@@ -192,17 +193,17 @@ impl World {
             return self.finish_destroy(
                 DestroyedKind::Charger,
                 target_id,
-                Some(pos),
+                vec![pos],
                 PRICE_CHARGER,
             );
         }
-        if let Some(p) = self.ports.get(&target_id) {
-            if p.docked_vehicle.is_some() || p.reserved_for.is_some() {
+        if let Some(d) = self.docks.get(&target_id) {
+            if d.docked_vehicle.is_some() || d.reserved_for.is_some() {
                 return (codes::HAS_VEHICLE, None);
             }
-            let pos = p.pos;
-            self.ports.remove(&target_id);
-            return self.finish_destroy(DestroyedKind::Port, target_id, Some(pos), PRICE_PORT);
+            let cells = vec![d.pos, d.pos.step(d.ext.0, d.ext.1)];
+            self.docks.remove(&target_id);
+            return self.finish_destroy(DestroyedKind::Dock, target_id, cells, PRICE_DOCK);
         }
         if let Some(b) = self.ground_boxes.get(&target_id) {
             let holder = b.holder;
@@ -218,7 +219,11 @@ impl World {
                 return (codes::ON_VEHICLE, None);
             }
             self.ground_boxes.remove(&target_id);
-            let freed = if holder.is_none() { Some(pos) } else { None };
+            let freed = if holder.is_none() {
+                vec![pos]
+            } else {
+                Vec::new()
+            };
             if let Some(h) = holder {
                 if let Some(r) = self.robots.get_mut(&h) {
                     if r.carry == Some(target_id) {
@@ -243,7 +248,7 @@ impl World {
         &mut self,
         kind: DestroyedKind,
         target_id: Id,
-        freed_cell: Option<Position>,
+        freed_cells: Vec<Position>,
         price: MilliGold,
     ) -> (&'static str, Option<DestroyEffect>) {
         let refund = price / DESTROY_REFUND_DENOMINATOR * DESTROY_REFUND_NUMERATOR;
@@ -254,7 +259,7 @@ impl World {
                 kind,
                 target_id,
                 refund_milli: refund,
-                freed_cell,
+                freed_cells,
             }),
         )
     }

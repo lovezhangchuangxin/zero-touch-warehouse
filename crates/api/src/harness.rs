@@ -793,7 +793,7 @@ impl Session {
         let entities = (self.world.robots.len()
             + self.world.shelves.len()
             + self.world.chargers.len()
-            + self.world.ports.len()
+            + self.world.docks.len()
             + self.world.vehicles.len()
             + self.world.ground_boxes.len()
             + self.world.listings.len()
@@ -1302,12 +1302,12 @@ impl Session {
                         code,
                         Some(order_id),
                         format!(
-                            "接单 {} {}×{} @{} milli，装卸口 #{}，余额 {} milli",
+                            "接单 {} {}×{} @{} milli，装卸位 #{}，余额 {} milli",
                             eff.order.side.as_str(),
                             eff.order.goods_type,
                             eff.order.qty,
                             eff.order.unit_price_milli,
-                            eff.port_id,
+                            eff.dock_id,
                             self.world.gold_milli
                         ),
                     );
@@ -1341,8 +1341,8 @@ impl Session {
                         code,
                         Some(order_id),
                         format!(
-                            "取消订单，手续费 {} milli，退款 {} milli，移除车辆 {:?}，释放装卸口 {:?}",
-                            eff.fee_milli, eff.refund_milli, eff.vehicle_id, eff.port_id
+                            "取消订单，手续费 {} milli，退款 {} milli，移除车辆 {:?}，释放装卸位 {:?}",
+                            eff.fee_milli, eff.refund_milli, eff.vehicle_id, eff.dock_id
                         ),
                     );
                     let delta = MirrorDelta::from_cancel(&self.world, &eff);
@@ -1376,7 +1376,7 @@ impl Session {
                         Some(target_id),
                         format!(
                             "销毁 {:?} #{}，退款 {} milli，释放格 {:?}",
-                            eff.kind, eff.target_id, eff.refund_milli, eff.freed_cell
+                            eff.kind, eff.target_id, eff.refund_milli, eff.freed_cells
                         ),
                     );
                     let delta = MirrorDelta::from_destroy(&self.world, &eff);

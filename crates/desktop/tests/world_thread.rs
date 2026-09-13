@@ -28,22 +28,24 @@ fn wait_status(h: &WorldHandle, pred: impl Fn(&StatusView) -> bool, what: &str) 
     panic!("等待状态超时：{what}，当前 {:?}", status(h));
 }
 
-/// 单机闭环脚本（B2 地图：西墙双装卸口随机停靠，交互位为锚点格东侧）：
-/// 吃卖单 → 卸车到地面暂存（站位与暂存格分离、避开 x=1 交互列）→
+/// 单机闭环脚本（B2 地图：北墙双装卸位随机停靠，交互位为第二格即库内格，
+/// 站位取其南侧）：吃卖单 → 卸车到地面暂存（站位与暂存格分离）→
 /// 吃买单 → 按货物类型匹配逐箱搬运交付。六单全了结。
 const SIMPLE_LOOP: &str = r#"
 let taken = 0;
 
-// 车辆交互站位：锚点格东侧一格（装卸口都在西墙 x=0）。
+// 车辆交互站位：装卸位第二格（interact_pos）的南侧一格（缺口都在北墙）。
 function standNear(v) {
-  return [v.interact_pos.x + 1, v.interact_pos.y];
+  return [v.interact_pos.x, v.interact_pos.y + 1];
 }
 
 function stepToward(r, tx, ty) {
   const dx = tx - r.pos.x, dy = ty - r.pos.y;
   const sx = Math.sign(dx), sy = Math.sign(dy);
   const tries = Math.abs(dx) >= Math.abs(dy) ? [[sx,0],[0,sy]] : [[0,sy],[sx,0]];
-  for (const [mx, my] of tries) {
+  // 同行 / 同列被挡（如暂存区的箱子）时向垂直轴侧向绕一步。
+  const side = sx === 0 ? [[1,0],[-1,0]] : [[0,1],[0,-1]];
+  for (const [mx, my] of [...tries, ...side]) {
     if ((mx !== 0 || my !== 0) && r.move([mx, my]) === Game.E.OK) return true;
   }
   return false;
@@ -82,7 +84,6 @@ function loop() {
     if (r.carry) {
       const [tx, ty] = standNear(vout);
       if (r.pos.x === tx && r.pos.y === ty) { r.give(vout); return; }
-      if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
       stepToward(r, tx, ty);
       return;
     }
@@ -93,11 +94,7 @@ function loop() {
     const b = boxes[0];
     const bx = b.location.x, by = b.location.y;
     if (Math.abs(r.pos.x - bx) + Math.abs(r.pos.y - by) === 1) { r.pick(bx, by); return; }
-    // 在箱子东侧才先回 x=1 交互列；西侧直接沿行东进（箱格阻挡自然停邻格），
-    // 否则在 (1,y)↔(2,y) 间来回震荡。
-    if (r.pos.x > bx && r.move(Game.WEST) === Game.E.OK) return;
-    if (r.pos.y !== by) { stepToward(r, 1, by); return; }
-    if (r.pos.x < bx) r.move(Game.EAST);
+    stepToward(r, bx, by);
     return;
   }
 
@@ -106,12 +103,11 @@ function loop() {
     if (r.carry) { parkBox(r); return; }
     const [tx, ty] = standNear(vin);
     if (r.pos.x === tx && r.pos.y === ty) { r.take(vin, vin.boxes[0].id); return; }
-    if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
     stepToward(r, tx, ty);
     return;
   }
 
-  // 无车：按顺序吃单（先买后卖；两个装卸口允许双车并行）。
+  // 无车：按顺序吃单（先买后卖；两个装卸位允许双车并行）。
   const asks = Game.market.sell_orders();
   if (asks.length) { Game.market.take(asks[0].id); return; }
   const bids = Game.market.buy_orders();
@@ -165,7 +161,7 @@ fn load_step_pause_resume_flow() {
     assert_eq!(snap["robots"].as_array().unwrap().len(), 1);
     assert_eq!(snap["map_w"], 16);
     let stat = h.shared().static_info.lock().expect("static 锁").clone();
-    assert_eq!(stat["walls"].as_array().unwrap().len(), 48);
+    assert_eq!(stat["walls"].as_array().unwrap().len(), 50);
 
     // 诊断环：控制事件可按游标拉取。
     let page = h.shared().diag_pull(0, 100);

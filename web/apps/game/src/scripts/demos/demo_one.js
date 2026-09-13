@@ -1,8 +1,8 @@
 // 单机全闭环：吃卖单 → 卸车到地面暂存 → 吃买单 → 逐箱交付。
-// 装卸口在西墙，交互站位 = 车辆格东侧一格。
+// 装卸位在北墙，交互格 = 装卸位第二格，站位取其南侧一格。
 
 function standNear(v) {
-  return [v.interact_pos.x + 1, v.interact_pos.y];
+  return [v.interact_pos.x, v.interact_pos.y + 1];
 }
 
 function stepToward(r, tx, ty) {
@@ -20,7 +20,18 @@ function stepToward(r, tx, ty) {
           [0, sy],
           [sx, 0],
         ];
-  for (const [mx, my] of tries) {
+  // 同行 / 同列被挡（如暂存区的箱子）时向垂直轴侧向绕一步。
+  const side =
+    sx === 0
+      ? [
+          [1, 0],
+          [-1, 0],
+        ]
+      : [
+          [0, 1],
+          [0, -1],
+        ];
+  for (const [mx, my] of [...tries, ...side]) {
     if ((mx !== 0 || my !== 0) && r.move([mx, my]) === Game.E.OK) return true;
   }
   return false;
@@ -65,7 +76,6 @@ function loop() {
         r.give(vout);
         return;
       }
-      if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
       stepToward(r, tx, ty);
       return;
     }
@@ -80,12 +90,7 @@ function loop() {
       r.pick(bx, by);
       return;
     }
-    if (r.pos.x > bx && r.move(Game.WEST) === Game.E.OK) return;
-    if (r.pos.y !== by) {
-      stepToward(r, 1, by);
-      return;
-    }
-    if (r.pos.x < bx) r.move(Game.EAST);
+    stepToward(r, bx, by);
     return;
   }
 
@@ -99,7 +104,6 @@ function loop() {
       r.take(vin, vin.boxes[0].id);
       return;
     }
-    if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
     stepToward(r, tx, ty);
     return;
   }

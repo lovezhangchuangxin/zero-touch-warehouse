@@ -28,7 +28,7 @@
     CHAIN_BLOCKED: "CHAIN_BLOCKED", CHARGER_BUSY: "CHARGER_BUSY",
     TARGET_MOVED: "TARGET_MOVED", TARGET_GONE: "TARGET_GONE",
     NO_FUNDS: "NO_FUNDS", CREDIT_EXCEEDED: "CREDIT_EXCEEDED",
-    ON_VEHICLE: "ON_VEHICLE", NO_FREE_PORT: "NO_FREE_PORT",
+    ON_VEHICLE: "ON_VEHICLE", NO_FREE_DOCK: "NO_FREE_DOCK",
     NOT_EMPTY: "NOT_EMPTY", HAS_VEHICLE: "HAS_VEHICLE",
     ORDER_GONE: "ORDER_GONE", GOODS_MOVED: "GOODS_MOVED",
     INIT_PHASE: "INIT_PHASE",
@@ -152,9 +152,9 @@
         if (typeof d.remove_vehicle === "number") {
           M.vehicles = (M.vehicles || []).filter(function (v) { return v.id !== d.remove_vehicle; });
         }
-        if (d.update_port) {
-          const port = (M.ports || []).find(function (p) { return p.id === d.update_port.id; });
-          if (port) port.docked_vehicle = d.update_port.docked_vehicle;
+        if (d.update_dock) {
+          const dock = (M.docks || []).find(function (p) { return p.id === d.update_dock.id; });
+          if (dock) dock.docked_vehicle = d.update_dock.docked_vehicle;
         }
       } else if (d.kind === "destroy") {
         if (d.rebuild) {
@@ -163,7 +163,7 @@
         }
         const list = {
           robot: "robots", shelf: "shelves", charger: "chargers",
-          port: "ports", box: "ground_boxes",
+          dock: "docks", box: "ground_boxes",
         }[d.object];
         if (!list) {
           stale = true;
@@ -200,7 +200,7 @@
       qty: o.qty,
       unit_price: Number(o.unit_price_milli) / 1000,
       vehicle: o.vehicle !== undefined ? o.vehicle : null,
-      port: o.port !== undefined ? o.port : null,
+      dock: o.dock !== undefined ? o.dock : null,
     };
   }
   function robotView(r) {
@@ -277,8 +277,14 @@
   function chargerView(c) {
     return { id: c.id, pos: P(c.x, c.y) };
   }
-  function portView(p) {
-    return { id: p.id, pos: P(p.x, p.y), docked_vehicle: p.docked_vehicle };
+  function dockView(d) {
+    return {
+      id: d.id,
+      pos: P(d.x, d.y),
+      // 与 pos 同为 Position：支持 .x/.y/equals 等（锚点 + ext 合成第二格）。
+      ext: P(d.ext[0], d.ext[1]),
+      docked_vehicle: d.docked_vehicle,
+    };
   }
   function vehicleView(v) {
     return {
@@ -287,6 +293,7 @@
       goods_type: v.goods_type,
       interact_pos: P(v.x, v.y),
       order_id: v.order_id,
+      dock: v.dock,
       boxes: v.boxes.map(boxView),
     };
   }
@@ -503,7 +510,7 @@
     robots() { ensureMirror(); return M.robots.map(robotView); },
     shelves() { ensureMirror(); return M.shelves.map(shelfView); },
     chargers() { ensureMirror(); return M.chargers.map(chargerView); },
-    ports() { ensureMirror(); return M.ports.map(portView); },
+    docks() { ensureMirror(); return M.docks.map(dockView); },
     vehicles(kind) {
       ensureMirror();
       const vs = M.vehicles.map(vehicleView);
@@ -517,7 +524,7 @@
       for (const r of M.robots) if (r.x === x && r.y === y) found.push(["robot", r.id, robotView(r)]);
       for (const s of M.shelves) if (s.x === x && s.y === y) found.push(["shelf", s.id, shelfView(s)]);
       for (const c of M.chargers) if (c.x === x && c.y === y) found.push(["charger", c.id, chargerView(c)]);
-      for (const p of M.ports) if (p.x === x && p.y === y) found.push(["port", p.id, portView(p)]);
+      for (const d of M.docks) if (d.x === x && d.y === y) found.push(["dock", d.id, dockView(d)]);
       for (const v of M.vehicles) if (v.x === x && v.y === y) found.push(["vehicle", v.id, vehicleView(v)]);
       for (const b of M.ground_boxes) if (b.x === x && b.y === y) found.push(["box", b.id, boxView(b)]);
       found.sort(function (a, b) { return a[1] - b[1]; });
@@ -528,7 +535,7 @@
       id = Number(id);
       for (const c of [
         [M.robots, robotView], [M.shelves, shelfView], [M.chargers, chargerView],
-        [M.ports, portView], [M.vehicles, vehicleView], [M.ground_boxes, boxView],
+        [M.docks, dockView], [M.vehicles, vehicleView], [M.ground_boxes, boxView],
       ]) {
         for (const raw of c[0]) if (raw.id === id) return c[1](raw);
       }

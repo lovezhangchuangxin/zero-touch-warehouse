@@ -45,6 +45,6 @@ pub const DESTROY_REFUND_DENOMINATOR: MilliGold = 2;
 pub const PRICE_ROBOT: MilliGold = 650_000;
 pub const PRICE_SHELF: MilliGold = 175_000;
 pub const PRICE_CHARGER: MilliGold = 300_000;
-pub const PRICE_PORT: MilliGold = 500_000;
+pub const PRICE_DOCK: MilliGold = 500_000;
 
 use ztw_model::MilliGold;

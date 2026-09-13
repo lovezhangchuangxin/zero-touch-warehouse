@@ -3,7 +3,7 @@
 // 1) 让出主通道：四台待命机开场一次性同向东进（各自专属路线与终点，
 //    纵队行军互不对穿），就位后永久静止——空着的机器人也是路障；
 // 2) 串行流水：worker0 独占主工作区，按"接卖单→卸车暂存→接买单→
-//    逐箱交付"单机闭环流程做完全部订单（本图两口窄道，并行卸车只会
+//    逐箱交付"单机闭环流程做完全部订单（本图两个装卸位窄道，并行卸车只会
 //    互相穿行——错开任务比抢并行更能提高吞吐）。
 const PARK = [
   [2, 5, 2, 4],
@@ -13,10 +13,11 @@ const PARK = [
   [4, 5, 4, 4],
 ];
 
-// 待命机专属行军路线（终点都在货架东侧 x>=8 的空旷区）。
+// 待命机专属行军路线（终点都在货架东侧 x=8 的空旷区，且避开 worker 的
+// 动脉——row2/row4 两条东西向走廊与 3/12 两列装卸位通道）。
 // robot2/4 先纵一格到无障碍行再东进（y=6 行有货架、y=10 行有充电桩）。
 const DOCK_ROUTE = {
-  1: [[8, 4]],
+  1: [[8, 5]],
   2: [
     [2, 7],
     [8, 7],
@@ -28,13 +29,15 @@ const DOCK_ROUTE = {
   ],
 };
 const dockDone = {};
+// 各待命机已到达的路标下标（按进度推进，避免走过头后被首个路标拉回）。
+const dockStep = { 1: 0, 2: 0, 3: 0, 4: 0 };
 
 function stepToward(r, tx, ty) {
   const dx = tx - r.pos.x,
     dy = ty - r.pos.y;
   const sx = Math.sign(dx),
     sy = Math.sign(dy);
-  const tries =
+  const primary =
     Math.abs(dx) >= Math.abs(dy)
       ? [
           [sx, 0],
@@ -44,14 +47,25 @@ function stepToward(r, tx, ty) {
           [0, sy],
           [sx, 0],
         ];
-  for (const [mx, my] of tries) {
+  // 同行 / 同列被挡（如暂存区的箱子）时向垂直轴侧向绕一步。
+  const side =
+    sx === 0
+      ? [
+          [1, 0],
+          [-1, 0],
+        ]
+      : [
+          [0, 1],
+          [0, -1],
+        ];
+  for (const [mx, my] of [...primary, ...side]) {
     if ((mx !== 0 || my !== 0) && r.move([mx, my]) === Game.E.OK) return true;
   }
   return false;
 }
 
 function standNear(v) {
-  return [v.interact_pos.x + 1, v.interact_pos.y];
+  return [v.interact_pos.x, v.interact_pos.y + 1];
 }
 
 function parkBox(r) {
@@ -68,17 +82,21 @@ function parkBox(r) {
   }
 }
 
-// 待命机行军：沿专属 waypoint 前进，全部就位后静止。
+// 待命机行军：沿专属 waypoint 前进（按 dockStep 记录进度），全部就位后静止。
 function dockDrive(r, i) {
   const route = DOCK_ROUTE[i];
   if (dockDone[i] || !route) return;
-  for (const [wx, wy] of route) {
-    if (r.pos.x !== wx || r.pos.y !== wy) {
-      stepToward(r, wx, wy);
-      return;
-    }
+  const k = dockStep[i] || 0;
+  if (k >= route.length) {
+    dockDone[i] = true;
+    return;
   }
-  dockDone[i] = true;
+  const [wx, wy] = route[k];
+  if (r.pos.x === wx && r.pos.y === wy) {
+    dockStep[i] = k + 1;
+    return;
+  }
+  stepToward(r, wx, wy);
 }
 
 function work(r) {
@@ -96,7 +114,6 @@ function work(r) {
         r.give(vout);
         return;
       }
-      if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
       stepToward(r, tx, ty);
       return;
     }
@@ -111,12 +128,7 @@ function work(r) {
       r.pick(bx, by);
       return;
     }
-    if (r.pos.x > bx && r.move(Game.WEST) === Game.E.OK) return;
-    if (r.pos.y !== by) {
-      stepToward(r, 1, by);
-      return;
-    }
-    if (r.pos.x < bx) r.move(Game.EAST);
+    stepToward(r, bx, by);
     return;
   }
 
@@ -130,7 +142,6 @@ function work(r) {
       r.take(vin, vin.boxes[0].id);
       return;
     }
-    if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
     stepToward(r, tx, ty);
     return;
   }

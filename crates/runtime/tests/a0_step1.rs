@@ -42,7 +42,7 @@ fn mirror_serves_queries_without_ipc() {
 function loop() {
   const rs = Game.robots();
   const vs = Game.vehicles();
-  const s = Game.shelves().length + Game.chargers().length + Game.ports().length;
+  const s = Game.shelves().length + Game.chargers().length + Game.docks().length;
   const m = Game.map_size();
   Game.tick;
   Game.gold;
@@ -76,16 +76,16 @@ fn take_order_and_vehicle_arrives_next_tick() {
     assert_eq!(s.world.my_orders.len(), 1);
     assert_eq!(s.world.listings.len(), 1); // 只剩买单
 
-    // 下一 tick 边界：车辆到场、带货、占用装卸口。
+    // 下一 tick 边界：车辆到场、带货、占用装卸位（交互格 = 第二格）。
     let out = s.tick();
     assert_eq!(out.kind, OutcomeKind::Ok);
     assert_eq!(s.world.vehicles.len(), 1);
     let v = s.world.vehicles.values().next().unwrap();
     assert_eq!(v.kind.as_str(), "in");
     assert_eq!(v.box_ids.len(), 2);
-    assert_eq!(v.interact_pos, Position::new(0, 4));
-    let port_id = s.world.ports.keys().next().unwrap();
-    assert_eq!(s.world.ports[port_id].docked_vehicle, Some(v.id));
+    assert_eq!(v.interact_pos, Position::new(0, 5));
+    let dock_id = s.world.docks.keys().next().unwrap();
+    assert_eq!(s.world.docks[dock_id].docked_vehicle, Some(v.id));
     // 不重复接单。
     let out = s.tick();
     assert_eq!(out.kind, OutcomeKind::Ok);

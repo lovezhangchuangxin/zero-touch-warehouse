@@ -16,7 +16,7 @@ fn diag_world() -> World {
     let mut w = World::new_empty(12, 8, 200_000);
     w.add_robot(Position::new(1, 1));
     w.add_wall(Position::new(1, 2)); // 向南移动必被静态障碍拒绝
-    w.add_port(Position::new(0, 4));
+    w.add_dock(Position::new(0, 4), (0, 1));
     w.add_listing(OrderSide::Sell, "battery", 1, 5_000);
     w
 }
@@ -73,7 +73,7 @@ function loop() {
     assert_eq!(taps[0].op, "market.take");
     assert_eq!(taps[0].code, "OK");
     assert!(taps[0].detail.contains("接单"), "{}", taps[0].detail);
-    assert!(taps[0].detail.contains("装卸口"), "{}", taps[0].detail);
+    assert!(taps[0].detail.contains("装卸位"), "{}", taps[0].detail);
     assert_eq!(taps[1].kind, DiagTapKind::AcceptFail);
     assert_eq!(taps[1].code, "ORDER_GONE");
 }
@@ -84,7 +84,8 @@ fn order_completion_tapped_with_payment() {
     let mut w = World::new_empty(12, 8, 200_000);
     w.add_robot(Position::new(1, 1));
     w.add_charger(Position::new(1, 5));
-    w.add_port(Position::new(0, 4));
+    // 锚点 (0,3)：第二格 (0,4) = 交互格，与 cargo_loop.js 的走位（y=4）衔接。
+    w.add_dock(Position::new(0, 3), (0, 1));
     w.add_listing(OrderSide::Sell, "battery", 1, 4_000);
     w.add_listing(OrderSide::Buy, "battery", 1, 6_000);
     let mut s = Session::new(SessionConfig::new(host_bin()), w);

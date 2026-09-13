@@ -1,6 +1,6 @@
 // 全闭环示例（B1）：低买 → 卸车 → 空档补电 → 高卖交付。
-// 世界布置见 b1_cargo_loop.rs：机器人 (1,1)，装卸口 (0,4)，充电桩 (1,5)，
-// 卖单 battery 1@4.000、买单 battery 1@6.000。毛利 = 2 金币。
+// 世界布置见 b1_cargo_loop.rs：机器人 (1,1)，装卸位锚点 (0,3)、交互格
+// (0,4)，充电桩 (1,5)，卖单 battery 1@4.000、买单 battery 1@6.000。毛利 = 2 金币。
 let phase = "go-port"; // go-port → unload → charge → deliver
 let sellId = null;
 let buyId = null;

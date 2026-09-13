@@ -32,7 +32,7 @@ export const store = reactive({
 
 export function onSnapshot(s: Snapshot): void {
   // 场景切换（reset）后清面板积压并重拉场景静态信息：墙格 / 尺寸 /
-  // 装卸口足迹随场景重建，不重拉则画布永远停在旧场景（渲染以
+  // 装卸位足迹随场景重建，不重拉则画布永远停在旧场景（渲染以
   // snap.scenario !== static.id 早退）。事件环 seq 单调延续，tick 语义重开。
   if (store.lastScenario !== "" && s.scenario !== store.lastScenario) {
     store.diagEvents = [];

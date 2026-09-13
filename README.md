@@ -58,5 +58,5 @@ pnpm 建议经 corepack 启用，版本由 `web/package.json` 的 `packageManage
 - B1 code review 遗留技术债（低危，后续随相关里程碑处理）：take-from-robot
   结算草稿不更新被动方 carry（transferred 封锁使其当前无害）；挂单 qty 无
   上限校验（构造场景限定）；退款加法未统一 saturating；JS pick/drop 缺参
-  静默视为 (0,0)；销毁已预留装卸口复用 HAS_VEHICLE 码；满电充电返回 OK
+  静默视为 (0,0)；销毁已预留装卸位复用 HAS_VEHICLE 码；满电充电返回 OK
   且增益 0；世界不变量断言器不校验悬挂引用（docked_vehicle 等）。

@@ -33,7 +33,7 @@ struct SettlementPlan {
 struct Departure {
     vehicle_id: Id,
     order_id: Id,
-    port_id: Id,
+    dock_id: Id,
     /// 买单（玩家卖出）装满离场的收款；卖单离场无收款。
     revenue_milli: MilliGold,
 }
@@ -652,7 +652,7 @@ impl World {
             plan.departures.push(Departure {
                 vehicle_id: *vid,
                 order_id: v.order_id,
-                port_id: order.port.expect("在场车辆必有关联装卸口"),
+                dock_id: order.dock.expect("在场车辆必有关联装卸位"),
                 revenue_milli,
             });
         }
@@ -711,10 +711,10 @@ impl World {
                 self.my_orders.remove(&dep.order_id);
                 self.gold_milli = self.gold_milli.saturating_add(dep.revenue_milli);
                 // 装卸位释放。
-                if let Some(p) = self.ports.get_mut(&dep.port_id)
-                    && p.docked_vehicle == Some(v.id)
+                if let Some(d) = self.docks.get_mut(&dep.dock_id)
+                    && d.docked_vehicle == Some(v.id)
                 {
-                    p.docked_vehicle = None;
+                    d.docked_vehicle = None;
                 }
             }
         }

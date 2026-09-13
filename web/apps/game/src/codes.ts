@@ -28,7 +28,7 @@ export const CODE_LABELS: Record<string, string> = {
   NO_FUNDS: "金币不足",
   CREDIT_EXCEEDED: "超出信用额度",
   ON_VEHICLE: "货物仍在车上",
-  NO_FREE_PORT: "无空闲装卸位",
+  NO_FREE_DOCK: "无空闲装卸位",
   NOT_EMPTY: "非空，不可销毁",
   HAS_VEHICLE: "有车辆停靠",
   ORDER_GONE: "订单已不在市场",

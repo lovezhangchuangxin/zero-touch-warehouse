@@ -2,17 +2,17 @@
 //! 地面暂存、上架、充电、交付）。数值为 B2 锚点，市场刷新与价格波动属
 //! 里程碑 3；买卖价差沿用 B1 验收基线（cargo_loop 低买高卖）。
 //!
-//! 地图 16×12：西墙两个 1×2 门洞放装卸口（车辆渲染伸出第二格、逻辑仍为
-//! 1×1 锚点格——docs 记录在案的待定项，本层不改模拟）；中部两排货架留
-//! 2 格宽走廊（五台机器人贪心走位会在此对穿堵塞，供“玩家改码疏堵”验收）；
+//! 地图 16×12：北墙两个缺口放装卸位（1×2 占地：缺口锚点格 + 库内第二格，
+//! 两格都算障碍、都不铺墙瓦——docs/game-design/02）；中部两排货架留 2 格宽
+//! 走廊（五台机器人贪心走位会在此对穿堵塞，供“玩家改码疏堵”验收）；
 //! 南墙双充电桩。
 
 use serde_json::{Value, json};
 use ztw_model::{OrderSide, Position};
 use ztw_sim::World;
 
-/// 装卸口渲染足迹：锚点格 + 伸出方向的第二格（仅前端摆精灵用）。
-pub struct PortSpec {
+/// 装卸位场景规格：锚点格 + 朝向（指向库内第二格）。
+pub struct DockSpec {
     pub x: i32,
     pub y: i32,
     pub ext: (i32, i32),
@@ -29,15 +29,15 @@ pub struct ScenarioSpec {
     pub robots: &'static [(i32, i32)],
     pub shelves: &'static [(i32, i32)],
     pub chargers: &'static [(i32, i32)],
-    pub ports: &'static [PortSpec],
+    pub docks: &'static [DockSpec],
     /// (side, goods, qty, unit_price_milli)。
     pub listings: &'static [(OrderSide, &'static str, u32, i64)],
 }
 
-/// 西墙门洞（装卸口 1×2 渲染足迹，两格都不铺墙瓦）。
-const WEST_HOLES: [(i32, i32); 4] = [(0, 4), (0, 5), (0, 7), (0, 8)];
+/// 北墙缺口（装卸位锚点格不铺墙瓦；第二格在库内，本来就不是墙）。
+const NORTH_HOLES: [(i32, i32); 2] = [(3, 0), (12, 0)];
 
-/// 周边墙环减门洞。
+/// 周边墙环减缺口。
 fn perimeter_walls(w: i32, h: i32) -> Vec<(i32, i32)> {
     let mut walls = Vec::new();
     for x in 0..w {
@@ -48,13 +48,13 @@ fn perimeter_walls(w: i32, h: i32) -> Vec<(i32, i32)> {
         walls.push((0, y));
         walls.push((w - 1, y));
     }
-    walls.retain(|c| !WEST_HOLES.contains(c));
+    walls.retain(|c| !NORTH_HOLES.contains(c));
     walls
 }
 
-macro_rules! ports {
+macro_rules! docks {
     ($($x:expr, $y:expr, $ex:expr, $ey:expr;)*) => {
-        &[ $(PortSpec { x: $x, y: $y, ext: ($ex, $ey) },)* ]
+        &[ $(DockSpec { x: $x, y: $y, ext: ($ex, $ey) },)* ]
     };
 }
 
@@ -70,7 +70,7 @@ pub static B2_ONE: ScenarioSpec = ScenarioSpec {
     robots: &[(2, 3)],
     shelves: &[(5, 3), (6, 3), (7, 3), (5, 6), (6, 6), (7, 6)],
     chargers: &[(6, 10), (7, 10)],
-    ports: ports!(0, 4, 0, 1; 0, 7, 0, 1;),
+    docks: docks!(3, 0, 0, 1; 12, 0, 0, 1;),
     // 数量按单机能量预算收敛（take6+drop3+pick4+give5，移动不耗电）：
     // 全部六单 ≈ 10 组取放 ≈ 90 电量 < 初始 100，单机无需中途充电。
     listings: &[
@@ -95,7 +95,7 @@ pub static B2_FIVE: ScenarioSpec = ScenarioSpec {
     robots: &[(2, 2), (2, 4), (2, 6), (2, 8), (2, 10)],
     shelves: &[(5, 3), (6, 3), (7, 3), (5, 6), (6, 6), (7, 6)],
     chargers: &[(6, 10), (7, 10)],
-    ports: ports!(0, 4, 0, 1; 0, 7, 0, 1;),
+    docks: docks!(3, 0, 0, 1; 12, 0, 0, 1;),
     // 数量按单机能量预算收敛（take6+drop3+pick4+give5，移动不耗电）：
     // 全部六单 ≈ 10 组取放 ≈ 90 电量 < 初始 100，单机无需中途充电。
     listings: &[
@@ -127,8 +127,8 @@ pub fn build(spec: &ScenarioSpec) -> World {
     for &(x, y) in spec.chargers {
         w.add_charger(Position::new(x, y));
     }
-    for p in spec.ports {
-        w.add_port(Position::new(p.x, p.y));
+    for p in spec.docks {
+        w.add_dock(Position::new(p.x, p.y), p.ext);
     }
     for &(x, y) in spec.robots {
         w.add_robot(Position::new(x, y));
@@ -139,20 +139,20 @@ pub fn build(spec: &ScenarioSpec) -> World {
     w
 }
 
-/// 静态信息（前端一次拉取）：墙格、装卸口渲染足迹（含构造后的权威 id）、
+/// 静态信息（前端一次拉取）：墙格、装卸位（含构造后的权威 id 与朝向）、
 /// 地图尺寸。不随 tick 快照重复发送。
 pub fn static_json(spec: &ScenarioSpec, world: &World) -> Value {
     let walls: Vec<(i32, i32)> = perimeter_walls(spec.map_w, spec.map_h);
-    let ports: Vec<Value> = spec
-        .ports
+    let docks: Vec<Value> = spec
+        .docks
         .iter()
         .map(|p| {
             // 按位置找构造后的权威 id（build 顺序固定，位置一一对应）。
             let id = world
-                .ports
+                .docks
                 .values()
-                .find(|w| w.pos.x == p.x && w.pos.y == p.y)
-                .map(|w| w.id)
+                .find(|d| d.pos.x == p.x && d.pos.y == p.y)
+                .map(|d| d.id)
                 .unwrap_or(0);
             json!({ "id": id, "x": p.x, "y": p.y, "ext": [p.ext.0, p.ext.1] })
         })
@@ -164,7 +164,7 @@ pub fn static_json(spec: &ScenarioSpec, world: &World) -> Value {
         "map_w": spec.map_w,
         "map_h": spec.map_h,
         "walls": walls,
-        "ports": ports,
+        "docks": docks,
         "scenarios": SCENARIOS.iter().map(|s| json!({
             "id": s.id, "name": s.name, "desc": s.desc, "robots": s.robots.len(),
         })).collect::<Vec<_>>(),
@@ -176,7 +176,7 @@ mod tests {
     use super::*;
     use ztw_model::Position;
 
-    /// 场景合法性：机器人在可通行格、门洞两侧可供交互、关键点互不重叠。
+    /// 场景合法性：机器人在可通行格、装卸位两格成立且可供交互、关键点互不重叠。
     #[test]
     fn scenario_invariants() {
         for spec in SCENARIOS {
@@ -192,12 +192,33 @@ mod tests {
                 );
                 assert!(seen.insert((x, y)), "{} 机器人出生点重叠 {p:?}", spec.id);
             }
-            // 装卸口锚点格在墙线上，门洞格不铺墙；交互位（锚点内侧）可通行。
-            for p in spec.ports {
-                assert_eq!(p.x, 0, "装卸口贴西墙");
-                let hole2 = (p.x + p.ext.0, p.y + p.ext.1);
-                assert!(!perimeter_walls(spec.map_w, spec.map_h).contains(&hole2));
-                assert!(w.statically_passable(Position::new(1, p.y)), "交互位被占");
+            // 装卸位锚点在北墙缺口上，两格均为障碍；第二格外侧（交互站位）
+            // 可通行，机器人可绕到第二格周围。
+            for p in spec.docks {
+                assert_eq!(p.y, 0, "装卸位贴北墙");
+                assert!(p.ext.0.abs() + p.ext.1.abs() == 1, "ext 须为单位偏移");
+                let second = Position::new(p.x + p.ext.0, p.y + p.ext.1);
+                assert!(
+                    !perimeter_walls(spec.map_w, spec.map_h).contains(&(p.x, p.y)),
+                    "锚点格必须开墙"
+                );
+                assert!(
+                    w.statically_passable(second.step(p.ext.0, p.ext.1)),
+                    "交互位被占"
+                );
+                assert!(
+                    !w.statically_passable(Position::new(p.x, p.y)),
+                    "锚点格应为障碍"
+                );
+                assert!(!w.statically_passable(second), "第二格应为障碍");
+            }
+            // 反向闭合：每个缺口都必须有装卸位，否则该格既非墙又非障碍，
+            // 机器人可站进周墙缺口。
+            for h in NORTH_HOLES {
+                assert!(
+                    spec.docks.iter().any(|d| d.x == h.0 && d.y == h.1),
+                    "缺口 {h:?} 没有对应装卸位"
+                );
             }
             // 货架 / 充电桩不压机器人出生点。
             for &(x, y) in spec.shelves {
@@ -228,15 +249,15 @@ mod tests {
     }
 
     #[test]
-    fn static_json_carries_walls_and_ports() {
+    fn static_json_carries_walls_and_docks() {
         let w = build(&B2_ONE);
         let j = static_json(&B2_ONE, &w);
-        assert_eq!(j["walls"].as_array().unwrap().len(), 48); // 周长 52 − 4 门洞
-        let ports = j["ports"].as_array().unwrap();
-        assert_eq!(ports.len(), 2);
-        assert_eq!(ports[0]["ext"], json!([0, 1]));
+        assert_eq!(j["walls"].as_array().unwrap().len(), 50); // 周长 52 − 2 缺口
+        let docks = j["docks"].as_array().unwrap();
+        assert_eq!(docks.len(), 2);
+        assert_eq!(docks[0]["ext"], json!([0, 1]));
         // 权威 id 与世界一致。
-        let pid = ports[1]["id"].as_u64().unwrap();
-        assert!(w.ports.contains_key(&pid));
+        let did = docks[1]["id"].as_u64().unwrap();
+        assert!(w.docks.contains_key(&did));
     }
 }

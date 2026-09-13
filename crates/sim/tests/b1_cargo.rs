@@ -49,13 +49,13 @@ fn give_accept_static_checks() {
     let full = w.add_shelf_sized(Position::new(1, 2), 0);
     assert_eq!(w.accept_give(1, full, None), codes::TARGET_FULL);
 
-    // 车辆类型不符 / 接收机器人非空载。车停 (0,5)，用相邻机器人 (1,5) 交互。
-    let port = w.add_port(Position::new(0, 5));
+    // 车辆类型不符 / 接收机器人非空载。装卸位 (0,4)+(0,5)，机器人 (1,5) 与交互格相邻。
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Buy, "chip", 2, 7000);
     w.manage_take(o);
     w.end_tick();
     w.boundary_events();
-    let vid = w.ports[&port].docked_vehicle.unwrap();
+    let vid = w.docks[&dock].docked_vehicle.unwrap();
     let dock_worker = w.add_robot(Position::new(1, 5));
     let chip_box = give_robot_a_box(&mut w, dock_worker, "water"); // 类型不符
     assert_eq!(

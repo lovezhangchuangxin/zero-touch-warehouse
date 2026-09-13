@@ -8,22 +8,22 @@ use common::*;
 use ztw_model::{OrderSide, Position, VehicleKind, codes};
 use ztw_sim::{CANCEL_FEE_DENOMINATOR, World};
 
-/// 接单并推进到车辆到场，返回 (订单 id, 车辆 id, 装卸口 id)。
+/// 接单并推进到车辆到场，返回 (订单 id, 车辆 id, 装卸位 id)。
 fn docked_vehicle(w: &mut World, side: OrderSide, qty: u32, price: i64) -> (u64, u64, u64) {
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(side, "battery", qty, price);
     let (code, _) = w.manage_take(o);
     assert_eq!(code, codes::OK);
     w.end_tick();
     w.boundary_events();
-    let vid = w.ports[&port].docked_vehicle.expect("车辆已到场");
-    (o, vid, port)
+    let vid = w.docks[&dock].docked_vehicle.expect("车辆已到场");
+    (o, vid, dock)
 }
 
 #[test]
 fn in_vehicle_empties_then_departs() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (o, vid, port) = docked_vehicle(&mut w, OrderSide::Sell, 2, 5000);
+    let (o, vid, dock) = docked_vehicle(&mut w, OrderSide::Sell, 2, 5000);
     let gold_after_take = w.gold_milli;
     let r = w.add_robot(Position::new(1, 5)); // 与 (0,5) 相邻
 
@@ -53,7 +53,7 @@ fn in_vehicle_empties_then_departs() {
     // 卸空即离场：同一结算内完成离场、订单完成、装卸位释放。
     assert!(!w.vehicles.contains_key(&vid));
     assert!(!w.my_orders.contains_key(&o));
-    assert_eq!(w.ports[&port].docked_vehicle, None);
+    assert_eq!(w.docks[&dock].docked_vehicle, None);
     assert_eq!(w.gold_milli, gold_after_take); // 卖单（买入）已付，离场无收款
     assert_eq!(w.robots[&r].carry, Some(b2)); // 箱已归玩家
     check_invariants(&w);
@@ -62,7 +62,7 @@ fn in_vehicle_empties_then_departs() {
 #[test]
 fn out_vehicle_fills_departs_and_pays() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (o, vid, port) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
+    let (o, vid, dock) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
     let gold_before = w.gold_milli;
     assert_eq!(w.gold_milli, gold_before); // 买单不预付
     let r = w.add_robot(Position::new(1, 5));
@@ -91,7 +91,7 @@ fn out_vehicle_fills_departs_and_pays() {
     // 装满即离场并收款。
     assert!(!w.vehicles.contains_key(&vid));
     assert!(!w.my_orders.contains_key(&o));
-    assert_eq!(w.ports[&port].docked_vehicle, None);
+    assert_eq!(w.docks[&dock].docked_vehicle, None);
     assert_eq!(w.gold_milli, gold_before + 2 * 7000);
     assert!(!w.ground_boxes.contains_key(&b1)); // 货随车退出世界
     assert!(!w.ground_boxes.contains_key(&b2));
@@ -101,7 +101,7 @@ fn out_vehicle_fills_departs_and_pays() {
 #[test]
 fn vehicle_only_accepts_order_goods_type() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (_o, vid, _port) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000); // battery
+    let (_o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000); // battery
     let r = w.add_robot(Position::new(1, 5));
     let wrong = w.add_ground_box("chip", Position::new(1, 4));
     assert_eq!(w.accept_pick(r, 1, 4), codes::OK);
@@ -116,7 +116,7 @@ fn vehicle_only_accepts_order_goods_type() {
 #[test]
 fn cancel_before_arrival_refunds_minus_fee() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Sell, "battery", 2, 5000);
     w.manage_take(o);
     let paid = w.gold_milli;
@@ -127,7 +127,7 @@ fn cancel_before_arrival_refunds_minus_fee() {
     assert_eq!(eff.unwrap().fee_milli, fee);
     assert_eq!(w.gold_milli, paid + 2 * 5000 - fee);
     assert!(!w.my_orders.contains_key(&o));
-    assert_eq!(w.ports[&port].reserved_for, None);
+    assert_eq!(w.docks[&dock].reserved_for, None);
     // 到场事件已撤销。
     w.end_tick();
     w.boundary_events();
@@ -136,9 +136,9 @@ fn cancel_before_arrival_refunds_minus_fee() {
 
 #[test]
 fn cancel_arrived_full_in_vehicle_restores() {
-    // 入库车原样未动（车满）→ 可取消；车与货物退回对方，装卸口释放。
+    // 入库车原样未动（车满）→ 可取消；车与货物退回对方，装卸位释放。
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (o, vid, port) = docked_vehicle(&mut w, OrderSide::Sell, 2, 5000);
+    let (o, vid, dock) = docked_vehicle(&mut w, OrderSide::Sell, 2, 5000);
     let gold_after_take = w.gold_milli;
     let boxes_before = w.ground_boxes.len();
 
@@ -150,14 +150,14 @@ fn cancel_arrived_full_in_vehicle_restores() {
     );
     assert!(!w.vehicles.contains_key(&vid));
     assert_eq!(w.ground_boxes.len(), boxes_before - 2); // 车上箱随之移除
-    assert_eq!(w.ports[&port].docked_vehicle, None);
+    assert_eq!(w.docks[&dock].docked_vehicle, None);
     check_invariants(&w);
 }
 
 #[test]
 fn cancel_after_partial_unload_rejects() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (o, vid, _port) = docked_vehicle(&mut w, OrderSide::Sell, 2, 5000);
+    let (o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Sell, 2, 5000);
     let r = w.add_robot(Position::new(1, 5));
     let b1 = w.vehicles[&vid].box_ids[0];
     assert_eq!(w.accept_take(r, vid, b1), codes::OK);
@@ -171,7 +171,7 @@ fn cancel_after_partial_unload_rejects() {
 #[test]
 fn cancel_buy_side_fee_can_create_debt() {
     let mut w = World::new_empty(10, 10, 0); // 零金币
-    let (o, vid, _port) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
+    let (o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
     // 出库车为空（初态）→ 可取消；手续费从金币扣、不足自动计欠款。
     let (code, eff) = w.manage_cancel(o);
     assert_eq!(code, codes::OK);
@@ -187,7 +187,7 @@ fn cancel_buy_side_fee_can_create_debt() {
 fn restore_out_vehicle_by_taking_back_then_cancel() {
     // 误装一箱进出库车：取回即恢复初态，可取消（docs/game-design/04）。
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (o, vid, _port) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
+    let (o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
     let r = w.add_robot(Position::new(1, 5));
     let b = w.add_ground_box("battery", Position::new(1, 4));
     assert_eq!(w.accept_pick(r, 1, 4), codes::OK);
@@ -209,7 +209,7 @@ fn restore_out_vehicle_by_taking_back_then_cancel() {
 fn boxes_on_vehicle_cannot_be_destroyed() {
     // 买入的货物在卸离购入（入库）车辆前不可销毁。
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (_o, vid, _port) = docked_vehicle(&mut w, OrderSide::Sell, 1, 5000);
+    let (_o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Sell, 1, 5000);
     let bx = w.vehicles[&vid].box_ids[0];
     assert_eq!(w.manage_destroy(bx).0, codes::ON_VEHICLE);
     // 卸离后即可销毁（止损）。
@@ -228,7 +228,7 @@ fn out_vehicle_boxes_can_be_destroyed() {
     // 出库车上的箱子是玩家自有履约货：销毁后仍可补同类型箱完成订单，
     // 允许止损（ON_VEHICLE 仅限购入车，docs/game-design/04）。
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (o, vid, _port) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
+    let (o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Buy, 2, 7000);
     let r = w.add_robot(Position::new(1, 5));
     let b1 = w.add_ground_box("battery", Position::new(1, 4));
     assert_eq!(w.accept_pick(r, 1, 4), codes::OK);
@@ -247,7 +247,7 @@ fn out_vehicle_boxes_can_be_destroyed() {
 #[test]
 fn vehicle_cannot_be_destroyed_directly() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let (_o, vid, _port) = docked_vehicle(&mut w, OrderSide::Sell, 1, 5000);
+    let (_o, vid, _dock) = docked_vehicle(&mut w, OrderSide::Sell, 1, 5000);
     assert_eq!(w.manage_destroy(vid).0, codes::INVALID_TARGET); // cancel 是唯一路径
     assert_eq!(w.vehicles[&vid].kind, VehicleKind::In);
 }

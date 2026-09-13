@@ -1,9 +1,9 @@
 // 五机贪心：无分工、无分道。每台都独立执行与单机版相同的驱动——
 // 抢同一张挂单、挤同一个交互站位、共用同一个暂存区。现象（事件面板
 // 可解释）：抢单 ORDER_TAKEN、站位互挤 CELL_OCCUPIED/CELL_CONTESTED、
-// 交互列对穿 CHAIN_BLOCKED、暂存格抢占。
+// 通道对穿 CHAIN_BLOCKED、暂存格抢占。
 function standNear(v) {
-  return [v.interact_pos.x + 1, v.interact_pos.y];
+  return [v.interact_pos.x, v.interact_pos.y + 1];
 }
 
 function stepToward(r, tx, ty) {
@@ -21,7 +21,18 @@ function stepToward(r, tx, ty) {
           [0, sy],
           [sx, 0],
         ];
-  for (const [mx, my] of tries) {
+  // 同行 / 同列被挡（如暂存区的箱子）时向垂直轴侧向绕一步。
+  const side =
+    sx === 0
+      ? [
+          [1, 0],
+          [-1, 0],
+        ]
+      : [
+          [0, 1],
+          [0, -1],
+        ];
+  for (const [mx, my] of [...tries, ...side]) {
     if ((mx !== 0 || my !== 0) && r.move([mx, my]) === Game.E.OK) return true;
   }
   return false;
@@ -61,7 +72,6 @@ function drive(r, vin, vout) {
         r.give(vout);
         return;
       }
-      if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
       stepToward(r, tx, ty);
       return;
     }
@@ -76,12 +86,7 @@ function drive(r, vin, vout) {
       r.pick(bx, by);
       return;
     }
-    if (r.pos.x > bx && r.move(Game.WEST) === Game.E.OK) return;
-    if (r.pos.y !== by) {
-      stepToward(r, 1, by);
-      return;
-    }
-    if (r.pos.x < bx) r.move(Game.EAST);
+    stepToward(r, bx, by);
     return;
   }
 
@@ -95,7 +100,6 @@ function drive(r, vin, vout) {
       r.take(vin, vin.boxes[0].id);
       return;
     }
-    if (r.pos.x !== 1 && r.move(Game.WEST) === Game.E.OK) return;
     stepToward(r, tx, ty);
     return;
   }

@@ -19,7 +19,7 @@ fn five_world() -> World {
     }
     w.add_shelf(Position::new(6, 3));
     w.add_charger(Position::new(2, 5));
-    w.add_port(Position::new(0, 4));
+    w.add_dock(Position::new(0, 4), (0, 1));
     w
 }
 
@@ -34,7 +34,7 @@ fn twelve_world() -> World {
         w.add_shelf(Position::new(x, y));
     }
     w.add_charger(Position::new(0, 0));
-    w.add_port(Position::new(0, 4));
+    w.add_dock(Position::new(0, 4), (0, 1));
     w.add_listing(ztw_model::OrderSide::Sell, "battery", 2, 5_000);
     w
 }

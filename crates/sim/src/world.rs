@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ztw_model::{
-    Charger, GroundBox, Id, MilliGold, Order, OrderSide, Port, Position, Robot, Shelf, Vehicle,
+    Charger, Dock, GroundBox, Id, MilliGold, Order, OrderSide, Position, Robot, Shelf, Vehicle,
     VehicleKind, codes,
 };
 
@@ -24,19 +24,19 @@ pub struct World {
     pub tick: u64,
     pub map_w: i32,
     pub map_h: i32,
-    /// 静态障碍之外的墙（测试用）；货架 / 充电桩 / 装卸口 / 地面货物另行计入。
+    /// 静态障碍之外的墙（测试用）；货架 / 充电桩 / 装卸位 / 地面货物另行计入。
     walls: BTreeSet<Position>,
     /// 世界种子：一切子 PRNG 流的派生根。
     pub seed: u64,
     /// 装卸位分配流（docs/architecture/02：市场、装卸位分配、场景独立分流）。
-    pub(crate) rng_port: Xoshiro256,
+    pub(crate) rng_dock: Xoshiro256,
     pub next_id: Id,
     pub gold_milli: MilliGold,
     pub debt_milli: MilliGold,
     pub robots: BTreeMap<Id, Robot>,
     pub shelves: BTreeMap<Id, Shelf>,
     pub chargers: BTreeMap<Id, Charger>,
-    pub ports: BTreeMap<Id, Port>,
+    pub docks: BTreeMap<Id, Dock>,
     pub vehicles: BTreeMap<Id, Vehicle>,
     pub ground_boxes: BTreeMap<Id, GroundBox>,
     /// 市场挂单（固定挂单；刷新与价格波动属里程碑 3）。
@@ -58,14 +58,14 @@ impl World {
             map_h,
             walls: BTreeSet::new(),
             seed: 0,
-            rng_port: Xoshiro256::derive(0, "port"),
+            rng_dock: Xoshiro256::derive(0, "dock"),
             next_id: 1,
             gold_milli,
             debt_milli: 0,
             robots: BTreeMap::new(),
             shelves: BTreeMap::new(),
             chargers: BTreeMap::new(),
-            ports: BTreeMap::new(),
+            docks: BTreeMap::new(),
             vehicles: BTreeMap::new(),
             ground_boxes: BTreeMap::new(),
             listings: BTreeMap::new(),
@@ -79,7 +79,7 @@ impl World {
     /// 设定世界种子（须在世界构造前调用，派生流随之重建）。
     pub fn with_seed(mut self, seed: u64) -> World {
         self.seed = seed;
-        self.rng_port = Xoshiro256::derive(seed, "port");
+        self.rng_dock = Xoshiro256::derive(seed, "dock");
         self
     }
 
@@ -133,13 +133,37 @@ impl World {
         id
     }
 
-    pub fn add_port(&mut self, pos: Position) -> Id {
+    /// 添加装卸位：锚点为靠墙缺口格，`ext` 指向库内第二格（单位偏移）。
+    /// 两格均计入静态障碍；第二格须在界内且不与既有静态设施重叠（debug 断言，
+    /// 场景构造负责满足）。
+    pub fn add_dock(&mut self, pos: Position, ext: (i32, i32)) -> Id {
+        debug_assert!(
+            ext.0.abs() + ext.1.abs() == 1,
+            "装卸位 ext 必须为单位偏移向量"
+        );
+        let second = pos.step(ext.0, ext.1);
+        debug_assert!(
+            second.x >= 0 && second.y >= 0 && second.x < self.map_w && second.y < self.map_h,
+            "装卸位第二格 {second:?} 越界"
+        );
+        let occupied = |p: Position| {
+            self.walls.contains(&p)
+                || self.shelves.values().any(|s| s.pos == p)
+                || self.chargers.values().any(|c| c.pos == p)
+                || self
+                    .docks
+                    .values()
+                    .any(|d| d.pos == p || d.pos.step(d.ext.0, d.ext.1) == p)
+        };
+        debug_assert!(!occupied(pos), "装卸位锚点 {pos:?} 与既有设施重叠");
+        debug_assert!(!occupied(second), "装卸位第二格 {second:?} 与既有设施重叠");
         let id = self.alloc_id();
-        self.ports.insert(
+        self.docks.insert(
             id,
-            Port {
+            Dock {
                 id,
                 pos,
+                ext,
                 docked_vehicle: None,
                 reserved_for: None,
             },
@@ -179,7 +203,7 @@ impl World {
                 qty,
                 unit_price_milli,
                 vehicle: None,
-                port: None,
+                dock: None,
             },
         );
         id
@@ -189,8 +213,9 @@ impl World {
     // 静态查询
     // -----------------------------------------------------------------------
 
-    /// 静态可通行判定：界内且非墙、非货架、非充电桩、非装卸口、非地面货物。
-    /// 车辆停靠在装卸口格上（口本身已计入障碍），机器人不是静态障碍。
+    /// 静态可通行判定：界内且非墙、非货架、非充电桩、非装卸位、非地面货物。
+    /// 装卸位两格（锚点 + 库内第二格）均计入障碍，停靠货车不再另行占格；
+    /// 机器人不是静态障碍。
     pub fn statically_passable(&self, p: Position) -> bool {
         if p.x < 0 || p.y < 0 || p.x >= self.map_w || p.y >= self.map_h {
             return false;
@@ -204,7 +229,11 @@ impl World {
         if self.chargers.values().any(|c| c.pos == p) {
             return false;
         }
-        if self.ports.values().any(|p0| p0.pos == p) {
+        if self
+            .docks
+            .values()
+            .any(|d| d.pos == p || d.pos.step(d.ext.0, d.ext.1) == p)
+        {
             return false;
         }
         if self
@@ -254,7 +283,7 @@ impl World {
         } else if self.robots.contains_key(&target_id) {
             Ok(TargetRef::Robot(target_id))
         } else if self.chargers.contains_key(&target_id)
-            || self.ports.contains_key(&target_id)
+            || self.docks.contains_key(&target_id)
             || self.ground_boxes.contains_key(&target_id)
         {
             Err(codes::INVALID_TARGET)
@@ -304,7 +333,7 @@ impl World {
 
     pub fn boundary_events(&mut self) {
         // 到期判定含迟到补发（<=）：宿主跳过某 tick 的边界处理后，排定
-        // 事件在下次调用时补上车，不因迟到而丢失（否则装卸口永久悬挂）。
+        // 事件在下次调用时补上车，不因迟到而丢失（否则装卸位永久悬挂）。
         let mut due: Vec<Id> = self
             .arrivals
             .iter()
@@ -326,8 +355,11 @@ impl World {
             OrderSide::Sell => VehicleKind::In,
             OrderSide::Buy => VehicleKind::Out,
         };
-        let port_id = order.port.expect("已接订单必有预留装卸口");
-        let port_pos = self.ports.get(&port_id).expect("装卸口存在").pos;
+        let dock_id = order.dock.expect("已接订单必有预留装卸位");
+        let interact_pos = {
+            let d = self.docks.get(&dock_id).expect("装卸位存在");
+            d.pos.step(d.ext.0, d.ext.1)
+        };
         let goods = order.goods_type.clone();
         let qty = order.qty;
         let vehicle_id = self.alloc_id();
@@ -341,7 +373,7 @@ impl World {
                     GroundBox {
                         id: box_id,
                         goods_type: goods.clone(),
-                        pos: port_pos,
+                        pos: interact_pos,
                         holder: Some(vehicle_id),
                     },
                 );
@@ -354,14 +386,14 @@ impl World {
                 id: vehicle_id,
                 kind,
                 goods_type: goods,
-                interact_pos: port_pos,
+                interact_pos,
                 order_id,
                 box_ids,
             },
         );
-        if let Some(port) = self.ports.get_mut(&port_id) {
-            port.docked_vehicle = Some(vehicle_id);
-            port.reserved_for = None;
+        if let Some(dock) = self.docks.get_mut(&dock_id) {
+            dock.docked_vehicle = Some(vehicle_id);
+            dock.reserved_for = None;
         }
         if let Some(order) = self.my_orders.get_mut(&order_id) {
             order.vehicle = Some(vehicle_id);
@@ -400,7 +432,7 @@ impl World {
         // 地图维度影响出界判定，是行为字段（契约：tick 边界调用）。
         mix(self.map_w as u64, &mut h);
         mix(self.map_h as u64, &mut h);
-        for w in self.rng_port.state_words() {
+        for w in self.rng_dock.state_words() {
             mix(w, &mut h);
         }
         for p in &self.walls {
@@ -435,12 +467,14 @@ impl World {
             mix(c.pos.x as u64, &mut h);
             mix(c.pos.y as u64, &mut h);
         }
-        for (id, p) in &self.ports {
+        for (id, d) in &self.docks {
             mix(*id, &mut h);
-            mix(p.pos.x as u64, &mut h);
-            mix(p.pos.y as u64, &mut h);
-            mix(p.docked_vehicle.unwrap_or(0), &mut h);
-            mix(p.reserved_for.unwrap_or(0), &mut h);
+            mix(d.pos.x as u64, &mut h);
+            mix(d.pos.y as u64, &mut h);
+            mix(d.ext.0 as u64, &mut h);
+            mix(d.ext.1 as u64, &mut h);
+            mix(d.docked_vehicle.unwrap_or(0), &mut h);
+            mix(d.reserved_for.unwrap_or(0), &mut h);
         }
         for (id, v) in &self.vehicles {
             mix(*id, &mut h);
@@ -466,7 +500,7 @@ impl World {
             mix(o.qty as u64, h);
             mix(o.unit_price_milli as u64, h);
             mix(o.vehicle.unwrap_or(0), h);
-            mix(o.port.unwrap_or(0), h);
+            mix(o.dock.unwrap_or(0), h);
             mix_bytes(&o.goods_type, h);
         };
         for o in self.listings.values() {

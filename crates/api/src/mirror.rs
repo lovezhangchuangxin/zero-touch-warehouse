@@ -24,12 +24,12 @@ pub struct MirrorView {
     pub debt_milli: String,
     pub map_w: i32,
     pub map_h: i32,
-    /// 静态障碍格（墙 / 货架 / 充电桩 / 装卸口 / 地面货物）。
+    /// 静态障碍格（墙 / 货架 / 充电桩 / 装卸位 / 地面货物）。
     pub blocked: Vec<(i32, i32)>,
     pub robots: Vec<RobotView>,
     pub shelves: Vec<ShelfView>,
     pub chargers: Vec<ChargerView>,
-    pub ports: Vec<PortView>,
+    pub docks: Vec<DockView>,
     pub vehicles: Vec<VehicleView>,
     pub ground_boxes: Vec<BoxView>,
     pub sell_orders: Vec<OrderView>,
@@ -71,11 +71,13 @@ pub struct ChargerView {
     pub y: i32,
 }
 
+/// 装卸位视图：`x`/`y` 为靠墙缺口锚点格，`ext` 指向库内第二格。
 #[derive(Serialize, Debug, Clone)]
-pub struct PortView {
+pub struct DockView {
     pub id: Id,
     pub x: i32,
     pub y: i32,
+    pub ext: (i32, i32),
     pub docked_vehicle: Option<Id>,
 }
 
@@ -87,6 +89,8 @@ pub struct VehicleView {
     pub x: i32,
     pub y: i32,
     pub order_id: Id,
+    /// 所停靠装卸位 id。
+    pub dock: Id,
     pub boxes: Vec<BoxView>,
 }
 
@@ -109,7 +113,7 @@ pub struct OrderView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vehicle: Option<Id>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub port: Option<Id>,
+    pub dock: Option<Id>,
 }
 
 fn order_view(o: &Order) -> OrderView {
@@ -120,7 +124,7 @@ fn order_view(o: &Order) -> OrderView {
         qty: o.qty,
         unit_price_milli: money(o.unit_price_milli),
         vehicle: o.vehicle,
-        port: o.port,
+        dock: o.dock,
     }
 }
 
@@ -194,27 +198,36 @@ impl MirrorView {
                     y: c.pos.y,
                 })
                 .collect(),
-            ports: world
-                .ports
+            docks: world
+                .docks
                 .values()
-                .map(|p| PortView {
-                    id: p.id,
-                    x: p.pos.x,
-                    y: p.pos.y,
-                    docked_vehicle: p.docked_vehicle,
+                .map(|d| DockView {
+                    id: d.id,
+                    x: d.pos.x,
+                    y: d.pos.y,
+                    ext: d.ext,
+                    docked_vehicle: d.docked_vehicle,
                 })
                 .collect(),
             vehicles: world
                 .vehicles
                 .values()
-                .map(|v| VehicleView {
-                    id: v.id,
-                    kind: v.kind.as_str().to_string(),
-                    goods_type: v.goods_type.clone(),
-                    x: v.interact_pos.x,
-                    y: v.interact_pos.y,
-                    order_id: v.order_id,
-                    boxes: v.box_ids.iter().map(|id| box_view(*id)).collect(),
+                .map(|v| {
+                    let dock = world
+                        .my_orders
+                        .get(&v.order_id)
+                        .and_then(|o| o.dock)
+                        .expect("在场车辆订单必有预留装卸位");
+                    VehicleView {
+                        id: v.id,
+                        kind: v.kind.as_str().to_string(),
+                        goods_type: v.goods_type.clone(),
+                        x: v.interact_pos.x,
+                        y: v.interact_pos.y,
+                        order_id: v.order_id,
+                        dock,
+                        boxes: v.box_ids.iter().map(|id| box_view(*id)).collect(),
+                    }
                 })
                 .collect(),
             ground_boxes: world
@@ -245,8 +258,8 @@ impl MirrorView {
 }
 
 /// 管理操作的镜像同步增量：宿主按同一 FIFO 回放到本地镜像，字段与宿主
-/// 回放逻辑一一对应（docs/architecture/03）。装卸口预留不进增量：
-/// PortView 不含 reserved_for（docs/game-design/08 字段表），预留期仅一个
+/// 回放逻辑一一对应（docs/architecture/03）。装卸位预留不进增量：
+/// DockView 不含 reserved_for（docs/game-design/08 字段表），预留期仅一个
 /// tick，下一 tick 全量镜像即一致；接单权威以 take 结果码为准。
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -269,18 +282,18 @@ pub struct CancelDelta {
     pub debt_milli: String,
     pub remove_my_order: Id,
     pub remove_vehicle: Option<Id>,
-    pub update_port: Option<PortPatch>,
+    pub update_dock: Option<DockPatch>,
 }
 
 #[derive(Serialize, Debug, Clone)]
-pub struct PortPatch {
+pub struct DockPatch {
     pub id: Id,
     pub docked_vehicle: Option<Id>,
 }
 
 #[derive(Serialize, Debug, Clone)]
 pub struct DestroyDelta {
-    /// 对象类别：robot / shelf / charger / port / box。
+    /// 对象类别：robot / shelf / charger / dock / box。
     pub object: String,
     pub id: Id,
     pub gold_milli: String,
@@ -305,9 +318,9 @@ impl MirrorDelta {
             debt_milli: money(world_after.debt_milli),
             remove_my_order: eff.order_id,
             remove_vehicle: eff.vehicle_id,
-            update_port: eff.port_id.map(|id| PortPatch {
+            update_dock: eff.dock_id.map(|id| DockPatch {
                 id,
-                docked_vehicle: world_after.ports.get(&id).and_then(|p| p.docked_vehicle),
+                docked_vehicle: world_after.docks.get(&id).and_then(|d| d.docked_vehicle),
             }),
         })
     }
@@ -317,17 +330,17 @@ impl MirrorDelta {
             DestroyedKind::Robot => "robot",
             DestroyedKind::Shelf => "shelf",
             DestroyedKind::Charger => "charger",
-            DestroyedKind::Port => "port",
+            DestroyedKind::Dock => "dock",
             DestroyedKind::GroundBox => "box",
         };
         MirrorDelta::Destroy(DestroyDelta {
             object: object.to_string(),
             id: eff.target_id,
             gold_milli: money(world_after.gold_milli),
-            unblock: eff.freed_cell.map(|p| vec![(p.x, p.y)]).unwrap_or_default(),
+            unblock: eff.freed_cells.iter().map(|p| (p.x, p.y)).collect(),
             // 无地面格的货物 = 被携带 / 在架，影响嵌套视图（robot.carry /
             // shelf.boxes），增量无法补丁，置 rebuild 走整体重建。
-            rebuild: matches!(eff.kind, DestroyedKind::GroundBox) && eff.freed_cell.is_none(),
+            rebuild: matches!(eff.kind, DestroyedKind::GroundBox) && eff.freed_cells.is_empty(),
         })
     }
 
@@ -359,7 +372,7 @@ mod tests {
         let mut w = World::new_empty(6, 5, 123_000);
         w.add_robot(Position::new(1, 1));
         w.add_shelf(Position::new(3, 3));
-        w.add_port(Position::new(0, 4));
+        w.add_dock(Position::new(0, 4), (1, 0));
         w.add_listing(OrderSide::Sell, "battery", 2, 5_000);
         let m = MirrorView::from_world(&w, 1);
         let json = m.to_json();
@@ -367,7 +380,7 @@ mod tests {
         assert!(json.contains("\"unit_price_milli\":\"5000\""));
         assert_eq!(m.robots.len(), 1);
         assert_eq!(m.sell_orders.len(), 1);
-        assert_eq!(m.blocked.len(), 2); // 货架 + 装卸口
+        assert_eq!(m.blocked.len(), 3); // 货架 + 装卸位两格
     }
 
     /// 增量 JSON 形状契约：宿主 applyDelta 逐字段回放（bootstrap.js），
@@ -376,7 +389,7 @@ mod tests {
     fn delta_shapes() {
         // take：标签 + 挂单移除 + 已接订单回填。
         let mut w = World::new_empty(6, 5, 123_000);
-        w.add_port(Position::new(0, 4));
+        w.add_dock(Position::new(0, 4), (1, 0));
         let o = w.add_listing(OrderSide::Sell, "battery", 2, 5_000);
         let (code, eff) = w.manage_take(o);
         assert_eq!(code, "OK");
@@ -385,9 +398,9 @@ mod tests {
         assert_eq!(j["gold_milli"], "113000"); // 字符串防浮点
         assert_eq!(j["remove_listing"], o);
         assert_eq!(j["add_my_order"]["id"], o);
-        assert_eq!(j["add_my_order"]["port"], *w.ports.keys().next().unwrap());
+        assert_eq!(j["add_my_order"]["dock"], *w.docks.keys().next().unwrap());
 
-        // cancel（未到场）：remove_vehicle / update_port 为 null。
+        // cancel（未到场）：remove_vehicle / update_dock 为 null。
         let (code, eff) = w.manage_cancel(o);
         assert_eq!(code, "OK");
         let j = serde_json::to_value(MirrorDelta::from_cancel(&w, &eff.unwrap())).unwrap();
@@ -396,24 +409,24 @@ mod tests {
         assert_eq!(j["debt_milli"], "0");
         assert_eq!(j["remove_my_order"], o);
         assert!(j["remove_vehicle"].is_null());
-        // 未到场取消：车辆为 null，但预留口的补丁对象仍在（清 docked 语义）。
-        assert_eq!(j["update_port"]["id"], *w.ports.keys().next().unwrap());
-        assert!(j["update_port"]["docked_vehicle"].is_null());
+        // 未到场取消：车辆为 null，但预留位的补丁对象仍在（清 docked 语义）。
+        assert_eq!(j["update_dock"]["id"], *w.docks.keys().next().unwrap());
+        assert!(j["update_dock"]["docked_vehicle"].is_null());
 
-        // cancel（到场后）：车辆移除与装卸口清空补丁。
+        // cancel（到场后）：车辆移除与装卸位清空补丁。
         let mut w2 = World::new_empty(6, 5, 123_000);
-        let port = w2.add_port(Position::new(0, 4));
+        let dock = w2.add_dock(Position::new(0, 4), (1, 0));
         let o2 = w2.add_listing(OrderSide::Sell, "battery", 1, 5_000);
         w2.manage_take(o2);
         w2.end_tick();
         w2.boundary_events();
-        let vid = w2.ports[&port].docked_vehicle.unwrap();
+        let vid = w2.docks[&dock].docked_vehicle.unwrap();
         let (code, eff) = w2.manage_cancel(o2);
         assert_eq!(code, "OK");
         let j = serde_json::to_value(MirrorDelta::from_cancel(&w2, &eff.unwrap())).unwrap();
         assert_eq!(j["remove_vehicle"], vid);
-        assert_eq!(j["update_port"]["id"], port);
-        assert!(j["update_port"]["docked_vehicle"].is_null());
+        assert_eq!(j["update_dock"]["id"], dock);
+        assert!(j["update_dock"]["docked_vehicle"].is_null());
 
         // destroy：对象类别、blocked 补丁（元组序列化为 [x,y] 数组）、退款。
         let mut w3 = World::new_empty(6, 5, 123_000);
@@ -426,6 +439,16 @@ mod tests {
         assert_eq!(j["id"], shelf);
         assert_eq!(j["gold_milli"], "210500"); // 123 + 87.5（设备价 175 的一半）
         assert_eq!(j["unblock"], serde_json::json!([[3, 3]]));
+        assert_eq!(j["rebuild"], false);
+
+        // destroy 装卸位：锚点与第二格同时解除占用。
+        let mut w5 = World::new_empty(6, 5, 123_000);
+        let d5 = w5.add_dock(Position::new(0, 4), (1, 0));
+        let (code, eff) = w5.manage_destroy(d5);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_destroy(&w5, &eff.unwrap())).unwrap();
+        assert_eq!(j["object"], "dock");
+        assert_eq!(j["unblock"], serde_json::json!([[0, 4], [1, 4]]));
         assert_eq!(j["rebuild"], false);
 
         // destroy 被携带货物：无地面格 → rebuild 置位走整体重建。

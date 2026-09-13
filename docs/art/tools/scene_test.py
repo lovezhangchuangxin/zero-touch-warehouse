@@ -79,7 +79,7 @@ put("wall_corner_nw", *cell_center(0, 0))
 put("wall_corner_ne", *cell_center(COLS - 1, 0))
 put("wall_corner_sw", *cell_center(0, ROWS - 1))
 put("wall_corner_se", *cell_center(COLS - 1, ROWS - 1))
-openings = {(2, 0), (12, 0)}  # 装卸口开在墙的缺口上：缺口格不铺墙瓦
+openings = {(2, 0), (12, 0)}  # 装卸位开在墙的缺口上：缺口格不铺墙瓦
 for i, x in enumerate(range(1, COLS - 1)):
     if (x, 0) not in openings:  # 只跳过北墙缺口，南墙不受影响
         put(wall_pool("n")[i % len(wall_pool("n"))], *cell_center(x, 0))
@@ -89,9 +89,9 @@ for i, y in enumerate(range(1, ROWS - 1)):
     put(wall_pool("w")[i % len(wall_pool("w"))], *cell_center(0, y))
     put(wall_pool("e")[i % len(wall_pool("e"))], *cell_center(COLS - 1, y))
 
-# --- 装卸口摆在墙缺口处：缺口格 + 库内格组成 1x2 ---
-put("port_v_empty", *region_center(2, 0, 1, 2))      # 空闲装卸口（虚线框 = 可接单）
-put("port_v_occupied", *region_center(12, 0, 1, 2))  # 占用装卸口 + 停靠卡车
+# --- 装卸位摆在墙缺口处：缺口格 + 库内格组成 1x2 ---
+put("port_v_empty", *region_center(2, 0, 1, 2))      # 空闲装卸位（虚线框 = 可接单）
+put("port_v_occupied", *region_center(12, 0, 1, 2))  # 占用装卸位 + 停靠卡车
 put("truck_s_empty", *region_center(12, 0, 1, 2))
 # --- shelves: base tile + boxes in the 2x2 sub-cell slots (±0.25 cell) ---
 # 3 of 4 slots filled on purpose: a partially stocked shelf

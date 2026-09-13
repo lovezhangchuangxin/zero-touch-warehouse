@@ -44,7 +44,7 @@ export class Stage {
   private app: Application;
   private root = new Container();
   private worldW = new Container(); // 地面 + 墙（场景静态）
-  private sceneL = new Container(); // 货架/充电桩/装卸口/地面箱/车辆（快照重建）
+  private sceneL = new Container(); // 货架/充电桩/装卸位/地面箱/车辆（快照重建）
   private robotL = new Container(); // 机器人（持久 + 插值）
   private bank: SpriteBank;
   private info: StaticInfo | null = null;
@@ -132,6 +132,19 @@ export class Stage {
     return sp;
   }
 
+  /** 两格足迹（1×2）的精灵：竖向占 1 宽 2 高，横向占 2 宽 1 高。 */
+  private spanSprite(id: string, x: number, y: number, ext: [number, number]): Sprite {
+    const sp = this.sprite(id, x, y);
+    if (ext[0] !== 0) {
+      sp.width = CELL * 2;
+      sp.height = CELL;
+    } else {
+      sp.width = CELL;
+      sp.height = CELL * 2;
+    }
+    return sp;
+  }
+
   // -- 静态层（地面 + 墙瓦；场景切换时重建） --------------------------------
 
   setStatic(info: StaticInfo | null): void {
@@ -157,7 +170,7 @@ export class Stage {
       lines.stroke({ width: 1, color: 0x323743, alpha: 0.55 });
       this.worldW.addChild(floor, lines);
 
-      // 墙瓦贴边直铺：门洞 = 该格不铺（装卸口足迹已从 walls 剔除）。
+      // 墙瓦贴边直铺：缺口 = 该格不铺（装卸位锚点格已从 walls 剔除）。
       for (const [x, y] of info.walls) {
         const kind = wallKind(x, y, info.map_w, info.map_h);
         if (!kind) {
@@ -197,18 +210,23 @@ export class Stage {
     this.updateRobots(snap);
   }
 
-  /** 货架叠箱 / 充电桩 / 装卸口 / 地面箱 / 车辆（1×2 渲染足迹）：快照级重建。 */
+  /** 货架叠箱 / 充电桩 / 装卸位 / 地面箱 / 车辆（1×2 足迹）：快照级重建。 */
   private rebuildScene(snap: Snapshot, selected: number | null): void {
     destroyChildren(this.sceneL);
-    const info = this.info!;
-    const portById = new Map(snap.ports.map((p) => [p.id, p]));
 
-    // 装卸口（竖 1×2，第二格按场景 ext 伸出——纯渲染，逻辑仍 1×1 锚点）。
-    for (const p of snap.ports) {
-      const ext: [number, number] = info.ports.find((q) => q.id === p.id)?.ext ?? [0, 1];
-      const id = p.docked_vehicle != null ? "port_v_occupied" : "port_v_empty";
-      const [cx, cy] = this.spanCenter(p.x, p.y, ext);
-      this.sceneL.addChild(this.sprite(id, cx, cy));
+    // 装卸位（1×2 足迹 = 缺口锚点格 + ext 第二格；占用态切换精灵）。
+    for (const d of snap.docks) {
+      const occupied = d.docked_vehicle != null;
+      const id =
+        d.ext[0] !== 0
+          ? occupied
+            ? "port_h_occupied"
+            : "port_h_empty"
+          : occupied
+            ? "port_v_occupied"
+            : "port_v_empty";
+      const [cx, cy] = this.spanCenter(d.x, d.y, d.ext);
+      this.sceneL.addChild(this.spanSprite(id, cx, cy, d.ext));
     }
 
     // 充电桩：相邻机器人上一 tick charge 成功时显示工作态。
@@ -245,15 +263,23 @@ export class Stage {
       this.sceneL.addChild(this.sprite(boxSprite(b.goods_type), cx, cy - 2));
     }
 
-    // 车辆：以装卸口锚点格 + ext 伸出第二格；车斗叠箱堆在北格。
+    // 车辆：跨停靠装卸位的两格（锚点 + ext）；车斗叠箱堆在锚点格（靠墙格）。
     for (const v of snap.vehicles) {
-      const port = [...portById.values()].find((p) => p.x === v.x && p.y === v.y);
-      const ext: [number, number] =
-        port?.id != null ? (info.ports.find((q) => q.id === port!.id)?.ext ?? [0, 1]) : [0, 1];
-      const [cx, cy] = this.spanCenter(v.x, v.y, ext);
-      this.sceneL.addChild(this.sprite("truck_s_empty", cx, cy));
-      const northY = Math.min(v.y, v.y + ext[1]);
-      const [bx, by] = this.cellCenter(v.x, northY);
+      const d = snap.docks.find((q) => q.id === v.dock);
+      if (!d) {
+        // 协议断裂（车辆指向不存在的装卸位）宁炸勿瞒：错误兜底会把卡车
+        // 画到 interact_pos 上无声错位一格。
+        throw new Error(`车辆 ${v.id} 指向不存在的装卸位 #${v.dock}`);
+      }
+      if (d.ext[0] !== 0) {
+        // 横向装卸位只有 port_h_* 素材，卡车纵版被 spanSprite 拉成 2×1 会形变；
+        // docs/game-design/02 首期只用纵向，补横向素材时一并放开。
+        throw new Error(`横向装卸位 #${d.id} 缺少卡车素材（truck_e/w 未提供）`);
+      }
+      const ext = d.ext;
+      const [cx, cy] = this.spanCenter(d.x, d.y, ext);
+      this.sceneL.addChild(this.spanSprite("truck_s_empty", cx, cy, ext));
+      const [bx, by] = this.cellCenter(d.x, d.y);
       v.boxes.forEach((b, i) => {
         const jx = ((b.id * 53) % 7) - 3;
         const sp = this.sprite(boxSprite(b.goods_type), bx + jx, by + 6 - i * 12);

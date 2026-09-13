@@ -69,7 +69,7 @@ pub mod codes {
     pub const NO_FUNDS: &str = "NO_FUNDS";
     pub const CREDIT_EXCEEDED: &str = "CREDIT_EXCEEDED";
     pub const ON_VEHICLE: &str = "ON_VEHICLE";
-    pub const NO_FREE_PORT: &str = "NO_FREE_PORT";
+    pub const NO_FREE_DOCK: &str = "NO_FREE_DOCK";
     pub const NOT_EMPTY: &str = "NOT_EMPTY";
     pub const HAS_VEHICLE: &str = "HAS_VEHICLE";
     pub const ORDER_GONE: &str = "ORDER_GONE";
@@ -105,7 +105,7 @@ pub mod codes {
         ("NO_FUNDS", NO_FUNDS),
         ("CREDIT_EXCEEDED", CREDIT_EXCEEDED),
         ("ON_VEHICLE", ON_VEHICLE),
-        ("NO_FREE_PORT", NO_FREE_PORT),
+        ("NO_FREE_DOCK", NO_FREE_DOCK),
         ("NOT_EMPTY", NOT_EMPTY),
         ("HAS_VEHICLE", HAS_VEHICLE),
         ("ORDER_GONE", ORDER_GONE),
@@ -142,11 +142,14 @@ pub struct Charger {
     pub pos: Position,
 }
 
-/// 装卸口。docs 标记 1×2 占地为待定项；A0 简化为 1×1 锚点格（见量测记录）。
+/// 装卸位：1×2 占地（宽一格、长两格）。锚点 `pos` 为靠墙缺口格，`ext` 为
+/// 指向第二格（库内侧）的单位偏移向量；两格均为静态障碍，停靠货车跨越
+/// 两格，机器人邻接第二格交互（docs/game-design/02）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Port {
+pub struct Dock {
     pub id: Id,
     pub pos: Position,
+    pub ext: (i32, i32),
     pub docked_vehicle: Option<Id>,
     /// take 已预留、车辆尚未到场的订单。
     pub reserved_for: Option<Id>,
@@ -175,7 +178,7 @@ pub struct Vehicle {
     pub id: Id,
     pub kind: VehicleKind,
     pub goods_type: String,
-    /// 装卸交互格。A0：车辆停靠在装卸口格上，交互格即该格。
+    /// 装卸交互格：所停靠装卸位的第二格（库内侧），机器人邻接此格装卸。
     pub interact_pos: Position,
     pub order_id: Id,
     pub box_ids: Vec<Id>,
@@ -214,9 +217,9 @@ pub struct Order {
     pub qty: u32,
     /// 单价（金币千分，i64 定点）。
     pub unit_price_milli: MilliGold,
-    /// 已接订单：在场车辆与预留装卸口。
+    /// 已接订单：在场车辆与预留装卸位。
     pub vehicle: Option<Id>,
-    pub port: Option<Id>,
+    pub dock: Option<Id>,
 }
 
 // ---------------------------------------------------------------------------

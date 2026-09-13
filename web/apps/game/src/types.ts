@@ -40,10 +40,12 @@ export interface ChargerView {
   y: number;
 }
 
-export interface PortView {
+export interface DockView {
   id: number;
   x: number;
   y: number;
+  /** 指向库内第二格的单位偏移（[0,1] = 北墙缺口锚点向库内伸出）。 */
+  ext: [number, number];
   docked_vehicle: number | null;
 }
 
@@ -54,6 +56,8 @@ export interface VehicleView {
   x: number;
   y: number;
   order_id: number;
+  /** 所停靠装卸位 id。 */
+  dock: number;
   boxes: BoxView[];
 }
 
@@ -64,7 +68,7 @@ export interface OrderView {
   qty: number;
   unit_price_milli: string;
   vehicle?: number | null;
-  port?: number | null;
+  dock?: number | null;
 }
 
 export interface FaultView {
@@ -90,7 +94,7 @@ export interface Snapshot {
   robots: RobotView[];
   shelves: ShelfView[];
   chargers: ChargerView[];
-  ports: PortView[];
+  docks: DockView[];
   vehicles: VehicleView[];
   ground_boxes: BoxView[];
   sell_orders: OrderView[];
@@ -112,7 +116,8 @@ export interface StatusView {
   tick: number;
 }
 
-export interface PortExt {
+/** 场景静态信息里的装卸位（与快照 docks 字段一致；渲染以快照为准）。 */
+export interface DockExt {
   id: number;
   x: number;
   y: number;
@@ -126,7 +131,7 @@ export interface StaticInfo {
   map_w: number;
   map_h: number;
   walls: [number, number][];
-  ports: PortExt[];
+  docks: DockExt[];
   scenarios: { id: string; name: string; desc: string; robots: number }[];
 }
 

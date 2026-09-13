@@ -196,12 +196,12 @@ fn destroy_transfer_target_after_accept() {
 #[test]
 fn cancel_vehicle_with_pending_take() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Sell, "battery", 1, 5000);
     w.manage_take(o);
     w.end_tick();
     w.boundary_events();
-    let vid = w.ports[&port].docked_vehicle.unwrap();
+    let vid = w.docks[&dock].docked_vehicle.unwrap();
     let r = w.add_robot(Position::new(1, 5));
     let bx = w.vehicles[&vid].box_ids[0];
     let e0 = w.robots[&r].energy;

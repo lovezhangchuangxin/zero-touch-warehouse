@@ -47,7 +47,7 @@ impl Xoshiro256 {
         result
     }
 
-    /// [0, n) 取整。装卸口数量是个位数，模偏差可忽略（记录在案）。
+    /// [0, n) 取整。装卸位数量是个位数，模偏差可忽略（记录在案）。
     pub fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }

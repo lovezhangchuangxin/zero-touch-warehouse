@@ -13,7 +13,7 @@ fn loop_world() -> World {
     let mut w = World::new_empty(12, 8, 200_000);
     w.add_robot(Position::new(1, 1));
     w.add_charger(Position::new(1, 5)); // 与 (1,4) 相邻：等车空档可补电
-    w.add_port(Position::new(0, 4));
+    w.add_dock(Position::new(0, 3), (0, 1)); // 第二格 (0,4)：机器人 (1,4) 可交互
     w.add_listing(OrderSide::Sell, "battery", 1, 4_000);
     w.add_listing(OrderSide::Buy, "battery", 1, 6_000);
     w
@@ -61,7 +61,7 @@ fn accepted_take_survives_host_termination() {
     assert_eq!(code, ztw_model::codes::OK);
     w.end_tick();
     w.boundary_events();
-    let vid = w.ports.values().next().unwrap().docked_vehicle.unwrap();
+    let vid = w.docks.values().next().unwrap().docked_vehicle.unwrap();
     let bx = w.vehicles[&vid].box_ids[0];
     assert_eq!(w.vehicles[&vid].kind, VehicleKind::In);
 
@@ -121,7 +121,7 @@ fn cancel_and_destroy_visible_same_tick_via_delta() {
     let mut w = World::new_empty(12, 8, 200_000);
     w.add_robot(Position::new(1, 1));
     w.add_shelf(Position::new(3, 1));
-    w.add_port(Position::new(0, 4));
+    w.add_dock(Position::new(0, 4), (0, 1));
     w.add_listing(OrderSide::Sell, "battery", 1, 5_000);
     let mut s = Session::new(SessionConfig::new(host_bin()), w);
     let code = r#"

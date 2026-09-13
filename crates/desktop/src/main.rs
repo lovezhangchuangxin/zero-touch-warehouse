@@ -58,7 +58,7 @@ async fn status(state: State<'_, App>) -> Result<StatusView, String> {
         .clone())
 }
 
-/// 静态场景信息（墙格、装卸口渲染足迹、场景清单；一次拉取）。
+/// 静态场景信息（墙格、装卸位、场景清单；一次拉取）。
 #[tauri::command]
 async fn static_info(state: State<'_, App>) -> Result<Value, String> {
     Ok(state

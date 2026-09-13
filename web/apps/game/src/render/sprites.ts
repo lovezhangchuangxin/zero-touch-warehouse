@@ -51,7 +51,7 @@ export function wallTile(side: "n" | "s" | "w" | "e", x: number, y: number): str
 
 export type Corner = "nw" | "ne" | "sw" | "se";
 
-/** 周边墙格分类：四角 / 四边（staticInfo.walls 已剔除装卸口门洞）。 */
+/** 周边墙格分类：四角 / 四边（staticInfo.walls 已剔除装卸位缺口）。 */
 export function wallKind(
   x: number,
   y: number,

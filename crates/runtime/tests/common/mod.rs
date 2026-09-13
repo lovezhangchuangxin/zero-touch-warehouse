@@ -19,7 +19,7 @@ pub fn demo_world() -> World {
     w.add_robot(Position::new(1, 1));
     w.add_shelf(Position::new(6, 3));
     w.add_charger(Position::new(2, 5));
-    w.add_port(Position::new(0, 4));
+    w.add_dock(Position::new(0, 4), (0, 1));
     w.add_listing(OrderSide::Sell, "battery", 2, 5_000);
     w.add_listing(OrderSide::Buy, "chip", 1, 7_000);
     w

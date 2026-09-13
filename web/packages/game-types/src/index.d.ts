@@ -40,7 +40,7 @@ export type GameCode =
   | "NO_FUNDS"
   | "CREDIT_EXCEEDED"
   | "ON_VEHICLE"
-  | "NO_FREE_PORT"
+  | "NO_FREE_DOCK"
   | "NOT_EMPTY"
   | "HAS_VEHICLE"
   | "ORDER_GONE"
@@ -74,7 +74,7 @@ export interface GameCodes {
   NO_FUNDS: "NO_FUNDS";
   CREDIT_EXCEEDED: "CREDIT_EXCEEDED";
   ON_VEHICLE: "ON_VEHICLE";
-  NO_FREE_PORT: "NO_FREE_PORT";
+  NO_FREE_DOCK: "NO_FREE_DOCK";
   NOT_EMPTY: "NOT_EMPTY";
   HAS_VEHICLE: "HAS_VEHICLE";
   ORDER_GONE: "ORDER_GONE";
@@ -150,9 +150,11 @@ export interface ChargerView {
   pos: Position;
 }
 
-export interface PortView {
+export interface DockView {
   id: number;
   pos: Position;
+  /** 指向库内第二格的单位偏移（[0, 1] = 北墙缺口向库内伸出），占地 1×2、两格均为障碍。 */
+  ext: Position;
   docked_vehicle: number | null;
 }
 
@@ -162,6 +164,8 @@ export interface VehicleView {
   goods_type: string;
   interact_pos: Position;
   order_id: number;
+  /** 所停靠装卸位 id。 */
+  dock: number;
   boxes: BoxView[];
 }
 
@@ -173,7 +177,7 @@ export interface OrderView {
   /** 金币（显示值；权威为千分定点整数，见 docs/architecture/02）。 */
   unit_price: number;
   vehicle: number | null;
-  port: number | null;
+  dock: number | null;
 }
 
 export type TargetLike = RobotView | ShelfView | VehicleView | number;
@@ -222,17 +226,17 @@ export interface Game {
   robots(): RobotView[];
   shelves(): ShelfView[];
   chargers(): ChargerView[];
-  ports(): PortView[];
+  docks(): DockView[];
   vehicles(kind?: "in" | "out"): VehicleView[];
   ground_boxes(): BoxView[];
   my_orders(): OrderView[];
   objects_at(
     x: number,
     y: number,
-  ): Array<RobotView | ShelfView | ChargerView | PortView | VehicleView | BoxView>;
+  ): Array<RobotView | ShelfView | ChargerView | DockView | VehicleView | BoxView>;
   get_object_by_id(
     id: number,
-  ): RobotView | ShelfView | ChargerView | PortView | VehicleView | BoxView | OrderView | null;
+  ): RobotView | ShelfView | ChargerView | DockView | VehicleView | BoxView | OrderView | null;
   map_size(): [number, number];
   readonly gold: number;
   readonly debt: number;

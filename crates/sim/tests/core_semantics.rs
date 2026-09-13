@@ -126,16 +126,16 @@ fn follow_into_vacated_cell() {
 #[test]
 fn take_order_flow() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o1 = w.add_listing(OrderSide::Sell, "battery", 2, 5000);
     let o2 = w.add_listing(OrderSide::Buy, "chip", 1, 7000);
     let (code, eff) = w.manage_take(o1);
     assert_eq!(code, codes::OK);
     let eff = eff.unwrap();
-    assert_eq!(eff.port_id, port);
+    assert_eq!(eff.dock_id, dock);
     assert_eq!(w.gold_milli, 1_000_000 - 2 * 5000);
     assert!(w.listings.contains_key(&o2) && !w.listings.contains_key(&o1));
-    assert_eq!(w.my_orders[&o1].port, Some(port));
+    assert_eq!(w.my_orders[&o1].dock, Some(dock));
     // 车辆下一 tick 边界到场。
     w.end_tick();
     w.boundary_events();
@@ -143,19 +143,19 @@ fn take_order_flow() {
     let v = w.vehicles.values().next().unwrap();
     assert_eq!(v.kind, VehicleKind::In);
     assert_eq!(v.box_ids.len(), 2);
-    assert_eq!(w.ports[&port].docked_vehicle, Some(v.id));
+    assert_eq!(w.docks[&dock].docked_vehicle, Some(v.id));
     assert_eq!(w.my_orders[&o1].vehicle, Some(v.id));
 }
 
 #[test]
 fn take_rejects() {
     let mut w = World::new_empty(10, 10, 100);
-    w.add_port(Position::new(0, 5));
+    w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Sell, "battery", 2, 5000);
     assert_eq!(w.manage_take(o).0, codes::NO_FUNDS);
     let mut w2 = World::new_empty(10, 10, 1_000_000);
     let o2 = w2.add_listing(OrderSide::Sell, "battery", 1, 100);
-    assert_eq!(w2.manage_take(o2).0, codes::NO_FREE_PORT);
+    assert_eq!(w2.manage_take(o2).0, codes::NO_FREE_DOCK);
     assert_eq!(w.manage_take(999).0, codes::ORDER_GONE);
 }
 
@@ -292,15 +292,15 @@ fn pick_drop_and_energy_costs() {
 #[test]
 fn in_vehicle_emptying_departs() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Sell, "battery", 1, 5000);
     w.manage_take(o);
     w.end_tick();
     w.boundary_events();
-    let vid = w.ports[&port].docked_vehicle.expect("车辆已到场");
+    let vid = w.docks[&dock].docked_vehicle.expect("车辆已到场");
     let v = &w.vehicles[&vid];
     let box_id = v.box_ids[0];
-    // 车停在 (0,5)，机器人移到相邻 (1,5) 后卸货到地面即可清空。
+    // 车停在装卸位 (0,4)+(0,5)，机器人 (1,5) 与交互格 (0,5) 相邻，卸货即可清空。
     let r = w.add_robot(Position::new(1, 5));
     assert_eq!(w.accept_take(r, vid, box_id), codes::OK);
     let res = w.settle();
@@ -308,7 +308,7 @@ fn in_vehicle_emptying_departs() {
     // 同一结算内：车辆离场、订单完成、装卸位释放。
     assert!(!w.vehicles.contains_key(&vid));
     assert!(!w.my_orders.contains_key(&o));
-    assert_eq!(w.ports[&port].docked_vehicle, None);
+    assert_eq!(w.docks[&dock].docked_vehicle, None);
     assert_eq!(w.robots[&r].carry, Some(box_id));
     assert_eq!(w.gold_milli, 1_000_000 - 5000); // 卖单无离场收款
 }
@@ -316,12 +316,12 @@ fn in_vehicle_emptying_departs() {
 #[test]
 fn out_vehicle_filling_departs_and_pays() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Buy, "chip", 1, 7000);
     w.manage_take(o);
     w.end_tick();
     w.boundary_events();
-    let vid = w.ports[&port].docked_vehicle.unwrap();
+    let vid = w.docks[&dock].docked_vehicle.unwrap();
     let r = w.add_robot(Position::new(1, 5));
     let b = w.add_ground_box("chip", Position::new(2, 5));
     assert_eq!(w.accept_pick(r, 2, 5), codes::OK);
@@ -341,7 +341,7 @@ fn out_vehicle_filling_departs_and_pays() {
 #[test]
 fn cancel_restores_and_charges_fee() {
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Sell, "battery", 2, 5000);
     w.manage_take(o);
     let paid = w.gold_milli;
@@ -355,7 +355,7 @@ fn cancel_restores_and_charges_fee() {
         paid + 2 * 5000 - 2 * 5000 / CANCEL_FEE_DENOMINATOR
     );
     assert!(!w.my_orders.contains_key(&o));
-    assert_eq!(w.ports[&port].reserved_for, None);
+    assert_eq!(w.docks[&dock].reserved_for, None);
     w.end_tick();
     w.boundary_events();
     assert!(w.vehicles.is_empty()); // arrival 已撤销
@@ -390,17 +390,45 @@ fn end_tick_drops_stale_intents() {
 
 #[test]
 fn late_boundary_event_still_arrives() {
-    // 跳过一次 boundary_events 后，迟到事件补发、装卸口不悬挂。
+    // 跳过一次 boundary_events 后，迟到事件补发、装卸位不悬挂。
     let mut w = World::new_empty(10, 10, 1_000_000);
-    let port = w.add_port(Position::new(0, 5));
+    let dock = w.add_dock(Position::new(0, 4), (0, 1));
     let o = w.add_listing(OrderSide::Sell, "battery", 1, 5000);
     w.manage_take(o);
     w.end_tick();
     w.end_tick(); // 跳过 tick 1 的边界处理
     w.boundary_events(); // tick 2 补发
-    let vid = w.ports[&port].docked_vehicle;
+    let vid = w.docks[&dock].docked_vehicle;
     assert!(vid.is_some(), "迟到到场事件应补发");
     assert_eq!(w.my_orders[&o].vehicle, vid);
+}
+
+#[test]
+fn dock_footprint_blocks_and_destroy_frees() {
+    // 装卸位两格（锚点 + 库内第二格）均为静态障碍：机器人不能走进任一格、
+    // 不能 drop 到第二格；销毁装卸位后两格恢复可通行。
+    let mut w = World::new_empty(10, 10, 1_000_000);
+    let dock = w.add_dock(Position::new(1, 4), (0, 1)); // 足迹 (1,4)+(1,5)
+    let r = w.add_robot(Position::new(2, 5));
+    assert_eq!(w.accept_move(r, -1, 0), codes::CELL_BLOCKED); // 第二格
+    assert!(
+        !w.statically_passable(Position::new(1, 4)),
+        "锚点格应为障碍"
+    );
+    let bx = w.add_ground_box("battery", Position::new(2, 4));
+    assert_eq!(w.accept_pick(r, 2, 4), codes::OK);
+    w.settle();
+    w.end_tick();
+    assert_eq!(w.accept_drop(r, 1, 5, None), codes::CELL_BLOCKED); // 第二格
+    // 销毁装卸位：两格同时解除占用、恢复可通行。
+    assert_eq!(w.manage_destroy(dock).0, codes::OK);
+    assert!(w.statically_passable(Position::new(1, 4)));
+    assert!(w.statically_passable(Position::new(1, 5)));
+    assert_eq!(w.accept_move(r, -1, 0), codes::OK);
+    let res = w.settle();
+    assert_eq!(res[&r].code, codes::OK);
+    assert_eq!(w.robots[&r].pos, Position::new(1, 5));
+    assert_eq!(w.robots[&r].carry, Some(bx));
 }
 
 #[test]
