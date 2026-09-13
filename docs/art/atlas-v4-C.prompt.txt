@@ -1,0 +1,42 @@
+Use case: production sprite sheet for a 2D grid warehouse game. Produce an isolated game sprite atlas, NOT a scene or concept screenshot. Style reference: the attached image "warehouse-concept-v3.png". Closely match its blue-gray metal walls with panel details, light warm concrete floor, crisp dark outlines, clean simplified painted surfaces, soft bevel shading, yellow-black hazard markings. Polished cartoon-illustrated game sprites, NOT realistic materials.
+
+FORMAT RULES (strict):
+1. Fully transparent background: true alpha-channel transparency (RGBA PNG). Absolutely no checkerboard pattern, no solid backdrop color anywhere.
+2. Each wall piece keeps a soft contact shadow baked into its own sprite as semi-transparent dark pixels hugging its base. Shadows are COMPACT: at most 15% larger than the piece's base.
+3. Fixed near-top-down orthographic camera with slightly visible front faces, identical for every object. Light always from the upper left. Never rotate finished sprites in the image plane; redraw each orientation under the fixed camera and light.
+4. One consistent world scale: every wall piece occupies exactly one grid cell footprint; one grid cell equals the same square footprint in every slot. AXIS-ALIGNMENT (critical): every square footprint (pillar, drain grate, wall segment ends) is axis-aligned with the grid — front edges perfectly horizontal, side edges perfectly vertical; NEVER rotated into a diamond or tilted.
+5. Fill exactly the slots described below, each exactly once, complete and uncropped, centered in its slot, generous equal padding. Never invent extra objects; never duplicate a slot.
+6. Exactly 4 columns by 4 rows, 16 slots. High resolution.
+7. No labels, no text, no letters, no numbers, no UI panels, no borders, no grid lines, no slot dividers, no watermark.
+
+TILING RULE (critical): wall pieces are placed side by side to form long continuous walls, so where a wall is CUT at the sprite edge, the cut is a FLAT STRAIGHT CUT: the wall surface, its top face, its front face and its panel lines must continue all the way to the sprite edge and stop cleanly, so two copies placed side by side join invisibly into one continuous wall. NO rounded ends, NO end caps, NO hazard stripes at the cut edges, NO trim, NO dark outline running along a cut edge. Decoration belongs on the wall FACE only.
+
+CONSISTENCY RULE: all wall-family pieces share ONE wall style — same thickness, same height, same top-face and front-face colors, same panel details.
+
+ATLAS C: WALLS, 16 slots.
+
+Row 1 — tileable mid-segments:
+(1,1) horizontal wall, plain panels, flat cut left and right edges.
+(1,2) horizontal wall with a subtle pipe detail on the face, flat cut edges.
+(1,3) vertical wall, plain panels, flat cut top and bottom edges.
+(1,4) vertical wall with a subtle pipe detail, flat cut edges.
+
+Row 2 — corner pieces, each one cell footprint, ends finished:
+(2,1) northwest corner: walls meeting at the top-left.
+(2,2) northeast corner: walls meeting at the top-right.
+(2,3) southwest corner: walls meeting at the bottom-left.
+(2,4) southeast corner: walls meeting at the bottom-right.
+
+Row 3 — openings and feature segments, flat cut edges like row 1:
+(3,1) horizontal wall with an open doorway: two wall stubs with a level gap between them, bare floor visible through the gap. NOT a 3D gate, no door leaf, no overhead beam.
+(3,2) vertical wall with the same open doorway.
+(3,3) horizontal wall with a small warm light strip mounted on its face.
+(3,4) vertical wall with the same warm light strip.
+
+Row 4:
+(4,1) free-standing square pillar, one cell footprint, same wall style.
+(4,2) horizontal wall end cap: terminates a left-right wall with a finished end.
+(4,3) vertical wall end cap: terminates an up-down wall with a finished end.
+(4,4) floor drain: a standalone square metal drain grate with its frame, seen from above, transparent around the grate. It is a floor decal, NOT set into a floor slab.
+
+All 16 items must share one style, one camera, one light.

@@ -1,0 +1,16 @@
+Use case: a wall TILESET source for a 2D grid warehouse game. Produce ONE continuous rectangular room wall boundary — a single connected piece of architecture — NOT isolated objects, NOT a scene with a floor.
+
+CONTENT (strict): a closed rectangular ring of four continuous wall runs:
+- one horizontal wall run across the TOP,
+- one horizontal wall run across the BOTTOM,
+- one vertical wall run down the LEFT,
+- one vertical wall run down the RIGHT,
+joined seamlessly at the four corners. Wall style identical to the reference image's blue-gray metal walls: visible top face plus front face, panel lines and subtle details repeating naturally along each run. The four runs have the SAME height and thickness and share one continuous lighting.
+
+CONTINUITY RULE (critical): each run is CONTINUOUS ARCHITECTURE from corner to corner. Panels flow without interruption; the height and thickness never change; corners melt into their two runs with no seam. This ring will be cut into repeating wall tiles, so it must read as one long painted wall folded into a rectangle.
+
+LAYOUT (strict): the ring hugs the image edges — the top run touches the top image edge, the bottom run touches the bottom image edge, the left run touches the left image edge, the right run touches the right image edge. The corners sit at the four corners of the image.
+
+EMPTY SPACE (strict): the interior of the room and the area outside the ring are COMPLETELY EMPTY — fully transparent, nothing drawn. NO floor, NO tiles, NO objects, NO robots, NO shadows on the ground, NO text, NO grid lines, NO watermark, NO UI.
+
+FORMAT: fully transparent background with true alpha (RGBA PNG), no checkerboard pattern. Fixed near-top-down orthographic camera with slightly visible front faces, light from the upper left, matching the reference image "warehouse-concept-v3.png": blue-gray metal walls with panel details, crisp dark outlines, clean simplified painted surfaces, soft bevel shading. Polished cartoon-illustrated game art, NOT realistic materials. High resolution.

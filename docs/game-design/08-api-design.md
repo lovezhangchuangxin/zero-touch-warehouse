@@ -58,7 +58,7 @@ Game.NORTH / SOUTH / WEST / EAST
 | Shelf | `id` `pos` `boxes`（list[Box]，基线容量 4）`capacity` |
 | Box | `id` `goods_type` `holder`（所在容器 id，地面为 None）`location`（Position） |
 | Charger | `id` `pos` |
-| Port | `id` `pos`（占地尺寸待定）`docked_vehicle` |
+| Port | `id` `pos`（占地 1×2 格，坐标锚点与朝向表达待定）`docked_vehicle` |
 | Vehicle | `id` `kind`（"in"/"out"）`goods_type` `interact_pos`（装卸交互格）`order_id` `boxes`（车上现存：入库=待卸，出库=已装） |
 | Order | `id` `side`（"sell"/"buy"）`goods_type` `qty` `unit_price`；已接订单另有 `vehicle` 与 `port` |
 
@@ -254,7 +254,7 @@ def loop():
 
 - `last_result` 的最终字段结构；`buy` 的 `kind` 取值表。
 - `find_path` 与 `move_to` 的调用成本限制；`_move` 缓存格式；是否需要按 tick 的路径过期（类似 Screeps `reusePath`）；是否内建路径可视化。
-- `interact_pos` 与装卸口占地/交互面的关系，随装卸口尺寸一并确定。
+- `interact_pos` 与 1×2 格装卸口占地/交互面的关系，以及坐标锚点与朝向表达。
 - 市场生成参数，见 [市场与交易](04-orders-and-logistics.md)。
 - 是否在 `Game` 之外为常用常量提供顶层快捷别名（如裸 `E`）；基线只认 `Game`。
 - 两种语言运行时细节、序列化与沙箱限制，属技术设计。

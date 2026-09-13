@@ -1,0 +1,1689 @@
+{
+  "conventions": {
+    "cell_px": 256,
+    "canvas": "canvas == logical footprint: 1x1 = 256x256, 1x2v = 256x512, 2x1h = 512x256; markers 256x256; icons/fx 192x192.",
+    "anchor": "anchor_px = canvas center = footprint center. Draw the canvas centered on the object's cell (or 2-cell region center).",
+    "content_px": "content rect inside the canvas as [x, y, w, h], for hit tests/occlusion",
+    "extraction": "connected-component assignment to slots (objects larger than their grid slot survive unclipped)",
+    "note": "art with strong perspective (pillar) is scaled down to fit its footprint canvas and is slightly narrower than the cell; icons/fx keep their native size, only scaled down when oversized"
+  },
+  "px_per_cell_source_sheets": {
+    "atlas-v4-A.png": 361,
+    "atlas-v4-B.png": 317,
+    "atlas-v4-C.png": 360
+  },
+  "sprites": [
+    {
+      "id": "box_battery",
+      "file": "box_battery.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        1,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        18,
+        0,
+        220,
+        256
+      ]
+    },
+    {
+      "id": "box_chip",
+      "file": "box_chip.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        2,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        15,
+        0,
+        226,
+        256
+      ]
+    },
+    {
+      "id": "box_crushed",
+      "file": "box_crushed.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        4,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        5,
+        256,
+        246
+      ]
+    },
+    {
+      "id": "box_plain",
+      "file": "box_plain.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        3,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        16,
+        0,
+        224,
+        256
+      ]
+    },
+    {
+      "id": "box_water",
+      "file": "box_water.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        0,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        16,
+        0,
+        224,
+        256
+      ]
+    },
+    {
+      "id": "charger_idle",
+      "file": "charger_idle.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        1,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        20,
+        0,
+        216,
+        256
+      ]
+    },
+    {
+      "id": "charger_on",
+      "file": "charger_on.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        2,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        25,
+        0,
+        206,
+        256
+      ]
+    },
+    {
+      "id": "drain_grate",
+      "file": "drain_grate.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-C.png",
+      "slot": [
+        3,
+        3
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        3,
+        256,
+        250
+      ]
+    },
+    {
+      "id": "floor_hazard",
+      "file": "floor_hazard.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        4,
+        2
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        86,
+        256,
+        84
+      ]
+    },
+    {
+      "id": "fx_dust_1",
+      "file": "fx_dust_1.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        0,
+        0
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        8,
+        27,
+        176,
+        138
+      ]
+    },
+    {
+      "id": "fx_dust_2",
+      "file": "fx_dust_2.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        1,
+        0
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        0,
+        10,
+        192,
+        172
+      ]
+    },
+    {
+      "id": "fx_dust_3",
+      "file": "fx_dust_3.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        2,
+        0
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        0,
+        12,
+        192,
+        168
+      ]
+    },
+    {
+      "id": "fx_pop_star",
+      "file": "fx_pop_star.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        3,
+        0
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        0,
+        1,
+        192,
+        190
+      ]
+    },
+    {
+      "id": "fx_sparkle_1",
+      "file": "fx_sparkle_1.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        0,
+        1
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        51,
+        45,
+        90,
+        102
+      ]
+    },
+    {
+      "id": "fx_sparkle_2",
+      "file": "fx_sparkle_2.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        1,
+        1
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        20,
+        18,
+        152,
+        156
+      ]
+    },
+    {
+      "id": "fx_sparkle_3",
+      "file": "fx_sparkle_3.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        2,
+        1
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        3,
+        0,
+        186,
+        192
+      ]
+    },
+    {
+      "id": "fx_twinkle",
+      "file": "fx_twinkle.png",
+      "class": "fx",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        3,
+        3
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        32,
+        34,
+        128,
+        124
+      ]
+    },
+    {
+      "id": "icon_alert",
+      "file": "icon_alert.png",
+      "class": "icon",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        0,
+        2
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        52,
+        0,
+        88,
+        192
+      ]
+    },
+    {
+      "id": "icon_battery_full",
+      "file": "icon_battery_full.png",
+      "class": "icon",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        2,
+        2
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        33,
+        0,
+        126,
+        192
+      ]
+    },
+    {
+      "id": "icon_battery_low",
+      "file": "icon_battery_low.png",
+      "class": "icon",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        3,
+        2
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        26,
+        0,
+        140,
+        192
+      ]
+    },
+    {
+      "id": "icon_bolt",
+      "file": "icon_bolt.png",
+      "class": "icon",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        3,
+        1
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        27,
+        0,
+        138,
+        192
+      ]
+    },
+    {
+      "id": "icon_check",
+      "file": "icon_check.png",
+      "class": "icon",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        1,
+        2
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        0,
+        20,
+        192,
+        152
+      ]
+    },
+    {
+      "id": "icon_zzz",
+      "file": "icon_zzz.png",
+      "class": "icon",
+      "logical_size": null,
+      "source": "atlas-v4-D.png",
+      "slot": [
+        0,
+        3
+      ],
+      "canvas": [
+        192,
+        192
+      ],
+      "anchor_px": [
+        96,
+        96
+      ],
+      "content_px": [
+        17,
+        8,
+        158,
+        176
+      ]
+    },
+    {
+      "id": "marker_dest",
+      "file": "marker_dest.png",
+      "class": "marker",
+      "logical_size": "1x1",
+      "source": "atlas-v4-D.png",
+      "slot": [
+        2,
+        3
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        3,
+        256,
+        250
+      ]
+    },
+    {
+      "id": "marker_select",
+      "file": "marker_select.png",
+      "class": "marker",
+      "logical_size": "1x1",
+      "source": "atlas-v4-D.png",
+      "slot": [
+        1,
+        3
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        1,
+        256,
+        254
+      ]
+    },
+    {
+      "id": "pillar",
+      "file": "pillar.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-C.png",
+      "slot": [
+        0,
+        3
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        41,
+        0,
+        174,
+        256
+      ]
+    },
+    {
+      "id": "port_h_empty",
+      "file": "port_h_empty.png",
+      "class": "grounded2h",
+      "logical_size": "2x1h",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        2,
+        2
+      ],
+      "canvas": [
+        512,
+        256
+      ],
+      "anchor_px": [
+        256,
+        128
+      ],
+      "content_px": [
+        29,
+        0,
+        454,
+        256
+      ]
+    },
+    {
+      "id": "port_h_occupied",
+      "file": "port_h_occupied.png",
+      "class": "grounded2h",
+      "logical_size": "2x1h",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        3,
+        2
+      ],
+      "canvas": [
+        512,
+        256
+      ],
+      "anchor_px": [
+        256,
+        128
+      ],
+      "content_px": [
+        30,
+        0,
+        452,
+        256
+      ]
+    },
+    {
+      "id": "port_v_empty",
+      "file": "port_v_empty.png",
+      "class": "grounded2v",
+      "logical_size": "1x2v",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        0,
+        2
+      ],
+      "canvas": [
+        256,
+        512
+      ],
+      "anchor_px": [
+        128,
+        256
+      ],
+      "content_px": [
+        0,
+        28,
+        256,
+        456
+      ]
+    },
+    {
+      "id": "port_v_occupied",
+      "file": "port_v_occupied.png",
+      "class": "grounded2v",
+      "logical_size": "1x2v",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        1,
+        2
+      ],
+      "canvas": [
+        256,
+        512
+      ],
+      "anchor_px": [
+        128,
+        256
+      ],
+      "content_px": [
+        0,
+        50,
+        256,
+        412
+      ]
+    },
+    {
+      "id": "robot_blink_e",
+      "file": "robot_blink_e.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        2,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        9,
+        256,
+        238
+      ]
+    },
+    {
+      "id": "robot_blink_n",
+      "file": "robot_blink_n.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        1,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        13,
+        256,
+        230
+      ]
+    },
+    {
+      "id": "robot_blink_s",
+      "file": "robot_blink_s.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        0,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        13,
+        256,
+        230
+      ]
+    },
+    {
+      "id": "robot_blink_w",
+      "file": "robot_blink_w.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        3,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        10,
+        256,
+        236
+      ]
+    },
+    {
+      "id": "robot_empty_e",
+      "file": "robot_empty_e.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        2,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        10,
+        256,
+        236
+      ]
+    },
+    {
+      "id": "robot_empty_n",
+      "file": "robot_empty_n.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        1,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        13,
+        256,
+        230
+      ]
+    },
+    {
+      "id": "robot_empty_s",
+      "file": "robot_empty_s.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        0,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        13,
+        256,
+        230
+      ]
+    },
+    {
+      "id": "robot_empty_w",
+      "file": "robot_empty_w.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        3,
+        0
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        10,
+        256,
+        236
+      ]
+    },
+    {
+      "id": "robot_loaded_e",
+      "file": "robot_loaded_e.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        2,
+        2
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        11,
+        0,
+        234,
+        256
+      ]
+    },
+    {
+      "id": "robot_loaded_n",
+      "file": "robot_loaded_n.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        1,
+        2
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        5,
+        0,
+        246,
+        256
+      ]
+    },
+    {
+      "id": "robot_loaded_s",
+      "file": "robot_loaded_s.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        0,
+        2
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        5,
+        0,
+        246,
+        256
+      ]
+    },
+    {
+      "id": "robot_loaded_w",
+      "file": "robot_loaded_w.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-A.png",
+      "slot": [
+        3,
+        2
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        10,
+        0,
+        236,
+        256
+      ]
+    },
+    {
+      "id": "shelf_empty",
+      "file": "shelf_empty.png",
+      "class": "grounded1",
+      "logical_size": "1x1",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        0,
+        1
+      ],
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        4,
+        256,
+        248
+      ]
+    },
+    {
+      "id": "truck_n_empty",
+      "file": "truck_n_empty.png",
+      "class": "grounded2v",
+      "logical_size": "1x2v",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        4,
+        1
+      ],
+      "canvas": [
+        256,
+        512
+      ],
+      "anchor_px": [
+        128,
+        256
+      ],
+      "content_px": [
+        0,
+        18,
+        256,
+        476
+      ]
+    },
+    {
+      "id": "truck_s_empty",
+      "file": "truck_s_empty.png",
+      "class": "grounded2v",
+      "logical_size": "1x2v",
+      "source": "atlas-v4-B.png",
+      "slot": [
+        3,
+        1
+      ],
+      "canvas": [
+        256,
+        512
+      ],
+      "anchor_px": [
+        128,
+        256
+      ],
+      "content_px": [
+        0,
+        2,
+        256,
+        508
+      ]
+    },
+    {
+      "id": "wall_corner_ne",
+      "file": "wall_corner_ne.png",
+      "class": "wall_corner",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "corner tile: draw centered on the NE corner cell"
+    },
+    {
+      "id": "wall_corner_nw",
+      "file": "wall_corner_nw.png",
+      "class": "wall_corner",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "corner tile: draw centered on the NW corner cell"
+    },
+    {
+      "id": "wall_corner_se",
+      "file": "wall_corner_se.png",
+      "class": "wall_corner",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "corner tile: draw centered on the SE corner cell"
+    },
+    {
+      "id": "wall_corner_sw",
+      "file": "wall_corner_sw.png",
+      "class": "wall_corner",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "corner tile: draw centered on the SW corner cell"
+    },
+    {
+      "id": "wall_tile_e1",
+      "file": "wall_tile_e1.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        8,
+        0,
+        248,
+        256
+      ],
+      "placement": "east wall: band baked at tile right; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_e2",
+      "file": "wall_tile_e2.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        23,
+        0,
+        233,
+        256
+      ],
+      "placement": "east wall: band baked at tile right; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_e3",
+      "file": "wall_tile_e3.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        23,
+        0,
+        233,
+        256
+      ],
+      "placement": "east wall: band baked at tile right; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_e4",
+      "file": "wall_tile_e4.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        23,
+        0,
+        233,
+        256
+      ],
+      "placement": "east wall: band baked at tile right; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_e5",
+      "file": "wall_tile_e5.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "east wall: band baked at tile right; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_n1",
+      "file": "wall_tile_n1.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "north wall: band baked at tile top; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_n2",
+      "file": "wall_tile_n2.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "north wall: band baked at tile top; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_n3",
+      "file": "wall_tile_n3.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        251
+      ],
+      "placement": "north wall: band baked at tile top; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_n4",
+      "file": "wall_tile_n4.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        253
+      ],
+      "placement": "north wall: band baked at tile top; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_n5",
+      "file": "wall_tile_n5.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "north wall: band baked at tile top; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_s1",
+      "file": "wall_tile_s1.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        120,
+        256,
+        136
+      ],
+      "placement": "south wall: band baked at tile bottom; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_s2",
+      "file": "wall_tile_s2.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "south wall: band baked at tile bottom; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_s3",
+      "file": "wall_tile_s3.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        120,
+        256,
+        136
+      ],
+      "placement": "south wall: band baked at tile bottom; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_s4",
+      "file": "wall_tile_s4.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        118,
+        256,
+        138
+      ],
+      "placement": "south wall: band baked at tile bottom; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_s5",
+      "file": "wall_tile_s5.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        256,
+        256
+      ],
+      "placement": "south wall: band baked at tile bottom; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_w1",
+      "file": "wall_tile_w1.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        255,
+        256
+      ],
+      "placement": "west wall: band baked at tile left; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_w2",
+      "file": "wall_tile_w2.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        241,
+        256
+      ],
+      "placement": "west wall: band baked at tile left; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_w3",
+      "file": "wall_tile_w3.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        115,
+        256
+      ],
+      "placement": "west wall: band baked at tile left; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_w4",
+      "file": "wall_tile_w4.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        115,
+        256
+      ],
+      "placement": "west wall: band baked at tile left; draw centered on cell"
+    },
+    {
+      "id": "wall_tile_w5",
+      "file": "wall_tile_w5.png",
+      "class": "wall_tile",
+      "logical_size": "1x1",
+      "source": "atlas-walls-tileset.png",
+      "canvas": [
+        256,
+        256
+      ],
+      "anchor_px": [
+        128,
+        128
+      ],
+      "content_px": [
+        0,
+        0,
+        246,
+        256
+      ],
+      "placement": "west wall: band baked at tile left; draw centered on cell"
+    }
+  ],
+  "superseded": {
+    "wall pieces": [
+      "corner_ne",
+      "corner_nw",
+      "corner_se",
+      "corner_sw",
+      "wall_h_door",
+      "wall_h_end",
+      "wall_h_light",
+      "wall_h_mid",
+      "wall_h_pipes",
+      "wall_v_door",
+      "wall_v_end",
+      "wall_v_light",
+      "wall_v_mid",
+      "wall_v_pipes"
+    ],
+    "reason": "replaced by wall tiles cut from the continuous room-boundary painting (seams impossible by construction)"
+  }
+}

@@ -1,0 +1,40 @@
+Use case: production sprite sheet for a 2D grid warehouse game. Produce an isolated game sprite atlas, NOT a scene or concept screenshot. Style reference: the attached image "warehouse-concept-v3.png". Closely match its crisp dark outlines, clean simplified painted surfaces, soft bevel shading, deep blue metal shelves, teal chargers, warm kraft boxes, white-cab deep-blue-bed trucks, yellow-black hazard markings. Polished cartoon-illustrated game sprites, NOT realistic materials, no gritty texture.
+
+FORMAT RULES (strict):
+1. Fully transparent background: true alpha-channel transparency (RGBA PNG). Absolutely no checkerboard pattern, no solid backdrop color anywhere.
+2. Each object's soft contact shadow is baked into its own sprite as semi-transparent dark pixels hugging its base. Shadows are COMPACT: at most 15% larger than the object's base.
+3. Fixed near-top-down orthographic camera with slightly visible front faces, identical for every object. Light always from the upper left. Never rotate finished sprites in the image plane; redraw each facing under the fixed camera and light.
+4. AXIS-ALIGNMENT (critical): every square or rectangular object (shelf, charger, dock pad, floor marking, carton) sits AXIS-ALIGNED with the grid — its front edge runs perfectly horizontal and its side edges perfectly vertical in the image. NEVER draw a square footprint rotated into a diamond, and never slightly tilted or skewed.
+5. One consistent world scale: the storage shelf, the charging station and the truck are all exactly ONE grid cell wide; one grid cell equals the same square footprint in every slot.
+6. Fill exactly the slots described below, each exactly once, complete and uncropped, centered in its slot, generous equal padding. Never invent extra objects; never duplicate a slot.
+7. Exactly 5 columns by 3 rows, 15 slots. High resolution.
+8. No labels, no text, no letters, no numbers, no UI panels, no borders, no grid lines, no slot dividers, no watermark.
+
+ATLAS B: STORAGE AND LOGISTICS, 15 slots.
+
+Row 1 — goods cartons: five standalone boxes of IDENTICAL geometry and size (ground footprint one grid cell, suitable to be carried by a small robot, stacked on shelves or loaded into truck beds). Each icon is printed LARGE on the TOP face and repeated on the front face — the top face is what players see most:
+(1,1) water carton: blue droplet symbol.
+(1,2) battery carton: green lightning symbol.
+(1,3) chip carton: purple microchip symbol.
+(1,4) plain carton: no symbol, just kraft cardboard and packing tape.
+(1,5) crushed carton: same kraft carton flattened, torn open and crumpled, clearly destroyed.
+
+Row 2 — storage, charging and transport:
+(2,1) storage shelf, EMPTY: a single-layer low platform in the reference's deep blue metal style, ground footprint one cell, perfectly SQUARE and AXIS-ALIGNED (front rail perfectly horizontal, side rails perfectly vertical — NOT rotated, NOT tilted, NOT diamond-oriented), LOW height (about one third of a cell), flat top surface with low guide rails around the edges, clearly meant to hold boxes in a SINGLE layer. NOT a tall multi-tier rack, no upper level.
+(2,2) charging station, idle: teal pillar-and-pad charger matching the reference, small dark unlit screen, hazard-striped base pad.
+(2,3) charging station, working: identical to (2,2) but screen and top lamp glowing bright teal with a lit lightning symbol.
+(2,4) truck facing SOUTH, empty: white cab, deep blue cargo bed.
+(2,5) truck facing NORTH, empty: rear of the cargo bed toward the viewer, cab at the far side.
+
+TRUCK PROPORTION RULE (critical): a truck's ground footprint is ONE cell wide and TWO cells long. Even with the camera foreshortening, the truck must read clearly LONGER than wide — visual aspect about 1 : 1.6, a long vehicle. The cab takes about one third of the length and the open cargo bed about two thirds, bed floor visible from above. A squat, square-looking truck is WRONG.
+
+Row 3 — loading dock pads and floor marking, all painted FLAT on the ground:
+(3,1) vertical dock pad, empty: painted concrete pad one cell wide and two cells long, long axis up-down, bordered by yellow-black hazard stripes, plain dashed outline marking it free.
+(3,2) vertical pad, occupied: same pad, edge indicator lamps glowing orange-red to show a vehicle is docked.
+(3,3) horizontal pad, empty: same pad, long axis left-right.
+(3,4) horizontal pad, occupied: edge indicator lamps glowing orange-red.
+(3,5) short yellow-black hazard stripe strip painted flat on the floor, one cell long, as floor marking.
+
+PAD PROPORTION RULE (critical): like the truck, each pad's ground footprint is one cell wide and two cells long; it must read clearly longer than wide (about 1 : 1.6).
+
+All 15 items must share one style, one camera, one light.
