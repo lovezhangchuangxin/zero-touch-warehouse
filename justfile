@@ -19,7 +19,9 @@ lint:
     pnpm -C web lint
     pnpm -C web format:check
 
-# 完整门禁（CI 同款：fmt / clippy / test + web 四项；推送前或手动跑）
+# 完整门禁（检查集合与 CI 同口径；顺序相反——CI 先跑快的 web，本地先
+# cargo 后 web 属习惯取舍。--timings 与 pnpm install 是 CI 专属，本地假设
+# 已在 web/ 执行过 pnpm install；推送前或手动跑）
 gate:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings

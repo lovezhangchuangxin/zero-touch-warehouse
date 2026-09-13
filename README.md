@@ -35,7 +35,9 @@ cargo test -p ztw-runtime --test a0_measure -- --nocapture   # 量测（写入 r
 自带 sh 执行 hook，无需额外依赖）：
 
 ```sh
-just hooks                     # 或：sh scripts/install-hooks.sh（无 just 时）
+just hooks                     # 或：sh scripts/install-hooks.sh（无 just 时；
+                               #   Windows 用 Git Bash 执行，或直接
+                               #   git config core.hooksPath .githooks）
 ```
 
 - `pre-commit`：按暂存内容跑毫秒级快检——`.rs` → `cargo fmt --check`，

@@ -12,9 +12,11 @@ case "$head_line" in
         ;;
 esac
 
-# 形如 feat(api): xxx / fix(desktop,web): xxx / chore!: xxx
+# 形如 feat(api): xxx / fix(desktop,web): xxx / chore!: xxx。
+# scope 允许 a-z 0-9 与 _ / . -（覆盖历史用过的 a0_faults、model/sim），
+# 可逗号并列；subject 至少含一个非空白字符（拒绝 "feat: " 全空）。
 if printf '%s\n' "$head_line" | grep -qE \
-    '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9]+(-[a-z0-9]+)*(,[a-z0-9]+(-[a-z0-9]+)*)*\))?(!)?: .+'; then
+    '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9_/.-]+(,[a-z0-9_/.-]+)*\))?(!)?: .*[^[:space:]]'; then
     exit 0
 fi
 

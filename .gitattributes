@@ -1,0 +1,9 @@
+# 全仓文本统一 LF 检出：Windows git 默认 core.autocrlf=true 会把文本检出为
+# CRLF，.githooks/ 与 scripts/ 的 sh 脚本带 \r 后 git 直接 cannot exec
+# （MSYS sh 也无法解析）。与 CI 的强制 LF 检出（ci.yml Force LF checkout）
+# 同口径；二进制（png 等）由 text=auto 自动跳过。
+* text=auto eol=lf
+
+# 预留：Windows 批处理若有，保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
