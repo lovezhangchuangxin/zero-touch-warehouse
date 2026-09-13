@@ -13,7 +13,7 @@
 //! 分页，不随快照丢弃。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -70,11 +70,14 @@ pub struct StatusView {
 pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct Shared {
-    /// 最新快照与其修订号（前端 pull 兜底 + ack 后补发源）。
+    /// 最新快照与其发布序号（前端 pull 兜底 + ack 后补发源）。序号只对
+    /// 「publish 被调用」单调 +1：世界修订号不覆盖控制面（loaded/running/
+    /// fault），按世界修订判重会漏发纯控制面变化帧（如暂停中热重载）。
     latest: Mutex<Option<(Arc<str>, u64)>>,
     sink: Mutex<Option<Sink>>,
     inflight: AtomicBool,
-    last_sent_rev: Mutex<u64>,
+    last_sent_seq: AtomicU64,
+    pub_seq: AtomicU64,
     pub diag: Mutex<DiagRing>,
     pub logs: Mutex<DiagRing>,
     /// 终止按钮的外部控制柄（独立路径，不经命令队列）。
@@ -89,7 +92,8 @@ impl Shared {
             latest: Mutex::new(None),
             sink: Mutex::new(None),
             inflight: AtomicBool::new(false),
-            last_sent_rev: Mutex::new(0),
+            last_sent_seq: AtomicU64::new(0),
+            pub_seq: AtomicU64::new(0),
             // 诊断：4096 条 / 256KB；日志独立配额（docs/architecture/02）。
             diag: Mutex::new(DiagRing::new(4096, 256 * 1024)),
             logs: Mutex::new(DiagRing::new(1024, 256 * 1024)),
@@ -106,12 +110,18 @@ impl Shared {
         }
     }
 
-    /// 注册快照推送槽，并立即补发当前最新帧。
+    /// 注册快照推送槽，并立即补发当前最新帧。新槽未见过任何帧，绕过
+    /// “同一次发布不重发”门控强制送达（否则首发早于 attach 时重放被吞，
+    /// 只剩 pull 兜底）。
     pub fn attach_sink(&self, sink: Sink) {
         *self.sink.lock().expect("sink 锁") = Some(sink);
         let latest = self.latest.lock().expect("latest 锁").clone();
-        if let Some((json, rev)) = latest {
-            self.offer(&json, rev);
+        if let Some((json, seq)) = latest {
+            self.inflight.store(true, Ordering::Release);
+            self.last_sent_seq.store(seq, Ordering::Release);
+            if let Some(s) = self.sink.lock().expect("sink 锁").clone() {
+                s(&json);
+            }
         }
     }
 
@@ -119,14 +129,14 @@ impl Shared {
     pub fn ack_snapshot(&self) {
         self.inflight.store(false, Ordering::Release);
         let latest = self.latest.lock().expect("latest 锁").clone();
-        if let Some((json, rev)) = latest {
-            self.offer(&json, rev);
+        if let Some((json, seq)) = latest {
+            self.offer(&json, seq);
         }
     }
 
-    /// 发布门控：同修订号不重发；在途未确认时只更新 latest。
-    fn offer(&self, json: &Arc<str>, rev: u64) {
-        if *self.last_sent_rev.lock().expect("last_sent 锁") == rev {
+    /// 发布门控：同一次发布不重发；在途未确认时只更新 latest。
+    fn offer(&self, json: &Arc<str>, seq: u64) {
+        if self.last_sent_seq.load(Ordering::Acquire) == seq {
             return;
         }
         if self
@@ -136,7 +146,7 @@ impl Shared {
         {
             return; // 一帧仍在途：合并丢旧，等 ack 后补发最新
         }
-        *self.last_sent_rev.lock().expect("last_sent 锁") = rev;
+        self.last_sent_seq.store(seq, Ordering::Release);
         let sink = self.sink.lock().expect("sink 锁").clone();
         match sink {
             Some(sink) => sink(json),
@@ -144,8 +154,8 @@ impl Shared {
         }
     }
 
-    fn store_latest(&self, json: Arc<str>, rev: u64) {
-        *self.latest.lock().expect("latest 锁") = Some((json, rev));
+    fn store_latest(&self, json: Arc<str>, seq: u64) {
+        *self.latest.lock().expect("latest 锁") = Some((json, seq));
     }
 
     /// 最新快照（pull 兜底通道；无快照时 None）。
@@ -494,9 +504,9 @@ fn one_tick(st: &mut RunState, shared: &Shared) {
 /// 产出快照：存 latest + 门控推送 + 刷新状态摘要。
 fn publish(st: &mut RunState, shared: &Shared) {
     let json: Arc<str> = Arc::from(snapshot_json(&st.session, st.spec.id, st.running, st.tps));
-    let rev = st.session.world_revision().get();
-    shared.store_latest(json.clone(), rev);
-    shared.offer(&json, rev);
+    let seq = shared.pub_seq.fetch_add(1, Ordering::Relaxed) + 1;
+    shared.store_latest(json.clone(), seq);
+    shared.offer(&json, seq);
     let fault_class = st.session.fault.as_ref().map(|f| match f.class {
         FaultClass::Script => "script".to_string(),
         FaultClass::Environment => "environment".to_string(),

@@ -322,7 +322,7 @@ export class Stage {
         this.place(anim, 1);
       }
     }
-    for (const id of [...this.robots.keys()]) {
+    for (const id of this.robots.keys()) {
       if (!seen.has(id)) {
         this.robots.get(id)!.container.destroy({ children: true });
         this.robots.delete(id);

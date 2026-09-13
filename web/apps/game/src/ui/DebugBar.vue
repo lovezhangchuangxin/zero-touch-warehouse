@@ -14,8 +14,12 @@ const SPEEDS = [
   { v: 200, ff: true },
 ];
 const speed = ref(5);
-const running = computed(() => store.status?.running ?? false);
-const faulted = computed(() => store.status?.fault_class != null);
+// 运行态优先取快照（每帧更新）；store.status 仅启动拉取一次，会陈旧。
+const running = computed(() => store.snapshot?.running ?? store.status?.running ?? false);
+const faultClass = computed(
+  () => store.snapshot?.fault?.class ?? store.status?.fault_class ?? null,
+);
+const faulted = computed(() => faultClass.value != null);
 const tick = computed(() => store.snapshot?.tick ?? store.status?.tick ?? 0);
 const scenarios = computed(() => store.static?.scenarios ?? []);
 const scenarioSel = ref("");
@@ -39,7 +43,7 @@ function onKill() {
   void api.killHost();
 }
 function onReset() {
-  const id = scenarioSel.value || store.status?.scenario || "b2-one";
+  const id = scenarioSel.value || store.snapshot?.scenario || store.status?.scenario || "b2-one";
   void api.resetScenario(id);
 }
 </script>

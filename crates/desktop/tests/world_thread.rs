@@ -375,3 +375,35 @@ fn snapshot_sink_gating_merges_when_slow() {
     h.shared().ack_snapshot();
     h.join();
 }
+
+#[test]
+fn snapshot_pushes_control_plane_change_while_paused() {
+    // 回归：暂停中热重载不推进世界修订号，控制面帧（loaded 翻转）仍必须
+    // 送达——按世界修订判重会把它吞掉。
+    let h = spawn(B2_ONE.id);
+    let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let sink_seen = seen.clone();
+    h.shared().attach_sink(Arc::new(move |json: &str| {
+        let v: serde_json::Value = serde_json::from_str(json).expect("合法快照");
+        sink_seen
+            .lock()
+            .expect("seen 锁")
+            .push(v["loaded"].as_bool().expect("loaded 字段"));
+    }));
+    // 默认 StatusView 也是「暂停 tick 0」：用 scenario 非空判定首发已完成，
+    // 保证 ack 落在首帧在途之后（ack 早于首发会让热重载帧被 inflight 合并）。
+    wait_status(&h, |s| s.scenario == B2_ONE.id, "首发快照已发布");
+    h.shared().ack_snapshot(); // 确认初始帧，清在途标记
+    h.ctrl(Ctrl::LoadCode {
+        code: "function loop() {}".into(),
+    })
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded, "加载成功");
+    let got = seen.lock().expect("seen 锁").clone();
+    assert_eq!(
+        got.last(),
+        Some(&true),
+        "暂停中热重载后应推送 loaded=true 帧，实际收到 {got:?}"
+    );
+    h.join();
+}
