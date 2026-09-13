@@ -1,3 +1,4 @@
 /target
 records/
 .DS_Store
+.zcode/
