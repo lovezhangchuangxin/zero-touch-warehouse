@@ -27,8 +27,12 @@ use crate::snapshot::{FaultView, snapshot_json};
 
 /// 常速档位范围 1–10 tick/s、快进 50–200 tick/s（docs/architecture/02 待定
 /// 参考值；快进实际频率受每 tick 实际耗时约束，达不到时连续推进）。
+/// TPS_NORMAL_MAX/TPS_FF_MIN 只是参考档位边界：Resume 的 clamp 有意
+/// 接受连续值（1..=FF_MAX），UI 档位之外的值不视为错误。
 pub const TPS_MIN: u32 = 1;
+#[allow(dead_code)]
 pub const TPS_NORMAL_MAX: u32 = 10;
+#[allow(dead_code)]
 pub const TPS_FF_MIN: u32 = 50;
 pub const TPS_FF_MAX: u32 = 200;
 /// 调度落后超过 4 个周期即重置基准（暂停恢复 / 页面卡顿后不追帧螺旋）。
@@ -112,13 +116,14 @@ impl Shared {
 
     /// 注册快照推送槽，并立即补发当前最新帧。新槽未见过任何帧，绕过
     /// “同一次发布不重发”门控强制送达（否则首发早于 attach 时重放被吞，
-    /// 只剩 pull 兜底）。
+    /// 只剩 pull 兜底）。补发在 latest 锁内取帧：publish 的 store_latest
+    /// 被挡在后面，新槽不可能收到比已发更旧的帧；last_sent_seq 只进不退。
     pub fn attach_sink(&self, sink: Sink) {
         *self.sink.lock().expect("sink 锁") = Some(sink);
         let latest = self.latest.lock().expect("latest 锁").clone();
         if let Some((json, seq)) = latest {
             self.inflight.store(true, Ordering::Release);
-            self.last_sent_seq.store(seq, Ordering::Release);
+            self.last_sent_seq.fetch_max(seq, Ordering::AcqRel);
             if let Some(s) = self.sink.lock().expect("sink 锁").clone() {
                 s(&json);
             }
@@ -192,7 +197,8 @@ pub struct WorldHandle {
 }
 
 impl WorldHandle {
-    /// 启动世界线程（未知场景 id 回落默认场景并记诊断事件）。
+    /// 启动世界线程（未知场景 id 回落默认场景，静默处理——启动阶段
+    /// 前端尚未 attach，诊断事件无人消费）。
     pub fn spawn(scenario_id: &str, host_bin: PathBuf) -> WorldHandle {
         let spec = scenario::by_id(scenario_id).unwrap_or(scenario::SCENARIOS[0]);
         let shared = Arc::new(Shared::new());
@@ -383,6 +389,7 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
             st.spec = spec;
             st.session = fresh_session(spec, bin);
             st.running = false;
+            st.stepping = false; // 单步请求不跨场景代次存活
             st.next_tick_at = None;
             // 内容清空但 seq 单调延续：旧游标不误报新事件。
             shared.diag.lock().expect("diag 锁").clear_keep_seq();

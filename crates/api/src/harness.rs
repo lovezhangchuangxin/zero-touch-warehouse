@@ -180,10 +180,13 @@ impl HostControl {
     /// 标记为主进程主动终止并杀死宿主（幂等；宿主不在场则仅置位标记，
     /// 下一次执行的写失败 / EOF 路径据此分类）。
     pub fn kill(&self) {
+        // 无宿主在场（尚未加载代码 / 刚被回收）时不置标记：跨代次残留的
+        // 标记会把之后真实 crash 误分类为 KILLED_BY_MAIN。
+        let Some(child) = &self.child else {
+            return;
+        };
         self.killed.store(true, Ordering::SeqCst);
-        if let Some(child) = &self.child {
-            kill_and_reap(child);
-        }
+        kill_and_reap(child);
     }
 
     /// 是否已被标记为主进程主动终止。

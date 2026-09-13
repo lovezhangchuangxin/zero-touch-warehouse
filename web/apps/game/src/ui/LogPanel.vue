@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { store } from "../store";
 
 // 日志面板：Game.log 输出 + 故障摘要置顶（快照内的 fault 不受刷屏影响，
@@ -11,22 +11,16 @@ const filtered = computed(() =>
     ? lines.value
     : lines.value.filter((l) => l.line.includes(filter.value)),
 );
-const flood = ref(false);
-watch(
-  () => store.logLines.length,
-  (n, old) => {
-    if (old != null && n - old > 60) {
-      flood.value = true; // 刷屏提示：日志被节流显示，故障摘要不受影响
-    }
-  },
-);
+// 刷屏提示按轮询页新增量判定：一次 150ms 窗口新增 >60 条即视为刷屏，
+// 下一页节奏回落后提示自然消失（不受 UI_LOG_KEEP 裁剪干扰）。
+const flood = computed(() => store.logBurst > 60);
 </script>
 
 <template>
   <div class="wrap">
     <div class="tools">
       <input v-model="filter" placeholder="过滤…" class="filter" />
-      <span v-if="flood" class="dim">日志刷屏中：仅显示最近条目</span>
+      <span v-if="flood" class="warn">日志刷屏中：仅显示最近条目</span>
     </div>
     <div class="list mono">
       <div v-for="l in filtered" :key="l.seq" class="line">
@@ -74,6 +68,10 @@ watch(
 .empty {
   padding: 8px;
 }
+.warn {
+  color: #e8a24a;
+}
+
 .dim {
   color: var(--dim);
 }

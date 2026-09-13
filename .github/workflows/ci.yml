@@ -65,6 +65,11 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
+      # corepack 先于留痕启用：pnpm --version 记录的是 packageManager
+      # 钉住的版本，而非镜像预装版本。
+      - name: corepack enable
+        run: corepack enable
+
       # 环境留痕：验收记录需要 runner 规格与工具链版本（docs/architecture/08）。
       - name: Environment info
         run: |
@@ -78,11 +83,6 @@ jobs:
           fi
 
       # ---- web 前端门禁（B2 起；与 cargo 门禁相互独立，先跑快的）----
-      # corepack 按 package.json 的 packageManager 固定 pnpm 版本
-      # （lockfile 由 pnpm 10 生成，runner 预装版本不可控）。
-      - name: corepack enable
-        run: corepack enable
-
       - name: web install
         run: pnpm install --frozen-lockfile
         working-directory: web

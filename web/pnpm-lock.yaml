@@ -46,7 +46,11 @@ importers:
         specifier: ^2
         version: 2.2.12(typescript@5.9.3)
 
-  packages/game-types: {}
+  packages/game-types:
+    devDependencies:
+      typescript:
+        specifier: ^5
+        version: 5.9.3
 
 packages:
 

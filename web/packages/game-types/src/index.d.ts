@@ -184,8 +184,10 @@ export type TargetLike = RobotView | ShelfView | VehicleView | number;
 
 export type MemValue = null | boolean | number | string | MemValue[] | MemoryMap;
 
+// 方法与数据键共存：索引签名放宽到包含函数（受控 memory 的数据键
+// 仍是 MemValue；keys/to_dict 等方法由宿主代理提供）。
 export interface MemoryMap {
-  [key: string]: MemValue;
+  [key: string]: MemValue | ((...args: never[]) => unknown);
   keys(): string[];
   readonly size: number;
   to_dict(): Record<string, unknown>;

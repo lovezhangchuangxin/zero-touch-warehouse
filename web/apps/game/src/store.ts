@@ -1,7 +1,8 @@
 // 响应式应用状态（仅 DOM 面板消费；Pixi 对象一律不进本层，
 // docs/architecture/05「Pixi 对象不进入 Vue 响应式系统」）。
 //
-// 快照：channel 推送 → 记录 prev/cur（渲染插值用）→ 立即 ack。
+// 快照：channel 推送 → 更新 cur → 立即 ack（插值由 Stage 内部的
+// RobotAnim from/to 承担，无需 prev 快照）。
 // 诊断/日志：150ms 游标轮询 + 确认，gap 时提示“部分历史已过期”。
 
 import { reactive } from "vue";
@@ -14,13 +15,14 @@ const POLL_MS = 150;
 
 export const store = reactive({
   snapshot: null as Snapshot | null,
-  prev: null as Snapshot | null,
   static: null as StaticInfo | null,
   status: null as StatusView | null,
   diagEvents: [] as DiagEvent[],
   diagCursor: 0,
   diagGap: null as { from: number; to: number } | null,
   logLines: [] as { seq: number; tick: number; line: string }[],
+  /** 最近一次轮询新增的日志条数（刷屏提示用，节奏回落自然复位）。 */
+  logBurst: 0,
   logCursor: 0,
   selectedRobot: null as number | null,
   /** 编辑器草稿（保存并重载时提交给 hot_reload）。 */
@@ -29,14 +31,21 @@ export const store = reactive({
 });
 
 export function onSnapshot(s: Snapshot): void {
-  // 场景切换（reset）后清面板积压：事件环 seq 单调延续，但 tick 语义重开。
+  // 场景切换（reset）后清面板积压并重拉场景静态信息：墙格 / 尺寸 /
+  // 装卸口足迹随场景重建，不重拉则画布永远停在旧场景（渲染以
+  // snap.scenario !== static.id 早退）。事件环 seq 单调延续，tick 语义重开。
   if (store.lastScenario !== "" && s.scenario !== store.lastScenario) {
     store.diagEvents = [];
     store.logLines = [];
     store.diagGap = null;
+    void api
+      .fetchStaticInfo()
+      .then((v) => {
+        store.static = v;
+      })
+      .catch((e) => console.warn("场景静态信息重拉失败", e));
   }
   store.lastScenario = s.scenario;
-  store.prev = store.snapshot;
   store.snapshot = s;
   void api.ackSnapshot();
 }
@@ -57,6 +66,7 @@ async function pollDiagAndLogs(): Promise<void> {
     void api.diagAck(page.next);
 
     const lp = await api.logsPull(store.logCursor, 200);
+    store.logBurst = lp.events.length;
     if (lp.events.length > 0) {
       const lines = lp.events.map((e) => ({
         seq: e.seq,

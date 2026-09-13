@@ -32,6 +32,14 @@ interface RobotAnim {
   dur: number;
 }
 
+// 场景层清理：destroy 释放 GPU 侧对象（纹理共享自 bank，不随销毁）。
+function destroyChildren(layer: Container): void {
+  for (const c of layer.children) {
+    c.destroy({ children: true });
+  }
+  layer.removeChildren();
+}
+
 export class Stage {
   private app: Application;
   private root = new Container();
@@ -130,7 +138,7 @@ export class Stage {
       return;
     }
     this.scenario = info.id;
-    this.worldW.removeChildren();
+    destroyChildren(this.worldW);
     const w = info.map_w * CELL;
     const h = info.map_h * CELL;
 
@@ -173,7 +181,7 @@ export class Stage {
 
   /** 货架叠箱 / 充电桩 / 装卸口 / 地面箱 / 车辆（1×2 渲染足迹）：快照级重建。 */
   private rebuildScene(snap: Snapshot, selected: number | null): void {
-    this.sceneL.removeChildren();
+    destroyChildren(this.sceneL);
     const info = this.info!;
     const portById = new Map(snap.ports.map((p) => [p.id, p]));
 

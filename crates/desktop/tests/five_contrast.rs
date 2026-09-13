@@ -45,7 +45,14 @@ fn run_five(code: &str, max_ticks: u64) -> Report {
                     rep.accept_fail += 1;
                     *fails.entry(d.op.clone() + ":" + &d.code).or_insert(0) += 1;
                 }
-                DiagTapKind::OrderDone => rep.orders_done += 1,
+                // 完成时刻取事件自身的 tick（事件在下一轮循环顶部才排空，
+                // 用外层 tick 会偏大一拍）；done_tick 语义 = 第六单完成时刻。
+                DiagTapKind::OrderDone => {
+                    rep.orders_done += 1;
+                    if rep.orders_done == 6 {
+                        rep.done_tick = Some(d.tick);
+                    }
+                }
                 DiagTapKind::Manage => {}
             }
         }
@@ -64,10 +71,7 @@ fn run_five(code: &str, max_ticks: u64) -> Report {
             }
             *settle_hist.entry(code.clone()).or_insert(0) += 1;
         }
-        if rep.orders_done >= 6 && rep.done_tick.is_none() {
-            rep.done_tick = Some(out.tick);
-        }
-        if rep.done_tick.is_some() {
+        if rep.orders_done >= 6 {
             break;
         }
     }
@@ -75,6 +79,9 @@ fn run_five(code: &str, max_ticks: u64) -> Report {
     for d in s.take_diag() {
         if d.kind == DiagTapKind::OrderDone {
             rep.orders_done += 1;
+            if rep.orders_done == 6 {
+                rep.done_tick = Some(d.tick);
+            }
         }
     }
     rep.gold_milli = s.world.gold_milli;

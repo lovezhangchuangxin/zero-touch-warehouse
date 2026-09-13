@@ -3,5 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "玩家侧 Game API 的 TypeScript 类型声明（供玩家编辑器补全与类型提示）。权威来源：crates/api/bindings/bootstrap.js 与 crates/model codes::ALL；改动须两处同步。",
-  "types": "./src/index.d.ts"
+  "types": "./src/index.d.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit --lib es2020 --strict src/index.d.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
 }

@@ -44,6 +44,9 @@ pub struct DiagRing {
     cap: usize,
     byte_cap: usize,
     bytes: usize,
+    /// 曾因容量覆盖过事件（区别于 clear_keep_seq 的主动清空：后者
+    /// 场景重开后旧游标不应误报“历史已被覆盖”）。
+    evicted: bool,
 }
 
 impl DiagRing {
@@ -54,6 +57,7 @@ impl DiagRing {
             cap,
             byte_cap,
             bytes: 0,
+            evicted: false,
         }
     }
 
@@ -74,6 +78,7 @@ impl DiagRing {
             let cost = self.events.front().map(|e| e.cost).unwrap_or(0);
             self.bytes = self.bytes.saturating_sub(cost);
             self.events.pop_front();
+            self.evicted = true;
         }
     }
 
@@ -89,7 +94,7 @@ impl DiagRing {
 
     /// 拉取 seq 大于 `after` 的至多 `limit` 条事件。
     pub fn pull(&self, after: u64, limit: usize) -> DiagPage {
-        let gap = (after + 1 < self.oldest_seq()).then(|| Gap {
+        let gap = (self.evicted && after + 1 < self.oldest_seq()).then(|| Gap {
             from: after + 1,
             to: self.oldest_seq().saturating_sub(1),
         });
@@ -120,6 +125,7 @@ impl DiagRing {
     pub fn clear_keep_seq(&mut self) {
         self.events.clear();
         self.bytes = 0;
+        self.evicted = false;
     }
 }
 
@@ -183,6 +189,17 @@ mod tests {
         assert!(r.bytes <= 64 + 20, "超限后回落到约一条余量：{}", r.bytes);
         let p = r.pull(0, 100);
         assert!(p.events.len() <= 5, "{}", p.events.len());
+    }
+
+    #[test]
+    fn clear_keep_seq_does_not_report_gap() {
+        let mut r = ring(6);
+        r.clear_keep_seq();
+        // 场景重开后旧游标不应报“历史已被覆盖”——那是容量覆盖的语义。
+        assert!(r.pull(0, 10).gap.is_none());
+        // 真实覆盖恢复 gap 语义。
+        r.push(0, "settle", json!({ "i": 0 }));
+        assert!(r.pull(0, 10).gap.is_none());
     }
 
     #[test]

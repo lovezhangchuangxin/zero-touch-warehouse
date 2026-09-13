@@ -11,11 +11,15 @@ const local = ref(store.code);
 const demoSel = ref("");
 const busy = ref(false);
 
+const saveError = ref("");
 async function save() {
   busy.value = true;
+  saveError.value = "";
   try {
     store.code = local.value;
     await api.hotReload(local.value);
+  } catch (e) {
+    saveError.value = `重载失败：${String(e)}`;
   } finally {
     busy.value = false;
   }
@@ -38,6 +42,7 @@ function loadDemo() {
       </select>
       <button :disabled="busy" @click="save">保存并重载</button>
       <span class="dim hint">重载会暂停世界并重建执行环境；Game.memory 保留，普通全局变量重置</span>
+      <span v-if="saveError" class="warn">{{ saveError }}</span>
     </div>
     <textarea
       v-model="local"
@@ -49,6 +54,9 @@ function loadDemo() {
 </template>
 
 <style scoped>
+.warn {
+  color: #e8a24a;
+}
 .editor {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
