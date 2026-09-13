@@ -243,13 +243,32 @@ struct FaultOut {
 fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usize) -> FaultOut {
     // 堆耗尽时连读取异常对象属性都可能失败（getter / 字符串分配），
     // classify_fault 的 .ok().unwrap_or_default() 会把 InternalError 读成
-    // 全空形态，误判 SCRIPT_ERROR "(无消息)"（mac CI 两次抖动实录：无限
-    // 分类的故障记录 name/message 双空）。读异常前临时解除堆上限：
-    // pending exception 本身存活于堆上、证据不损；读毕恢复原限，脚本级
-    // 故障路径的后续语义不变。
+    // 全空形态，误判 SCRIPT_ERROR "(无消息)"（mac CI 抖动实录：故障记录
+    // name/message 双空）。读异常前临时解除堆上限：若异常已物化则属性
+    // 可正常读取；读毕恢复原限，脚本级故障路径的后续语义不变。
     env.rt.set_memory_limit(usize::MAX);
     let out = env.ctx.with(|cx| classify_fault(&cx, interrupt_fired));
     env.rt.set_memory_limit(heap_limit);
+    // 异常完全未能物化的兜底：堆极限恰好落在异常对象自身的构造分配上
+    // 时，pending exception 为空、解限读取也救不回（mac CI 四连挂实录，
+    // 本地 40+ 轮无法复现）。此时脚本未再执行、GC 未运行，堆占用仍贴
+    // 着上限——以占用 ≥ 90% 上限为据判环境级 OOM，与 throw undefined 的
+    // 基线占用可区分。边界：单笔巨型分配失败时占用可能低于阈值而漏判
+    // 为脚本错误，可接受的保守面（错误倾向为多轮小分配触顶）。
+    if out.class == "script" && out.code == "SCRIPT_ERROR" && out.message == "(无消息)" {
+        let u = env.rt.memory_usage();
+        if u.malloc_limit > 0 && u.malloc_size * 10 >= u.malloc_limit * 9 {
+            return FaultOut {
+                class: "environment",
+                code: "MEMORY_LIMIT".into(),
+                message: format!(
+                    "JS 内存超限（异常未能物化，堆占用 {}/{} 字节）",
+                    u.malloc_size, u.malloc_limit
+                ),
+                stack: out.stack,
+            };
+        }
+    }
     out
 }
 
