@@ -20,12 +20,15 @@
 use std::cell::RefCell;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::{Context, Ctx, Function, Runtime, Value};
 
 use ztw_api::BOOTSTRAP_JS;
+
+mod limit_alloc;
+use limit_alloc::LimitAllocator;
 use ztw_api::protocol::{ExecStats, HostFrame, MainFrame, err_result, read_frame, write_frame};
 
 /// 宿主读取主进程帧的上限（镜像随世界规模增长，取宽上限）。
@@ -176,17 +179,9 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
 struct Env {
     rt: Runtime,
     ctx: Context,
-    /// 本次执行内断采样到的堆占用峰值（字节）。中断处理器在回边上以
-    /// ~1ms 节流写入，执行前复位；故障分类时读取（见 classify_exec_fault）。
-    hiwater: Arc<AtomicI64>,
+    /// 分配器状态镜像：限额拒绝标志（故障分类）与当前总额（诊断）。
+    alloc_state: limit_alloc::AllocState,
 }
-
-/// 裸 JSRuntime 指针的中断处理器载体：仅在被 JS 线程同步调用的闭包内
-/// 解引用（与 Runtime 同线程同生命周期），跨线程只透传不解引用。
-#[derive(Clone, Copy)]
-struct RtPtr(*mut rquickjs::qjs::JSRuntime);
-unsafe impl Send for RtPtr {}
-unsafe impl Sync for RtPtr {}
 
 /// 单次执行结局：完成（has_loop 仅 init 有意义）或故障。
 enum Run {
@@ -199,40 +194,26 @@ fn build_env(
     stack_limit: usize,
     deadline: Arc<AtomicU64>,
     interrupt_fired: Arc<AtomicBool>,
-    hiwater: Arc<AtomicI64>,
 ) -> Env {
-    let rt = Runtime::new().expect("创建 Runtime");
-    rt.set_memory_limit(heap_limit);
+    // 堆限额由分配器执行（拒绝时置标志供故障分类，见 limit_alloc 模块
+    // 注释）；quickjs 自身限额放到无穷，避免它的无标志拒绝抢先发生。
+    let (alloc, alloc_state) = LimitAllocator::new(heap_limit);
+    let rt = Runtime::new_with_alloc(alloc).expect("创建 Runtime");
+    rt.set_memory_limit(usize::MAX);
     rt.set_max_stack_size(stack_limit);
     let ctx = Context::full(&rt).expect("创建 Context");
     {
         let deadline = deadline.clone();
         let fired = interrupt_fired.clone();
-        let rt_ptr = RtPtr(unsafe { rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) });
-        let hiwater = hiwater.clone();
-        let mut last_sample_ms = 0u64;
         rt.set_interrupt_handler(Some(Box::new(move || {
             // 真实中断由引擎抛出（不可捕获）；此标记供故障分类交叉验证，
             // 防止玩家伪造 InternalError("interrupted") 冒充中断。
-            let now = now_ms();
-            if now >= deadline.load(Ordering::Relaxed) {
+            if now_ms() >= deadline.load(Ordering::Relaxed) {
                 fired.store(true, Ordering::SeqCst);
-                return true;
+                true
+            } else {
+                false
             }
-            // 堆占用峰值采样（~1ms 节流）：OOM 异常未能物化时（quickjs
-            // 无异常返回路径 + 展开释放堆），分类时刻的现值已回落，只有
-            // 执行期峰值能证明到过堆上限。ComputeMemoryUsage 遍历对象
-            // 列表，节流避免热点回边上的开销。
-            if now.saturating_sub(last_sample_ms) >= 1 {
-                last_sample_ms = now;
-                let mut u = std::mem::MaybeUninit::<rquickjs::qjs::JSMemoryUsage>::uninit();
-                unsafe { rquickjs::qjs::JS_ComputeMemoryUsage(rt_ptr.0, u.as_mut_ptr()) };
-                let used = unsafe { u.assume_init() }.malloc_size;
-                if used > 0 {
-                    hiwater.fetch_max(used, Ordering::Relaxed);
-                }
-            }
-            false
         })));
     }
     ctx.with(|cx| {
@@ -257,7 +238,11 @@ fn build_env(
             .expect("注册 __nowUs");
         cx.eval::<Value, _>(BOOTSTRAP_JS).expect("bootstrap 求值");
     });
-    Env { rt, ctx, hiwater }
+    Env {
+        rt,
+        ctx,
+        alloc_state,
+    }
 }
 
 struct FaultOut {
@@ -268,42 +253,25 @@ struct FaultOut {
 }
 
 fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usize) -> FaultOut {
-    // 堆耗尽时连读取异常对象属性都可能失败（getter / 字符串分配），
-    // classify_fault 的 .ok().unwrap_or_default() 会把 InternalError 读成
-    // 全空形态，误判 SCRIPT_ERROR "(无消息)"（mac CI 抖动实录：故障记录
-    // name/message 双空）。读异常前临时解除堆上限：若异常已物化则属性
-    // 可正常读取；读毕恢复原限，脚本级故障路径的后续语义不变。
-    env.rt.set_memory_limit(usize::MAX);
     let mut out = env.ctx.with(|cx| classify_fault(&cx, interrupt_fired));
-    env.rt.set_memory_limit(heap_limit);
-    // 异常完全未能物化的兜底：堆极限恰好落在异常对象自身的构造分配上
-    // 时，pending exception 为空、解限读取也救不回（mac CI 四连挂实录，
-    // 本地 40+ 轮无法复现）。此时脚本未再执行、GC 未运行，堆占用仍贴
-    // 着上限——以占用 ≥ 90% 上限为据判环境级 OOM，与 throw undefined 的
-    // 基线占用可区分。边界：单笔巨型分配失败时占用可能低于阈值而漏判
-    // 为脚本错误，可接受的保守面（错误倾向为多轮小分配触顶）。
+    // 全空形态（异常未能物化：quickjs 的 JS_ThrowOutOfMemory 重入保护在
+    // 堆极限压住错误对象自身构造时返回裸 JS_EXCEPTION，mac CI 实录）与
+    // 分配器的限额拒绝标志互证：标志由分配器在拒绝那一刻置位，不随
+    // 异常展开释放堆而失效——确定性判据，不依赖消息文本与事后读数。
     if out.class == "script" && out.code == "SCRIPT_ERROR" && out.message == "(无消息)" {
-        // 判据用执行期峰值而非分类时刻现值：无异常的展开同样会释放帧内
-        // 局部变量，现值已回落（CI 实录 205KB/32MiB），峰值才是到过堆
-        // 上限的证据；throw undefined 之类脚本错误峰值即基线，可区分。
-        let peak = env.hiwater.load(Ordering::Relaxed);
-        if peak > 0 && peak * 10 >= heap_limit as i64 * 9 {
+        let hit = env.alloc_state.limit_hit.load(Ordering::SeqCst);
+        let total = env.alloc_state.total.load(Ordering::SeqCst);
+        if hit {
             return FaultOut {
                 class: "environment",
                 code: "MEMORY_LIMIT".into(),
                 message: format!(
-                    "JS 内存超限（异常未能物化，执行期堆峰值 {}/{} 字节）",
-                    peak, heap_limit
+                    "JS 内存超限（分配器拒绝分配，总额 {total}/上限 {heap_limit} 字节）"
                 ),
                 stack: out.stack,
             };
         }
-        out.message = format!(
-            "(无消息；峰值 {}/{}，现值 {})",
-            peak,
-            heap_limit,
-            env.rt.memory_usage().malloc_size
-        );
+        out.message = format!("(无消息；分配器总额 {total}/{heap_limit}，无限额拒绝记录)");
     }
     out
 }
@@ -414,7 +382,6 @@ fn main() {
     });
     let deadline = Arc::new(AtomicU64::new(u64::MAX));
     let interrupt_fired = Arc::new(AtomicBool::new(false));
-    let hiwater = Arc::new(AtomicI64::new(0));
     let mut env: Option<Env> = None;
     let mut source: Option<String> = None;
     let mut first_loop_injected = false;
@@ -460,14 +427,15 @@ fn main() {
                 stack_limit,
                 deadline.clone(),
                 interrupt_fired.clone(),
-                hiwater.clone(),
             ));
             source = src;
         }
         // 运行时内中断 deadline：本次执行的预算；中断标记同步复位。
         deadline.store(now_ms().saturating_add(budget_ms), Ordering::Relaxed);
         interrupt_fired.store(false, Ordering::SeqCst);
-        hiwater.store(0, Ordering::Relaxed);
+        if let Some(env) = env.as_ref() {
+            env.alloc_state.limit_hit.store(false, Ordering::SeqCst);
+        }
 
         // 注入镜像；执行玩家代码。env 借用限制在本块内。
         let run: Run = {

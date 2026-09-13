@@ -199,6 +199,13 @@ fn oom_triggers_env_fault_then_memory_accessible() {
     // 堆上限平方增长，小核 runner 并行跑进程级测试时 10s 内到不了 64MiB。
     // 修法三管齐下：分配块加大 10 倍（GC 轮次骤减）、堆 32MiB（平方项
     // 减半再减半）、预算 30s（余量 12 倍于本地实测 ~0.2s）。
+    //
+    // 终局（根因）：预算竞态修掉后 mac CI 五连挂于另一形态——quickjs 的
+    // JS_ThrowOutOfMemory 重入保护在堆极限压住错误对象自身构造时返回
+    // 无异常值的 JS_EXCEPTION，且 libc malloc_usable_size 舍入使该窗口
+    // 按 macOS 构建划分（本地永不复现）。修复见宿主 limit_alloc 模块：
+    // 堆限额改由分配器执行并置拒绝标志，分类以标志互证，计账精确到
+    // 字节、跨平台一致。
     let mut cfg = SessionConfig::new(host_bin());
     cfg.heap_limit = 32 * 1024 * 1024;
     cfg.tick_budget_base_ms = 30_000;
