@@ -2,7 +2,8 @@
 //! 语义以 docs/game-design/03、04 为准，结构以 docs/architecture/02
 //! 「结算三段式」为准。
 //!
-//! 模块划分：`world`（结构与构造、静态查询、边界事件、摘要）、`accept`
+//! 模块划分（模块私有，公开面只经本文件再导出冻结）：`world`（结构与
+//! 构造、静态查询、交互目标解析、边界事件、收尾与确定性摘要）、`accept`
 //! （动作受理静态检查）、`market`（管理操作与效果摘要）、`settle`（统一
 //! 结算）、`intent`（意图与结果类型）、`rng`（分流 PRNG）。
 //!
@@ -12,17 +13,16 @@
 //! 承担装卸位分配。市场挂单刷新与价格波动、购买类管理操作、find_path 属
 //! 后续里程碑。
 
-pub mod accept;
-pub mod intent;
-pub mod market;
-pub mod rng;
-pub mod settle;
-pub mod world;
+mod accept;
+mod intent;
+mod market;
+mod rng;
+mod settle;
+mod world;
 
 pub use intent::{Intent, LastResult, TargetRef};
 pub use market::{CancelEffect, DestroyEffect, DestroyedKind, TakeEffect};
 pub use rng::Xoshiro256;
-pub use settle::{Departure, SettlementPlan};
 pub use world::World;
 
 // ---------------------------------------------------------------------------

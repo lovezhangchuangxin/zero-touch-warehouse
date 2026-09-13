@@ -14,27 +14,28 @@ use crate::{
 };
 
 /// 结算计划：只读求解的产物、原子提交的输入（docs/architecture/02）。
+/// solve / commit 的内部契约，不出现在任何公开签名中。
 #[derive(Debug, Clone, Default)]
-pub struct SettlementPlan {
-    pub results: BTreeMap<Id, LastResult>,
+struct SettlementPlan {
+    results: BTreeMap<Id, LastResult>,
     /// 成功移动：机器人 → 目标格。
-    pub moves: BTreeMap<Id, Position>,
+    moves: BTreeMap<Id, Position>,
     /// 电量变化（成功充电为正、成功动作耗电为负）。
-    pub energy: BTreeMap<Id, i32>,
+    energy: BTreeMap<Id, i32>,
     /// 货物转移：(箱, 新容器, 新位置)；每箱每 tick 至多一条。
-    pub box_moves: Vec<(Id, Option<Id>, Position)>,
+    box_moves: Vec<(Id, Option<Id>, Position)>,
     /// 车辆离场（含订单完成与收款、装卸位释放所需信息）。
-    pub departures: Vec<Departure>,
+    departures: Vec<Departure>,
 }
 
 /// 一辆车的离场：离场 → 订单完成与收款 → 装卸位释放（次序固化）。
 #[derive(Debug, Clone)]
-pub struct Departure {
-    pub vehicle_id: Id,
-    pub order_id: Id,
-    pub port_id: Id,
+struct Departure {
+    vehicle_id: Id,
+    order_id: Id,
+    port_id: Id,
     /// 买单（玩家卖出）装满离场的收款；卖单离场无收款。
-    pub revenue_milli: MilliGold,
+    revenue_milli: MilliGold,
 }
 
 /// 重校验后的存活动作分拣（阶段间的传递载体）。

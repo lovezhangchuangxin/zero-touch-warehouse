@@ -1,11 +1,12 @@
-//! 世界状态：结构、构造器、静态查询与 tick 边界事件。
+//! 世界状态：结构与构造器、静态查询、交互目标解析（受理与结算共用）、
+//! tick 边界事件、阶段 5 收尾（end_tick）与确定性摘要（state_hash）。
 //! 动作受理见 `accept`，管理操作见 `market`，统一结算见 `settle`。
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ztw_model::{
     Charger, GroundBox, Id, MilliGold, Order, OrderSide, Port, Position, Robot, Shelf, Vehicle,
-    VehicleKind,
+    VehicleKind, codes,
 };
 
 use crate::intent::{Intent, LastResult, TargetRef};
@@ -24,7 +25,7 @@ pub struct World {
     pub map_w: i32,
     pub map_h: i32,
     /// 静态障碍之外的墙（测试用）；货架 / 充电桩 / 装卸口 / 地面货物另行计入。
-    pub(crate) walls: BTreeSet<Position>,
+    walls: BTreeSet<Position>,
     /// 世界种子：一切子 PRNG 流的派生根。
     pub seed: u64,
     /// 装卸位分配流（docs/architecture/02：市场、装卸位分配、场景独立分流）。
@@ -217,7 +218,7 @@ impl World {
     }
 
     /// tick 开始时占位该格的机器人（若有）。
-    pub fn robot_at(&self, p: Position) -> Option<Id> {
+    pub(crate) fn robot_at(&self, p: Position) -> Option<Id> {
         self.robots.values().find(|r| r.pos == p).map(|r| r.id)
     }
 
@@ -236,17 +237,16 @@ impl World {
     /// 受理前公共检查：机器人存在且本 tick 未行动。
     pub(crate) fn actor(&self, robot_id: Id) -> Result<&Robot, &'static str> {
         let Some(robot) = self.robots.get(&robot_id) else {
-            return Err(ztw_model::codes::NO_SUCH_OBJECT);
+            return Err(codes::NO_SUCH_OBJECT);
         };
         if self.intents.iter().any(|i| i.robot_id() == robot_id) {
-            return Err(ztw_model::codes::ALREADY_ACTED);
+            return Err(codes::ALREADY_ACTED);
         }
         Ok(robot)
     }
 
     /// 解析交互目标：货架 / 车辆 / 机器人之外（含不存在）报错。
     pub(crate) fn resolve_target(&self, target_id: Id) -> Result<TargetRef, &'static str> {
-        use ztw_model::codes;
         if self.shelves.contains_key(&target_id) {
             Ok(TargetRef::Shelf(target_id))
         } else if self.vehicles.contains_key(&target_id) {
