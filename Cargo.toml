@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/model",
+    "crates/sim",
+    "crates/api",
+    "crates/runtime",
+]
+
+# 依赖里的 C 代码（quickjs-ng）即使在本仓库 debug 构建下也要开优化：
+# 未优化的 quickjs 解释器慢 5-10 倍，会污染 A0 的量测结论。
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+debug = true
