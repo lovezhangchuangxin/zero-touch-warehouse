@@ -274,11 +274,22 @@ fn classify_fault(cx: &Ctx, interrupt_fired: &AtomicBool) -> FaultOut {
     // InternalError 构造器伪造 OOM 强制环境重建——后果限于自己的全局
     // 变量丢失与重新初始化，属误用自伤，不是安全边界（docs/architecture/03
     // 首段定位）；中断伪造因会掩盖真实错误，仍用标记交叉验证。
-    if name == "InternalError" && (message.contains("memory") || message.contains("allocation")) {
+    // 消息为空的 InternalError 同样按 OOM 处理：堆极限恰好落在引擎构造
+    // OOM 错误消息字符串的分配上时会抛出退化形态 InternalError("")，
+    // 严格按消息关键字匹配会把它漏成脚本错误（mac CI 两次抖出此形态，
+    // 本地无法复现）；引擎生成的其他 InternalError 均带消息，空消息的
+    // 引擎来源只有这一种，玩家伪造则落入已接受的自伤路径。
+    if name == "InternalError"
+        && (message.is_empty() || message.contains("memory") || message.contains("allocation"))
+    {
         return FaultOut {
             class: "environment",
             code: "MEMORY_LIMIT".into(),
-            message: format!("JS 内存超限：{message}"),
+            message: if message.is_empty() {
+                "JS 内存超限（引擎退化形态：空消息 InternalError）".into()
+            } else {
+                format!("JS 内存超限：{message}")
+            },
             stack,
         };
     }

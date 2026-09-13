@@ -169,6 +169,18 @@ function loop() {
     let out = s2.tick();
     assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Environment));
     assert!(s2.reinit_after_env_fault().ok);
+    // 空消息 InternalError（引擎构造 OOM 消息失败的退化形态）同走环境级
+    // 自伤路径；见 runtime classify_fault 注释。
+    let code = r"
+function loop() {
+  throw new InternalError();
+}
+";
+    let mut s3 = session(demo_world());
+    assert!(s3.load_code(code).ok);
+    let out = s3.tick();
+    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Environment));
+    assert!(s3.reinit_after_env_fault().ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +209,14 @@ fn oom_triggers_env_fault_then_memory_accessible() {
     let out = s.tick();
     let dt = t0.elapsed();
     // JS 内存超限是环境级故障：宿主内销毁执行环境（宿主进程仍存活）。
-    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Environment));
+    // 断言带实际故障记录：此测试曾在 mac CI 抖动（本地 35+ 轮无法复现），
+    // 再次失败时记录直接给出分类器看到的 code/message。
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::Environment),
+        "首 tick 应为环境级故障，实际故障记录：{:?}",
+        s.fault
+    );
     let rec = s.fault.as_ref().unwrap();
     assert_eq!(rec.code, "MEMORY_LIMIT");
     assert!(dt < Duration::from_secs(10), "堆上限应快速触发：{dt:?}");
@@ -210,7 +229,12 @@ fn oom_triggers_env_fault_then_memory_accessible() {
     let init = s.reinit_after_env_fault();
     assert!(init.ok, "环境重建失败：{:?}", init.fault);
     let out = s.tick();
-    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Environment)); // 脚本继续分配
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::Environment),
+        "重初始化后脚本继续分配应仍为环境级，实际故障记录：{:?}",
+        s.fault
+    ); // 脚本继续分配
     assert!(s.reinit_after_env_fault().ok);
     // 换一个温和脚本热重载，验证 memory 与会话完全可用。
     assert!(s.load_code(&fixture("demo_patrol.js")).ok);
