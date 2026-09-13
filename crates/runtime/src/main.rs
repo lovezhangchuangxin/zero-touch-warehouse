@@ -247,7 +247,7 @@ fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usiz
     // name/message 双空）。读异常前临时解除堆上限：若异常已物化则属性
     // 可正常读取；读毕恢复原限，脚本级故障路径的后续语义不变。
     env.rt.set_memory_limit(usize::MAX);
-    let out = env.ctx.with(|cx| classify_fault(&cx, interrupt_fired));
+    let mut out = env.ctx.with(|cx| classify_fault(&cx, interrupt_fired));
     env.rt.set_memory_limit(heap_limit);
     // 异常完全未能物化的兜底：堆极限恰好落在异常对象自身的构造分配上
     // 时，pending exception 为空、解限读取也救不回（mac CI 四连挂实录，
@@ -268,8 +268,33 @@ fn classify_exec_fault(env: &Env, interrupt_fired: &AtomicBool, heap_limit: usiz
                 stack: out.stack,
             };
         }
+        // 未达标：附带分类时刻的计量。若堆读数已回落（无异常展开同样会
+        // 释放帧内局部变量），此消息即证据，用于判定兜底判据的失效面。
+        out.message = format!(
+            "(无消息；分类时堆 {}/{} 字节)",
+            u.malloc_size, u.malloc_limit
+        );
     }
     out
+}
+
+/// rquickjs 调用失败按变体分流：`Allocation` 是绑定层自身分配失败的
+/// 无歧义信号，直接判环境级 OOM；其余（JS 异常等）走常规分类。
+fn classify_call_err(
+    env: &Env,
+    interrupt_fired: &AtomicBool,
+    heap_limit: usize,
+    e: rquickjs::Error,
+) -> FaultOut {
+    if matches!(e, rquickjs::Error::Allocation) {
+        return FaultOut {
+            class: "environment",
+            code: "MEMORY_LIMIT".into(),
+            message: "JS 内存超限（宿主绑定层分配失败）".into(),
+            stack: String::new(),
+        };
+    }
+    classify_exec_fault(env, interrupt_fired, heap_limit)
 }
 
 fn classify_fault(cx: &Ctx, interrupt_fired: &AtomicBool) -> FaultOut {
@@ -420,26 +445,25 @@ fn main() {
             };
             let (mirror_json, session_gen) = (mirror.unwrap_or_else(|| "{}".into()), memory_gen);
             let t0 = Instant::now();
-            let set_ok = env.ctx.with(|cx| {
+            let set_res = env.ctx.with(|cx| {
                 let f: Function = cx
                     .globals()
                     .get::<_, Function>("__setMirror")
                     .expect("bootstrap 提供 __setMirror");
-                f.call::<_, ()>((mirror_json, session_gen)).is_ok()
+                f.call::<_, ()>((mirror_json, session_gen))
             });
             let mirror_us = t0.elapsed().as_micros() as u64;
             HOST.with(|h| h.borrow_mut().stats.mirror_parse_us = mirror_us);
-            if !set_ok {
-                Run::Fault(classify_exec_fault(env, &interrupt_fired, heap_limit))
-            } else {
-                run_player(
+            match set_res {
+                Err(e) => Run::Fault(classify_call_err(env, &interrupt_fired, heap_limit, e)),
+                Ok(()) => run_player(
                     env,
                     is_init,
                     source.as_deref(),
                     &mut first_loop_injected,
                     &interrupt_fired,
                     heap_limit,
-                )
+                ),
             }
         };
 
@@ -523,7 +547,7 @@ fn run_player(
                 });
                 Run::Ok(has_loop)
             }
-            Err(_) => Run::Fault(classify_exec_fault(env, interrupt_fired, heap_limit)),
+            Err(e) => Run::Fault(classify_call_err(env, interrupt_fired, heap_limit, e)),
         }
     } else {
         if !*first_loop_injected {
@@ -557,7 +581,7 @@ fn run_player(
                 Ok(()) => Run::Ok(true),
                 Err(out) => Run::Fault(out),
             },
-            Err(_) => Run::Fault(classify_exec_fault(env, interrupt_fired, heap_limit)),
+            Err(e) => Run::Fault(classify_call_err(env, interrupt_fired, heap_limit, e)),
         }
     }
 }
