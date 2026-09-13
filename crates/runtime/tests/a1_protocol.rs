@@ -1,0 +1,256 @@
+//! A1 协议验收（docs/architecture/08「旧消息与重复消息」「IPC 故障注入」行）：
+//! 重复请求不重复执行；异负载同号拒绝；旧 epoch / 已关闭执行拒绝；
+//! 正常完成与强制关闭竞态只结算一次；三时点断连后已提交状态一致、重启不重放。
+
+mod common;
+
+use common::{demo_world, fixture, host_bin};
+use ztw_api::harness::{FaultClass, OutcomeKind, Session, SessionConfig};
+use ztw_model::Position;
+
+fn fault_session(faults: &str) -> Session {
+    Session::new(
+        SessionConfig::new(host_bin()).with_fault(faults),
+        demo_world(),
+    )
+}
+
+fn assert_single_take(s: &Session) {
+    assert_eq!(s.world.my_orders.len(), 1, "恰好一单");
+    assert_eq!(s.world.gold_milli, 200_000 - 10_000, "扣款恰好一次");
+    assert_eq!(s.world.listings.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 重复消息：同号同负载 → 原结果重发，不重复执行
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_request_replays_cached_result_without_reexecution() {
+    let mut s = fault_session("dup_request:2");
+    assert!(s.load_code(&fixture("dup_take.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Ok,
+        "去重路径对正常宿主透明：{:?}",
+        s.fault
+    );
+    // take 只执行一次：一单、一次扣款、一档剩余挂单。
+    assert_single_take(&s);
+}
+
+#[test]
+fn duplicate_request_with_different_payload_is_protocol_fault() {
+    let mut s = fault_session("dup_request_corrupt:1");
+    assert!(s.load_code(&fixture("dup_log.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("protocol"))
+    );
+    let rec = s.fault.as_ref().unwrap();
+    assert_eq!(rec.code, "DUP_REQUEST_MISMATCH", "{rec:?}");
+    assert!(rec.message.contains("同号异负载"), "{rec:?}");
+    assert!(!s.host_alive());
+}
+
+// ---------------------------------------------------------------------------
+// 旧消息拒绝：旧执行号 → EXEC_CLOSED；旧代次 → STALE_EPOCH
+// ---------------------------------------------------------------------------
+
+#[test]
+fn old_execution_request_rejected_as_closed() {
+    let mut s = fault_session("old_exec_request");
+    assert!(s.load_code(&fixture("old_exec_log.js")).ok);
+    let out = s.tick();
+    // 主进程回 EXEC_CLOSED 错误结果 → 绑定层抛带 code 的异常 → 脚本级错误。
+    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Script));
+    let rec = s.fault.as_ref().unwrap();
+    assert!(
+        rec.message.contains("执行已关闭"),
+        "错误链应携带 EXEC_CLOSED 语义：{rec:?}"
+    );
+    // 被拒绝的请求不得执行：日志环为空。
+    assert!(s.logs.is_empty(), "被拒的 log 不应落地：{:?}", s.logs);
+    // 宿主存活（可恢复拒绝，不是协议破坏），下一 tick 正常。
+    assert!(s.host_alive());
+    assert!(s.resume_after_script_error());
+}
+
+#[test]
+fn stale_epoch_request_kills_host() {
+    let mut s = fault_session("stale_epoch");
+    assert!(s.load_code(&fixture("old_exec_log.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("protocol"))
+    );
+    let rec = s.fault.as_ref().unwrap();
+    assert_eq!(rec.code, "STALE_EPOCH", "{rec:?}");
+    assert!(!s.host_alive());
+    // 旧代次消息不得执行：日志为空。
+    assert!(s.logs.is_empty());
+    // 注入随会话配置重新下发：重启的新代次（epoch=2）宿主依旧发 epoch=1，
+    // 仍被拒绝——旧代次消息永远拒绝，跨代次也不例外。
+    let out2 = {
+        let init = s.restart_host();
+        assert!(init.ok, "重启即重新初始化本身应成功：{:?}", init.fault);
+        s.tick()
+    };
+    assert_eq!(
+        out2.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("protocol"))
+    );
+    assert_eq!(s.fault.as_ref().unwrap().code, "STALE_EPOCH");
+    // 干净会话验证同款代码本身可正常运行（排除注入以外的问题）。
+    let mut clean = common::session(demo_world());
+    assert!(clean.load_code(&fixture("old_exec_log.js")).ok);
+    assert_eq!(clean.tick().kind, OutcomeKind::Ok);
+    assert!(clean.logs.iter().any(|(_, l)| l == "hello"));
+}
+
+// ---------------------------------------------------------------------------
+// IPC 故障注入：三时点断连（docs 08 验证表）
+// 回复后断连（abort_after_reply）已由 a0_faults 的
+// crash_between_take_and_bookkeeping_host_abort 覆盖，此处补齐前两个时点。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn disconnect_before_send_leaves_request_uncommitted() {
+    // take 已提交；log 请求在发出前宿主 abort——主进程从未见过它。
+    let mut s = fault_session("abort_before_send:log");
+    assert!(s.load_code(&fixture("take_then_log.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("crash"))
+    );
+    assert_single_take(&s); // take 的提交不受断连影响
+    assert!(
+        s.logs.iter().all(|(_, l)| !l.contains("after take")),
+        "未送达的请求不得落地：{:?}",
+        s.logs
+    );
+    // 重启恢复。
+    assert!(s.restart_host().ok);
+}
+
+#[test]
+fn disconnect_after_send_before_reply_is_consistent_and_not_replayed() {
+    // take 请求发出后立即 abort：主进程可能已提交（竞态两分支都必须一致）。
+    let mut s = fault_session("abort_after_send");
+    assert!(s.load_code(&fixture("take_if_missing.js")).ok);
+    let out = s.tick();
+    assert!(
+        matches!(
+            out.kind,
+            OutcomeKind::Fault(FaultClass::HostTerminated("crash" | "write"))
+        ),
+        "断连症状可能是 EOF 或回复写失败：{:?}",
+        out.kind
+    );
+    // 分支 A（未提交）：无订单、未扣款；分支 B（已提交）：恰好一单。
+    let orders = s.world.my_orders.len();
+    assert!(orders <= 1, "至多一单：{orders}");
+    assert_eq!(
+        s.world.gold_milli,
+        200_000 - 10_000 * orders as i64,
+        "扣款与订单数一致"
+    );
+    assert!(!s.host_alive());
+
+    // 重启不重放：程序先查真实订单，只有尚未接单才接。
+    let init = s.restart_host();
+    assert!(init.ok, "重启失败：{:?}", init.fault);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+    assert_single_take(&s); // 无论崩溃前是否已提交，最终恰好一单、一次扣款
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+    assert_single_take(&s); // 不会重复接单
+}
+
+// ---------------------------------------------------------------------------
+// 竞态只结算一次：完成帧连发 → 第二帧按旧执行丢弃
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_complete_frame_settles_once() {
+    let mut s = fault_session("dup_complete");
+    assert!(s.load_code(&fixture("move_only.js")).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    assert_eq!(
+        s.world.robots.values().next().unwrap().pos,
+        Position::new(2, 1),
+        "tick0 东移一步"
+    );
+    // 第二 tick：上一执行的残留完成帧先到，必须被丢弃（exec id 不符），
+    // 等待并处理本执行的真实帧——世界恰好再推进一步（西移往返）。
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Ok,
+        "残留完成帧不得冒充本执行结局：{:?}",
+        s.fault
+    );
+    assert_eq!(s.world.tick, 2);
+    assert_eq!(
+        s.world.robots.values().next().unwrap().pos,
+        Position::new(1, 1),
+        "两 tick 恰好两次 move（东进西回）"
+    );
+}
+
+/// 完成后的迟到强杀不产生二次结算，已提交状态保留（竞态收尾侧）。
+#[test]
+fn late_kill_after_complete_does_not_resettle() {
+    let mut s = common::session(demo_world());
+    assert!(s.load_code(&fixture("move_only.js")).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+    let (tick_after_settle, gold_after_settle) = (s.world.tick, s.world.gold_milli);
+    // 执行已完成后模拟迟到的强制关闭：杀进程不回滚、也不再结算。
+    s.kill_host_now();
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("killed")),
+        "{:?}",
+        s.fault
+    );
+    assert_eq!(
+        s.world.tick,
+        tick_after_settle + 1,
+        "tick 仍推进（结算照常）"
+    );
+    assert_eq!(s.world.gold_milli, gold_after_settle);
+    // 重启后继续，位置从结算后的状态出发。
+    assert!(s.restart_host().ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+}
+
+// ---------------------------------------------------------------------------
+// 每执行请求数上限：达到上限暂停报错（docs 03）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn request_limit_pauses_execution() {
+    let mut cfg = SessionConfig::new(host_bin());
+    cfg.request_limit_per_exec = 3;
+    let mut s = Session::new(cfg, demo_world());
+    assert!(s.load_code(&fixture("request_limit.js")).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Script));
+    let rec = s.fault.as_ref().unwrap();
+    assert_eq!(rec.code, "REQUEST_LIMIT", "{rec:?}");
+    assert_eq!(s.logs.len(), 3, "超限后的请求不落地：{:?}", s.logs);
+    // 脚本级暂停可恢复；上限按执行计，恢复后新执行重新计数、再次触限。
+    assert!(s.resume_after_script_error());
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Script));
+    assert_eq!(s.fault.as_ref().unwrap().code, "REQUEST_LIMIT");
+}

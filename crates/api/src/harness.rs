@@ -46,6 +46,9 @@ pub struct SessionConfig {
     pub log_ring_cap: usize,
     pub heap_limit: usize,
     pub stack_limit: usize,
+    /// 每执行请求数上限：结果去重缓存的容量边界；达到上限暂停报错
+    /// （docs/architecture/03 IPC 提交协议）。
+    pub request_limit_per_exec: u64,
     /// 追加环境变量（故障注入经 ZTW_FAULT 传递给宿主）。
     pub env: Vec<(String, String)>,
 }
@@ -65,6 +68,7 @@ impl SessionConfig {
             log_ring_cap: 256,
             heap_limit: 256 * 1024 * 1024,
             stack_limit: 1024 * 1024,
+            request_limit_per_exec: 50_000,
             env: Vec::new(),
         }
     }
@@ -393,8 +397,21 @@ pub struct Session {
     code: Option<String>,
     pub initialized: bool,
     pub fault: Option<FaultRecord>,
+    /// 宿主代次：每次 spawn 递增、不回收；旧代次消息永远拒绝
+    /// （docs/architecture/03：重启增加 host_epoch）。
+    host_epoch: u64,
     execution_id: u64,
     last_request_id: u64,
+    /// 当前执行的去重缓存：request_id →（op+payload 指纹, 原结果）。
+    /// 重复请求号同负载返回原结果、异负载协议故障；缓存随执行清空。
+    exec_dedup: std::collections::HashMap<u64, (String, String)>,
+    /// 本执行已受理的新请求数（去重重发不计数）。
+    exec_new_requests: u64,
+    /// 本执行是否已触及请求上限（结局改判 REQUEST_LIMIT，见 run_exec）。
+    exec_limit_hit: bool,
+    /// 本执行已见到的最大请求号（含被 EXEC_CLOSED / REQUEST_LIMIT 拒绝的）。
+    /// 完成帧引用宿主的最后发送号，须与“已见”对账而非“已执行”。
+    exec_seen_request_id: u64,
     revision: WorldRevision,
     mirror_cache: Option<String>,
     pub stats: SessionStats,
@@ -423,8 +440,13 @@ impl Session {
             code: None,
             initialized: false,
             fault: None,
+            host_epoch: 0,
             execution_id: 0,
             last_request_id: 0,
+            exec_dedup: std::collections::HashMap::new(),
+            exec_new_requests: 0,
+            exec_limit_hit: false,
+            exec_seen_request_id: 0,
             revision: WorldRevision::default(),
             mirror_cache: None,
             stats: SessionStats::default(),
@@ -485,6 +507,9 @@ impl Session {
         if self.host.is_none() {
             match HostProc::spawn(&self.cfg) {
                 Ok((proc, stdin, rx)) => {
+                    // 新宿主进程 = 新代次（docs/architecture/03：重启递增
+                    // host_epoch，旧代次消息永远拒绝）。
+                    self.host_epoch += 1;
                     self.host = Some(proc);
                     self.host_stdin = Some(stdin);
                     self.host_rx = Some(rx);
@@ -778,8 +803,10 @@ impl Session {
         self.host = None;
         self.host_stdin = None;
         self.host_rx = None;
-        // 请求号在宿主代次内单调；重启即新 id 空间（host_epoch 属 A1）。
+        // 请求号在宿主代次内单调；重启即新 id 空间。代次本身只增不回收
+        // （host_epoch），旧代次帧永远对不上号。
         self.last_request_id = 0;
+        self.exec_seen_request_id = 0;
         // 主动终止标记只在本代次内有效，防止误标后续无关故障。
         self.killed_by_us.store(false, Ordering::SeqCst);
     }
@@ -827,6 +854,12 @@ impl Session {
         mirror: String,
         source: Option<&str>,
     ) -> ExecResult {
+        // 本执行的去重缓存与计数清零（docs/architecture/03：请求结果
+        // 保存在当前执行内，不跨执行）。已见号不重置：请求号跨执行
+        // 单调，完成帧引用的是进程内绝对号。
+        self.exec_dedup.clear();
+        self.exec_new_requests = 0;
+        self.exec_limit_hit = false;
         // 看门狗：预算 + 宽限期后直接终止宿主（独立线程，不经 Game 队列）。
         // 完成信号经 condvar 即时唤醒，避免快进时堆积沉睡线程，
         // 也消除「恰在宽限边界完成仍被杀」的窗口。
@@ -869,6 +902,7 @@ impl Session {
         let rx = self.host_rx.take().expect("宿主在场");
         let frame = MainFrame::Exec {
             v: crate::protocol::PROTOCOL_VERSION,
+            host_epoch: self.host_epoch,
             execution_id: exec_id,
             kind: kind.to_string(),
             tick: self.world.tick,
@@ -879,6 +913,54 @@ impl Session {
         };
         let write_failed = write_frame(&mut stdin, &frame).is_err();
         let mut requests_served = 0u64;
+        // 统一回复发送：写失败可能只是宿主刚被看门狗 / 终止按钮杀掉的
+        // 下游症状，因果优先于症状归类（与写失败路径同一裁决）。
+        macro_rules! send_reply {
+            ($rid:expr, $result:expr) => {
+                if write_frame(
+                    &mut stdin,
+                    &MainFrame::Reply {
+                        v: crate::protocol::PROTOCOL_VERSION,
+                        host_epoch: self.host_epoch,
+                        execution_id: exec_id,
+                        request_id: $rid,
+                        result: $result,
+                    },
+                )
+                .is_err()
+                {
+                    let watchdog = fired.load(Ordering::SeqCst);
+                    let killed = self.killed_by_us.swap(false, Ordering::SeqCst);
+                    let (reason, code, message) = if watchdog {
+                        (
+                            "watchdog",
+                            "WATCHDOG_KILL",
+                            "执行超预算与宽限期，主进程终止宿主",
+                        )
+                    } else if killed {
+                        (
+                            "killed",
+                            "KILLED_BY_MAIN",
+                            "主进程主动终止宿主（终止按钮路径）",
+                        )
+                    } else {
+                        ("write", "REPLY_WRITE_FAILED", "回复写入失败")
+                    };
+                    break ExecResult::Faulted {
+                        class: FaultClass::HostTerminated(reason),
+                        code: code.into(),
+                        message: format!(
+                            "{message}（tick {}，最后已提交请求 #{}/{}）",
+                            self.world.tick, self.last_request_id, self.last_op
+                        ),
+                        stack: String::new(),
+                        stats: ExecStats::default(),
+                        requests_served,
+                        last_request_id: self.last_request_id,
+                    };
+                }
+            };
+        }
         let result = if write_failed {
             // 写失败只说明管道断了，不代表原因：SIGKILL 后宿主 fd 关闭与本次写
             // 的先后是竞态（快机器上写先成功再走 EOF，慢机器上直接 EPIPE）。
@@ -917,6 +999,8 @@ impl Session {
                 match rx.recv() {
                     Ok(Ev::Frame(HostFrame::Request {
                         v,
+                        host_epoch,
+                        execution_id,
                         request_id,
                         op,
                         payload,
@@ -935,8 +1019,119 @@ impl Session {
                                 last_request_id: self.last_request_id,
                             };
                         }
-                        // 协议健全性：请求号单调递增、无缺口（A0 不做去重）。
-                        if request_id != self.last_request_id + 1 {
+                        // 旧代次消息永远拒绝（docs/architecture/03：重启
+                        // 递增 host_epoch）。代次对不上只可能是旧进程残留
+                        // 或协议破坏，杀宿主。
+                        if host_epoch != self.host_epoch {
+                            if let Some(h) = &self.host {
+                                h.kill();
+                            }
+                            break ExecResult::Faulted {
+                                class: FaultClass::HostTerminated("protocol"),
+                                code: "STALE_EPOCH".into(),
+                                message: format!(
+                                    "宿主代次不符：期望 {}，得到 {host_epoch}",
+                                    self.host_epoch
+                                ),
+                                stack: String::new(),
+                                stats: ExecStats::default(),
+                                requests_served,
+                                last_request_id: self.last_request_id,
+                            };
+                        }
+                        // 旧执行的消息：执行已关闭，拒绝且不执行；宿主继续
+                        // 走它自己的终态（docs 03：执行关闭后拒绝全部旧消息）。
+                        if execution_id != exec_id {
+                            let reply = err_result(
+                                "EXEC_CLOSED",
+                                &format!("执行已关闭：拒绝旧执行 #{execution_id} 的消息"),
+                            );
+                            send_reply!(request_id, reply);
+                            continue;
+                        }
+                        let fingerprint = format!("{op}\u{0}{payload}");
+                        if request_id == self.exec_seen_request_id + 1 {
+                            // 新请求（无论受理还是拒绝，都已“见到”）。
+                            self.exec_seen_request_id = request_id;
+                            // 新请求。结果缓存受每执行请求数上限约束，
+                            // 达到上限暂停报错（docs 03）；此后应答错误而
+                            // 不执行，直到宿主自行走到终态帧。拒绝结果同样
+                            // 入缓存：重发被拒请求得到同一拒绝（幂等）。
+                            if self.exec_new_requests >= self.cfg.request_limit_per_exec {
+                                self.exec_limit_hit = true;
+                                let reply = err_result(
+                                    "REQUEST_LIMIT",
+                                    &format!(
+                                        "本执行请求数已达上限 {}，执行将被暂停",
+                                        self.cfg.request_limit_per_exec
+                                    ),
+                                );
+                                if self.exec_dedup.len()
+                                    < self.cfg.request_limit_per_exec as usize + 1024
+                                {
+                                    self.exec_dedup
+                                        .insert(request_id, (fingerprint, reply.clone()));
+                                }
+                                send_reply!(request_id, reply);
+                                continue;
+                            }
+                            self.last_request_id = request_id;
+                            self.last_op = op.clone();
+                            let t0 = Instant::now();
+                            let reply = self.handle_op(&op, &payload);
+                            self.stats
+                                .op_us
+                                .push(t0.elapsed().as_micros().max(1) as u64);
+                            requests_served += 1;
+                            self.exec_new_requests += 1;
+                            self.exec_dedup
+                                .insert(request_id, (fingerprint, reply.clone()));
+                            send_reply!(request_id, reply);
+                        } else if request_id <= self.exec_seen_request_id {
+                            // 重复请求号：同负载返回原结果、不重复执行；
+                            // 异负载或缓存缺失为协议故障（docs 03）。
+                            // 已见号（含被拒请求）之内的重发都走此分支。
+                            let cached = self.exec_dedup.get(&request_id);
+                            match cached {
+                                Some((fp, result)) if *fp == fingerprint => {
+                                    let result = result.clone();
+                                    send_reply!(request_id, result);
+                                }
+                                Some(_) => {
+                                    if let Some(h) = &self.host {
+                                        h.kill();
+                                    }
+                                    break ExecResult::Faulted {
+                                        class: FaultClass::HostTerminated("protocol"),
+                                        code: "DUP_REQUEST_MISMATCH".into(),
+                                        message: format!(
+                                            "重复请求 #{request_id} 同号异负载，op={op}"
+                                        ),
+                                        stack: String::new(),
+                                        stats: ExecStats::default(),
+                                        requests_served,
+                                        last_request_id: self.last_request_id,
+                                    };
+                                }
+                                None => {
+                                    if let Some(h) = &self.host {
+                                        h.kill();
+                                    }
+                                    break ExecResult::Faulted {
+                                        class: FaultClass::HostTerminated("protocol"),
+                                        code: "DUP_REQUEST_MISMATCH".into(),
+                                        message: format!(
+                                            "重复请求 #{request_id} 不在本执行结果缓存内，op={op}"
+                                        ),
+                                        stack: String::new(),
+                                        stats: ExecStats::default(),
+                                        requests_served,
+                                        last_request_id: self.last_request_id,
+                                    };
+                                }
+                            }
+                        } else {
+                            // 跳变（大于已见+1）：请求号缺口即协议故障。
                             if let Some(h) = &self.host {
                                 h.kill();
                             }
@@ -945,57 +1140,7 @@ impl Session {
                                 code: "REQUEST_ID_GAP".into(),
                                 message: format!(
                                     "请求号跳变：期望 {}，得到 {request_id}",
-                                    self.last_request_id + 1
-                                ),
-                                stack: String::new(),
-                                stats: ExecStats::default(),
-                                requests_served,
-                                last_request_id: self.last_request_id,
-                            };
-                        }
-                        self.last_request_id = request_id;
-                        self.last_op = op.clone();
-                        let t0 = Instant::now();
-                        let reply = self.handle_op(&op, &payload);
-                        self.stats
-                            .op_us
-                            .push(t0.elapsed().as_micros().max(1) as u64);
-                        requests_served += 1;
-                        if write_frame(
-                            &mut stdin,
-                            &MainFrame::Reply {
-                                v: crate::protocol::PROTOCOL_VERSION,
-                                request_id,
-                                result: reply,
-                            },
-                        )
-                        .is_err()
-                        {
-                            // 同上：回复写失败可能只是宿主刚被看门狗 / 终止按钮
-                            // 杀掉的下游症状，因果优先于症状归类。
-                            let watchdog = fired.load(Ordering::SeqCst);
-                            let killed = self.killed_by_us.swap(false, Ordering::SeqCst);
-                            let (reason, code, message) = if watchdog {
-                                (
-                                    "watchdog",
-                                    "WATCHDOG_KILL",
-                                    "执行超预算与宽限期，主进程终止宿主",
-                                )
-                            } else if killed {
-                                (
-                                    "killed",
-                                    "KILLED_BY_MAIN",
-                                    "主进程主动终止宿主（终止按钮路径）",
-                                )
-                            } else {
-                                ("write", "REPLY_WRITE_FAILED", "回复写入失败")
-                            };
-                            break ExecResult::Faulted {
-                                class: FaultClass::HostTerminated(reason),
-                                code: code.into(),
-                                message: format!(
-                                    "{message}（tick {}，最后已提交请求 #{}/{}）",
-                                    self.world.tick, self.last_request_id, self.last_op
+                                    self.exec_seen_request_id + 1
                                 ),
                                 stack: String::new(),
                                 stats: ExecStats::default(),
@@ -1006,6 +1151,8 @@ impl Session {
                     }
                     Ok(Ev::Frame(HostFrame::Complete {
                         v,
+                        host_epoch,
+                        execution_id,
                         last_request_id,
                         has_loop,
                         stats,
@@ -1024,13 +1171,37 @@ impl Session {
                                 last_request_id,
                             };
                         }
-                        if last_request_id != self.last_request_id {
+                        if host_epoch != self.host_epoch {
+                            if let Some(h) = &self.host {
+                                h.kill();
+                            }
+                            break ExecResult::Faulted {
+                                class: FaultClass::HostTerminated("protocol"),
+                                code: "STALE_EPOCH".into(),
+                                message: format!(
+                                    "宿主代次不符：期望 {}，得到 {host_epoch}",
+                                    self.host_epoch
+                                ),
+                                stack: String::new(),
+                                stats,
+                                requests_served,
+                                last_request_id,
+                            };
+                        }
+                        // 旧执行的残留完成消息：丢弃不结算——正常完成与
+                        // 强制关闭竞态只结算一次（docs 08 A1 验收）。
+                        if execution_id != exec_id {
+                            continue;
+                        }
+                        // 完成帧引用宿主的最后发送号，与本执行“已见”号
+                        // 对账——被拒请求见过但未执行，也在计数内。
+                        if last_request_id != self.exec_seen_request_id {
                             break ExecResult::Faulted {
                                 class: FaultClass::HostTerminated("protocol"),
                                 code: "LAST_REQUEST_MISMATCH".into(),
                                 message: format!(
-                                    "完成消息引用 {last_request_id}，已处理 {}",
-                                    self.last_request_id
+                                    "完成消息引用 {last_request_id}，已见到 {}（其中已执行至 {}）",
+                                    self.exec_seen_request_id, self.last_request_id
                                 ),
                                 stack: String::new(),
                                 stats,
@@ -1039,6 +1210,25 @@ impl Session {
                             };
                         }
                         self.stats.last_exec = stats.clone();
+                        // 请求上限触及后宿主“正常完成”的结局改判为超限
+                        // 暂停（docs 03：达到上限暂停报错，脚本级可恢复）。
+                        if self.exec_limit_hit {
+                            break ExecResult::Faulted {
+                                class: FaultClass::Script,
+                                code: "REQUEST_LIMIT".into(),
+                                message: format!(
+                                    "本执行请求数达到上限 {}，暂停（tick {}，最后已提交请求 #{}/{}）",
+                                    self.cfg.request_limit_per_exec,
+                                    self.world.tick,
+                                    self.last_request_id,
+                                    self.last_op
+                                ),
+                                stack: String::new(),
+                                stats,
+                                requests_served,
+                                last_request_id,
+                            };
+                        }
                         break ExecResult::Complete {
                             has_loop,
                             stats,
@@ -1047,6 +1237,8 @@ impl Session {
                     }
                     Ok(Ev::Frame(HostFrame::Fault {
                         v,
+                        host_epoch,
+                        execution_id,
                         class,
                         code,
                         message,
@@ -1054,7 +1246,29 @@ impl Session {
                         last_request_id,
                         stats,
                     })) => {
-                        let _ = v; // A0：故障帧不因版本差异拒收（诊断优先）
+                        let _ = v; // 故障帧不因版本差异拒收（诊断优先）
+                        if host_epoch != self.host_epoch {
+                            if let Some(h) = &self.host {
+                                h.kill();
+                            }
+                            break ExecResult::Faulted {
+                                class: FaultClass::HostTerminated("protocol"),
+                                code: "STALE_EPOCH".into(),
+                                message: format!(
+                                    "宿主代次不符：期望 {}，得到 {host_epoch}（原故障 {code}）",
+                                    self.host_epoch
+                                ),
+                                stack: String::new(),
+                                stats,
+                                requests_served,
+                                last_request_id,
+                            };
+                        }
+                        // 旧执行的残留故障消息：丢弃不结算，等当前执行
+                        // 自己的终态（或看门狗超时）。
+                        if execution_id != exec_id {
+                            continue;
+                        }
                         self.stats.last_exec = stats.clone();
                         let fc = match class.as_str() {
                             "script" => FaultClass::Script,

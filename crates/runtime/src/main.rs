@@ -11,11 +11,18 @@
 //!   （JS 内存超限）销毁执行环境待主进程重新初始化；协议错误退出进程。
 //!
 //! 故障注入（ZTW_FAULT，逗号分隔，测试专用）：
-//!   abort_init_after_mem      初始化第一条 memory 回复后 abort()
-//!   abort_after_reply:<op>    指定 op 的回复送达后 abort()
-//!   oversize_frame            首次 loop 执行前发送超大帧
-//!   hang_exec                 首次 loop 执行前挂起（模拟宿主无响应）
-//!   skip_delta_replay         丢弃镜像增量（触发整体重建路径）
+//!   abort_init_after_mem        初始化第一条 memory 回复后 abort()
+//!   abort_after_reply:<op>      指定 op 的回复送达后 abort()
+//!   abort_before_send:<op>      指定 op 的请求发出前 abort()（提交前断连）
+//!   abort_after_send            首条请求发出后立即 abort()（提交后回复前断连）
+//!   dup_request:<n>             第 n 号请求收到回复后逐字节重发（去重缓存）
+//!   dup_request_corrupt:<n>     第 n 号请求同号异负载重发（协议故障路径）
+//!   dup_complete                完成帧连发两次（旧执行消息丢弃，只结算一次）
+//!   old_exec_request            请求帧改带上一执行号（EXEC_CLOSED 拒绝）
+//!   stale_epoch                 请求帧改带上一宿主代次（STALE_EPOCH 拒绝）
+//!   oversize_frame              首次 loop 执行前发送超大帧
+//!   hang_exec                   首次 loop 执行前挂起（模拟宿主无响应）
+//!   skip_delta_replay           丢弃镜像增量（触发整体重建路径）
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -56,6 +63,16 @@ struct Faults {
     oversize_frame: bool,
     hang_exec: bool,
     skip_delta_replay: bool,
+    // A1 协议注入（docs/architecture/08：旧消息与重复消息 / 三时点断连）。
+    abort_before_send_op: Option<String>,
+    abort_after_send: bool,
+    dup_request_id: Option<u64>,
+    /// 同号异负载重发（预期主进程 DUP_REQUEST_MISMATCH 终止宿主）。
+    dup_request_corrupt_id: Option<u64>,
+    /// 完成帧连发两次（预期第二次被主进程按旧执行丢弃，不重复结算）。
+    dup_complete: bool,
+    old_exec_request: bool,
+    stale_epoch: bool,
 }
 
 fn parse_faults(raw: Option<String>) -> Faults {
@@ -67,6 +84,20 @@ fn parse_faults(raw: Option<String>) -> Faults {
             f.abort_init_after_mem = true;
         } else if let Some(op) = part.strip_prefix("abort_after_reply:") {
             f.abort_after_reply_op = Some(op.to_string());
+        } else if let Some(op) = part.strip_prefix("abort_before_send:") {
+            f.abort_before_send_op = Some(op.to_string());
+        } else if part == "abort_after_send" {
+            f.abort_after_send = true;
+        } else if let Some(n) = part.strip_prefix("dup_request:") {
+            f.dup_request_id = n.parse().ok();
+        } else if let Some(n) = part.strip_prefix("dup_request_corrupt:") {
+            f.dup_request_corrupt_id = n.parse().ok();
+        } else if part == "dup_complete" {
+            f.dup_complete = true;
+        } else if part == "old_exec_request" {
+            f.old_exec_request = true;
+        } else if part == "stale_epoch" {
+            f.stale_epoch = true;
         } else if part == "oversize_frame" {
             f.oversize_frame = true;
         } else if part == "hang_exec" {
@@ -89,6 +120,10 @@ struct HostState {
     faults: Faults,
     in_init: bool,
     frame_limit: usize,
+    /// 当前宿主代次与执行编号：来自主进程 Exec 帧，随帧回显，
+    /// 供主进程做旧代次 / 旧执行拒绝（docs/architecture/03 v2 会话头）。
+    host_epoch: u64,
+    execution_id: u64,
 }
 
 thread_local! {
@@ -99,6 +134,8 @@ thread_local! {
         faults: Faults::default(),
         in_init: false,
         frame_limit: 1024 * 1024,
+        host_epoch: 0,
+        execution_id: 0,
     });
 }
 
@@ -107,10 +144,31 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
     HOST.with(|h| {
         let mut h = h.borrow_mut();
         let t0 = Instant::now();
+        // 故障注入：提交前断连（主进程未见过该请求）。
+        if let Some(target) = &h.faults.abort_before_send_op
+            && op == *target
+        {
+            eprintln!("ztw-host: 故障注入 abort_before_send:{target}");
+            std::process::abort();
+        }
         h.request_id += 1;
         let rid = h.request_id;
+        let (epoch, exec_id) = (h.host_epoch, h.execution_id);
+        // 注入改写：旧执行号 / 旧代次（主进程侧拒绝路径的触发器）。
+        let frame_epoch = if h.faults.stale_epoch && epoch > 0 {
+            epoch - 1
+        } else {
+            epoch
+        };
+        let frame_exec = if h.faults.old_exec_request && exec_id > 0 {
+            exec_id - 1
+        } else {
+            exec_id
+        };
         let frame = HostFrame::Request {
             v: ztw_api::protocol::PROTOCOL_VERSION,
+            host_epoch: frame_epoch,
+            execution_id: frame_exec,
             request_id: rid,
             op: op.clone(),
             payload,
@@ -130,6 +188,12 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
             eprintln!("ztw-host: 写 Game 请求失败");
             std::process::exit(3);
         }
+        // 故障注入：提交后、回复前断连（主进程可能已提交，回复未送达）。
+        // 仅第一代次宿主触发：测试要在崩溃后重启同款宿主跑“不重放”流程。
+        if h.faults.abort_after_send && rid == 1 && epoch == 1 {
+            eprintln!("ztw-host: 故障注入 abort_after_send");
+            std::process::abort();
+        }
         let reply: MainFrame = match read_frame(&mut std::io::stdin(), HOST_READ_LIMIT) {
             Ok(f) => f,
             Err(e) => {
@@ -139,6 +203,8 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
         };
         let MainFrame::Reply {
             v: _,
+            host_epoch: reply_epoch,
+            execution_id: reply_exec,
             request_id,
             result,
         } = reply
@@ -146,8 +212,11 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
             eprintln!("ztw-host: 期望 Reply 帧");
             std::process::exit(3);
         };
-        if request_id != rid {
-            eprintln!("ztw-host: 回复请求号错位 {request_id} != {rid}");
+        // 对称校验：回复必须属于当前代次与执行，且回复号等于请求号。
+        if request_id != rid || reply_epoch != epoch || reply_exec != exec_id {
+            eprintln!(
+                "ztw-host: 回复错位 rid {request_id}!={rid} / epoch {reply_epoch}!={epoch} / exec {reply_exec}!={exec_id}"
+            );
             std::process::exit(3);
         }
         let dt = t0.elapsed().as_micros() as u64;
@@ -167,6 +236,61 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
         {
             eprintln!("ztw-host: 故障注入 abort_after_reply:{target}");
             std::process::abort();
+        }
+        // 故障注入：同号同负载重发一次（触发主进程去重缓存路径）。
+        if h.faults.dup_request_id == Some(rid) {
+            eprintln!("ztw-host: 故障注入 dup_request:{rid}");
+            if write_frame(&mut h.stdout, &frame).is_err() {
+                eprintln!("ztw-host: 重发 Game 请求失败");
+                std::process::exit(3);
+            }
+            let second: MainFrame = match read_frame(&mut std::io::stdin(), HOST_READ_LIMIT) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("ztw-host: 读重发回复失败：{e}");
+                    std::process::exit(3);
+                }
+            };
+            let MainFrame::Reply {
+                request_id: rid2,
+                result: result2,
+                ..
+            } = second
+            else {
+                eprintln!("ztw-host: 期望重发的 Reply 帧");
+                std::process::exit(3);
+            };
+            if rid2 != rid {
+                eprintln!("ztw-host: 重发回复请求号错位 {rid2} != {rid}");
+                std::process::exit(3);
+            }
+            if result2 != result {
+                eprintln!("ztw-host: 重发回复与原回复不一致");
+                std::process::exit(3);
+            }
+        }
+        // 故障注入：同号异负载重发（预期主进程终止宿主；读到 EOF 走退出路径）。
+        if h.faults.dup_request_corrupt_id == Some(rid) {
+            eprintln!("ztw-host: 故障注入 dup_request_corrupt:{rid}");
+            let mut dup = frame.clone();
+            if let HostFrame::Request { payload, .. } = &mut dup {
+                payload.insert(0, ' '); // 指纹不同，负载仍可解析
+            }
+            if write_frame(&mut h.stdout, &dup).is_err() {
+                std::process::exit(3);
+            }
+            match read_frame::<_, MainFrame>(&mut std::io::stdin(), HOST_READ_LIMIT) {
+                Ok(MainFrame::Reply { .. }) => {
+                    // 主进程未拒绝 = 协议语义破坏；退出让测试失败得显式。
+                    eprintln!("ztw-host: 同号异负载未被主进程拒绝");
+                    std::process::exit(3);
+                }
+                Ok(_) => {
+                    eprintln!("ztw-host: 期望重发的 Reply 帧");
+                    std::process::exit(3);
+                }
+                Err(_) => std::process::exit(3),
+            }
         }
         Ok(result)
     })
@@ -423,6 +547,8 @@ fn main() {
         };
         let MainFrame::Exec {
             v,
+            host_epoch,
+            execution_id,
             kind,
             budget_ms,
             source: src,
@@ -446,6 +572,8 @@ fn main() {
             let mut h = h.borrow_mut();
             h.in_init = is_init;
             h.stats = ExecStats::default();
+            h.host_epoch = host_epoch;
+            h.execution_id = execution_id;
         });
         if is_init {
             // 初始化即重建执行环境（首次加载 / 热重载 / 环境故障恢复同路径）。
@@ -498,7 +626,10 @@ fn main() {
         // 恢复 deadline 为“无限”，避免间隙期误触发。
         deadline.store(u64::MAX, Ordering::Relaxed);
 
-        let last_request_id = HOST.with(|h| h.borrow().request_id);
+        let (last_request_id, host_epoch, execution_id) = HOST.with(|h| {
+            let h = h.borrow();
+            (h.request_id, h.host_epoch, h.execution_id)
+        });
         // 收割绑定层的增量回放 / 重建耗时（量测；环境已销毁时跳过）。
         if let Some(env) = env.as_ref() {
             let delta_us = env
@@ -514,6 +645,8 @@ fn main() {
                 let stats = HOST.with(|h| h.borrow_mut().stats.clone());
                 let frame = HostFrame::Complete {
                     v: ztw_api::protocol::PROTOCOL_VERSION,
+                    host_epoch,
+                    execution_id,
                     last_request_id,
                     has_loop,
                     stats,
@@ -521,11 +654,18 @@ fn main() {
                 if write_frame(&mut std::io::stdout(), &frame).is_err() {
                     break;
                 }
+                // 故障注入：完成帧连发（第二次应被主进程按旧执行丢弃）。
+                let dup_complete = HOST.with(|h| h.borrow().faults.dup_complete);
+                if dup_complete && write_frame(&mut std::io::stdout(), &frame).is_err() {
+                    break;
+                }
             }
             Run::Fault(out) => {
                 let stats = HOST.with(|h| h.borrow_mut().stats.clone());
                 let frame = HostFrame::Fault {
                     v: ztw_api::protocol::PROTOCOL_VERSION,
+                    host_epoch,
+                    execution_id,
                     class: out.class.to_string(),
                     code: out.code,
                     message: out.message,

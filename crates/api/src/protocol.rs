@@ -1,7 +1,9 @@
-//! A0 IPC 协议：有长度前缀的 JSON 请求-回复（docs/architecture/03）。
+//! IPC 协议：有长度前缀的 JSON 请求-回复（docs/architecture/03）。
 //!
-//! 传输走宿主进程 stdin/stdout。A0 不实现 host_epoch / 请求去重 /
-//! 重复消息机制（A1 范围），`request_id` 仅用于完成消息引用与协议健全性检查。
+//! 传输走宿主进程 stdin/stdout。v2（A1）补全会话语义：消息头携带
+//! 宿主代次 `host_epoch` 与执行编号 `execution_id`；`request_id` 支持
+//! 执行内去重（同号同负载返回原结果，异负载为协议故障），旧代次 /
+//! 旧执行消息一律拒绝（语义在 harness 与宿主两侧执行）。
 //!
 //! 变更型调用（动作受理、管理操作）与 memory 读写走本协议；数据查询走
 //! 宿主本地镜像，仅在镜像失效时经 `mirror.fetch` 回退重建。
@@ -9,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 帧硬上限之上的“物理”上限：防御长度前缀被破坏后的巨量读取。
 const ABSOLUTE_FRAME_CAP: u64 = 64 * 1024 * 1024;
@@ -26,6 +28,8 @@ pub enum MainFrame {
         /// 协议版本（消息头要求，docs/architecture/03 IPC 提交协议）。
         #[serde(default = "protocol_version")]
         v: u32,
+        /// 宿主代次：每次 spawn 递增；旧代次消息永远拒绝。
+        host_epoch: u64,
         execution_id: u64,
         /// "init" | "loop"
         kind: String,
@@ -43,6 +47,8 @@ pub enum MainFrame {
     Reply {
         #[serde(default = "protocol_version")]
         v: u32,
+        host_epoch: u64,
+        execution_id: u64,
         request_id: u64,
         result: String,
     },
@@ -63,6 +69,8 @@ pub enum HostFrame {
     Request {
         #[serde(default = "protocol_version")]
         v: u32,
+        host_epoch: u64,
+        execution_id: u64,
         request_id: u64,
         op: String,
         payload: String,
@@ -72,6 +80,8 @@ pub enum HostFrame {
     Complete {
         #[serde(default = "protocol_version")]
         v: u32,
+        host_epoch: u64,
+        execution_id: u64,
         last_request_id: u64,
         /// 仅 init 有意义：入口 loop 是否为函数。
         has_loop: bool,
@@ -84,6 +94,8 @@ pub enum HostFrame {
     Fault {
         #[serde(default = "protocol_version")]
         v: u32,
+        host_epoch: u64,
+        execution_id: u64,
         class: String,
         code: String,
         message: String,
@@ -231,6 +243,7 @@ mod tests {
     fn frame_roundtrip() {
         let f = MainFrame::Exec {
             v: PROTOCOL_VERSION,
+            host_epoch: 3,
             execution_id: 1,
             kind: "loop".into(),
             tick: 7,
@@ -244,7 +257,47 @@ mod tests {
         assert!(buf.len() > 4); // 长度前缀 + JSON 体
         let back: MainFrame = read_frame(&mut buf.as_slice(), 1024 * 1024).unwrap();
         match back {
-            MainFrame::Exec { tick, .. } => assert_eq!(tick, 7),
+            MainFrame::Exec {
+                tick, host_epoch, ..
+            } => {
+                assert_eq!(tick, 7);
+                assert_eq!(host_epoch, 3);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn v2_headers_are_strict() {
+        // v2 会话头（host_epoch / execution_id）缺失的帧必须解码失败，
+        // 不静默补零——两端严格对齐是旧代次 / 旧执行拒绝的前提。
+        let legacy = br#"{"type":"Request","v":2,"request_id":1,"op":"log","payload":"{}"}"#;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(legacy.len() as u32).to_be_bytes());
+        buf.extend_from_slice(legacy);
+        let err = read_frame::<_, HostFrame>(&mut buf.as_slice(), 1024).unwrap_err();
+        assert!(matches!(err, FrameError::Malformed(_)));
+
+        let f = HostFrame::Request {
+            v: PROTOCOL_VERSION,
+            host_epoch: 2,
+            execution_id: 9,
+            request_id: 4,
+            op: "log".into(),
+            payload: "{}".into(),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &f).unwrap();
+        let back: HostFrame = read_frame(&mut buf.as_slice(), 1024).unwrap();
+        match back {
+            HostFrame::Request {
+                host_epoch,
+                execution_id,
+                request_id,
+                ..
+            } => {
+                assert_eq!((host_epoch, execution_id, request_id), (2, 9, 4));
+            }
             _ => panic!(),
         }
     }
@@ -284,7 +337,8 @@ mod tests {
     #[test]
     fn version_field_defaults_and_roundtrip() {
         // 无 v 字段的旧帧可解析（default），新帧携带当前版本。
-        let legacy = br#"{"type":"Reply","request_id":1,"result":"{}"}"#;
+        let legacy =
+            br#"{"type":"Reply","host_epoch":1,"execution_id":2,"request_id":1,"result":"{}"}"#;
         let mut buf = Vec::new();
         buf.extend_from_slice(&(legacy.len() as u32).to_be_bytes());
         buf.extend_from_slice(legacy);
