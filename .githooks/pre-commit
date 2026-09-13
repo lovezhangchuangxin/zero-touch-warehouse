@@ -1,0 +1,29 @@
+#!/bin/sh
+# pre-commit：毫秒级快速检查，按暂存内容分流（完整门禁在 CI / pre-push）。
+# git 在所有平台（含 Windows 的 Git for Windows）都用自带 sh 执行本脚本，
+# 无需额外依赖。跳过一次：git commit --no-verify。
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if printf '%s\n' "$staged" | grep -q '\.rs$'; then
+    echo "[pre-commit] cargo fmt --check"
+    cargo fmt --all --check
+fi
+
+if printf '%s\n' "$staged" | grep -q '^web/'; then
+    # corepack / 独立安装器的 pnpm 在 sh 里可直接解析；npm -g 装出的是
+    # pnpm.cmd，回退一次。两者都缺（如纯 Rust 贡献者误碰 web/）则放行，
+    # CI 会兜底。
+    if command -v pnpm >/dev/null 2>&1; then
+        pnpm_bin=pnpm
+    elif command -v pnpm.cmd >/dev/null 2>&1; then
+        pnpm_bin=pnpm.cmd
+    else
+        echo "[pre-commit] 警告：未找到 pnpm，跳过 web 检查（CI 会兜底）"
+        exit 0
+    fi
+    echo "[pre-commit] web lint + format:check"
+    "$pnpm_bin" -C web lint
+    "$pnpm_bin" -C web format:check
+fi

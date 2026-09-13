@@ -1,0 +1,26 @@
+#!/bin/sh
+# pre-push：完整门禁（与 CI 同款：fmt / clippy / test / web 四项）。
+# 编译耗时可观（冷缓存分钟级），推送频率下可接受；跳过一次：
+# git push --no-verify。git 在所有平台（含 Windows）用自带 sh 执行本脚本。
+set -e
+
+echo "[pre-push] cargo fmt / clippy / test"
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+if command -v pnpm >/dev/null 2>&1; then
+    pnpm_bin=pnpm
+elif command -v pnpm.cmd >/dev/null 2>&1; then
+    pnpm_bin=pnpm.cmd
+else
+    echo "[pre-push] 警告：未找到 pnpm，跳过 web 门禁（CI 会兜底）"
+    exit 0
+fi
+
+echo "[pre-push] web lint / format / typecheck / build"
+"$pnpm_bin" -C web sync:sprites
+"$pnpm_bin" -C web lint
+"$pnpm_bin" -C web format:check
+"$pnpm_bin" -C web typecheck
+"$pnpm_bin" -C web build

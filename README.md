@@ -29,6 +29,25 @@ cargo test -p ztw-runtime --test a0_measure -- --nocapture   # 量测（写入 r
 
 量测与引擎行为记录在 `records/`（本地生成物，不入库；见该目录下引擎结论文件）。
 
+## 开发工作流（git hooks 与常用任务）
+
+克隆后安装一次 hooks（git 在所有平台——含 Windows 的 Git for Windows——都用
+自带 sh 执行 hook，无需额外依赖）：
+
+```sh
+just hooks                     # 或：sh scripts/install-hooks.sh（无 just 时）
+```
+
+- `pre-commit`：按暂存内容跑毫秒级快检——`.rs` → `cargo fmt --check`，
+  `web/` → oxlint + oxfmt --check；
+- `commit-msg`：校验 Conventional Commits（`feat(api): …`，scope 可逗号并列）；
+- `pre-push`：完整门禁（与 CI 同款）。耗时可观，跳过一次用 `--no-verify`。
+
+hook 只是快速反馈、可被绕过，强制门禁在 CI。常用任务见 `justfile`
+（`just lint` 快检 / `just gate` 完整门禁 / `just dev` 桌面开发模式）。
+pnpm 建议经 corepack 启用，版本由 `web/package.json` 的 `packageManager` 钉死，
+与 CI 一致。
+
 ## 已知边界
 
 - 快速引擎结论（中断不可捕获、OOM 可捕获等）见 `records/a0-engine-findings.md`。
