@@ -3,7 +3,9 @@
 # 平台范围按 docs/architecture/07：仅 Windows（x86_64 MSVC）与 macOS（arm64），不做 Linux。
 # 门禁内容 = A0 全部验收测试 + fmt/clippy 零警告；B2 起追加 web 前端四项
 # （oxlint / oxfmt --check / typecheck / vite build）。runner 预装 Rust stable（当前 1.98.1，
-# 含 rustfmt/clippy）与 Node 20 + pnpm 10，与提交时本地验证过的版本一致；镜像 stable 随时间
+# 含 rustfmt/clippy）与 Node + pnpm 10（corepack 按 packageManager 钉版）。Node 要求
+# >=24（web/package.json engines，随 vite 8 升级从 >=20 提高，本地以 v24.11 验证）；
+# 未开 engine-strict，engines 不匹配仅告警不致红。镜像 stable 随时间
 # 升级，clippy 新增 lint 若致红，按 lint 建议修代码或改用 pinned toolchain，不降 -D warnings。
 #
 # Windows libclang 备选路径（rquickjs 0.13 开着 bindgen feature，bindgen 需要 libclang）：

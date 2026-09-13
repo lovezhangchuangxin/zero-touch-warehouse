@@ -13,7 +13,10 @@ const mine = computed(() => store.snapshot?.my_orders ?? []);
 <template>
   <section class="panel">
     <h3>
-      市场 <span class="money">金币 <b>{{ gold }}</b></span>
+      市场
+      <span class="money"
+        >金币 <b>{{ gold }}</b></span
+      >
       <span v-if="debt !== '0.00'" class="debt">欠款 {{ debt }}</span>
     </h3>
     <div class="cols">

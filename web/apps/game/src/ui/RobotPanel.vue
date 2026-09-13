@@ -12,7 +12,10 @@ function select(id: number) {
 
 <template>
   <section class="panel">
-    <h3>机器人 <span class="dim">{{ robots.length }} 台</span></h3>
+    <!-- "机器人 " 的尾随空格放在插值内：oxfmt 强制子节点分行，裸文本的行首缩进会编译进 DOM 文本 -->
+    <h3>
+      {{ "机器人 " }}<span class="dim">{{ robots.length }} 台</span>
+    </h3>
     <div class="list">
       <div
         v-for="r in robots"

@@ -6,6 +6,15 @@
     "apps/game/public/sprites/**",
     "apps/game/src/scripts/demos/**"
   ],
+  "plugins": [
+    "typescript",
+    "unicorn",
+    "oxc",
+    "vue",
+    "import",
+    "promise",
+    "node"
+  ],
   "categories": {
     "correctness": "error"
   },

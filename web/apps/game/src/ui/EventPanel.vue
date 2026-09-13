@@ -61,7 +61,7 @@ function kindClass(kind: string): string {
   <div class="wrap">
     <div v-if="store.diagGap" class="gap">
       部分历史已过期：事件 #{{ store.diagGap.from }}–{{ store.diagGap.to }} 已被覆盖
-     （诊断环有界，docs/architecture/02）
+      （诊断环有界，docs/architecture/02）
     </div>
     <div class="list">
       <div v-for="e in events" :key="e.seq" class="ev">

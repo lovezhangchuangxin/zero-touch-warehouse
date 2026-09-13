@@ -66,7 +66,11 @@ body,
 body {
   background: var(--bg);
   color: var(--fg);
-  font: 13px/1.45 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font:
+    13px/1.45 "PingFang SC",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif;
 }
 button,
 select,

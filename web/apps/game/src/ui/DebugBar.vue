@@ -73,7 +73,10 @@ function onReset() {
     </button>
     <select v-model="scenarioSel" class="scen">
       <option value="" disabled>重开场景…</option>
-      <option v-for="s in scenarios" :key="s.id" :value="s.id">{{ s.name }}（{{ s.robots }} 台）</option>
+      <!-- 标签整体放单个插值：oxfmt 强制子节点分行，裸文本首尾空白会被编译进 DOM 文本 -->
+      <option v-for="s in scenarios" :key="s.id" :value="s.id">
+        {{ `${s.name}（${s.robots} 台）` }}
+      </option>
     </select>
     <button @click="onReset">重开</button>
     <span class="grow" />

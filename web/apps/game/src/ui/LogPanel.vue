@@ -7,9 +7,7 @@ import { store } from "../store";
 const lines = computed(() => [...store.logLines].reverse());
 const filter = ref("");
 const filtered = computed(() =>
-  filter.value === ""
-    ? lines.value
-    : lines.value.filter((l) => l.line.includes(filter.value)),
+  filter.value === "" ? lines.value : lines.value.filter((l) => l.line.includes(filter.value)),
 );
 // 刷屏提示按轮询页新增量判定：一次 150ms 窗口新增 >60 条即视为刷屏，
 // 下一页节奏回落后提示自然消失（不受 UI_LOG_KEEP 裁剪干扰）。

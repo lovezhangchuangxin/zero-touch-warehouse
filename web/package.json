@@ -19,10 +19,10 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "oxfmt": "^0.16.0",
-    "oxlint": "^1.14.0"
+    "oxfmt": "^0.67.0",
+    "oxlint": "^1.82.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   }
 }
