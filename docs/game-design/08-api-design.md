@@ -41,7 +41,7 @@ Game.repay(amount)           # 归还部分或全部，金额以欠款为上限
 # 辅助
 Game.find_path(start, goal, opts=None)  # 静态障碍最短路径，不含 start，终点为到达集内最近格；不可达返回 None
 Game.log(...)                # 输出到日志面板
-Game.memory                  # 跨代码重载的持久存储，dict 语义
+Game.memory                  # 主进程持有的受控映射，跨代码重载持久
 
 # 常量
 Game.E                       # 结果码表：Game.E.OK、Game.E.ARRIVED、Game.E.NOT_ADJACENT、…
@@ -70,7 +70,13 @@ Game.NORTH / SOUTH / WEST / EAST
 
 - 字段 `x`、`y`。行为等同坐标对：Python 实现为具名元组，解构 `x, y = r.pos`、下标 `r.pos[0]`、等值比较 `r.pos == (5, 5)`、作字典键均成立；JS 实现同样支持下标与展开。
 - 方法：`equals(other)` 等值比较（JS 侧必须用它，数组直接 `==` 恒为 false）、`adjacent(other)` 是否正交相邻、`distance(other)` 正交步数、`neighbors()` 四个相邻格。
-- 存入 `Game.memory` 序列化为 `[x, y]`，读回时深层自动还原为 Position；凡接受坐标的参数同样接受裸 `(x, y)`。
+- 存入 `Game.memory` 转为 `[x, y]`，读回为受控序列，不自动还原 Position；凡接受坐标的参数同样接受普通或受控的两元素序列。
+
+### memory 操作约定
+
+`Game.memory` 及 `r.memory` 是受控数据树的访问句柄。嵌套修改同步提交到主进程；写入原生容器先深拷贝，之后修改原变量不会改动 memory。只接受字符串键；不合法值与容量超限在修改时原子拒绝。完整值模型、支持操作、失效句柄和初始化提交规则以[存档与恢复](../architecture/06-persistence.md)为准。
+
+宿主崩溃保留已提交修改，但接单与写任务记录是两个独立操作。程序初始化及恢复时应查询已接订单、机器人携带物和动作结果，修复任务表，不可只凭 memory 假设世界状态。
 
 ## 寻路
 
@@ -94,7 +100,7 @@ path = Game.find_path(r.pos, goal)          # opts 例：{"range": 1}
 ```python
 r.move(Game.EAST)             # 相邻格移动
 r.move_to(target, opts=None)   # 复合移动：寻路并自动提交一步，见下文
-r.charge()                    # 相邻充电桩充电
+r.charge()                    # 向相邻 id 最小的充电桩申请本 tick 充电
 r.take(target, box_id)        # 从相邻容器取得指定 id 的货物，自身须空载
 r.give(target, box_id=None)   # 将指定货物放入相邻容器（货架/车辆/空载机器人）
 r.pick(x, y)                  # 从相邻地面格拾起该格货物，自身须空载
@@ -111,11 +117,11 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 
 ### move_to 与 robot.memory
 
-- `r.memory` 是 `Game.memory["robots"][r.id]` 的快捷引用，自动创建，读写同一份数据，跨代码重载持久；其中 `_move` 为 move_to 保留键，玩家不应占用，`robots` 同为 `Game.memory` 的保留键。
+- `r.memory` 是 `Game.memory["robots"][str(r.id)]`（JS 使用 `String(r.id)`） 的快捷引用，自动创建，读写同一份数据，跨代码重载持久；其中 `_move` 为 move_to 保留键，玩家不应占用，`robots` 同为 `Game.memory` 的保留键。
 - move_to 是 `find_path` + `move` 的复合封装：已到达（判定优先于行动占用检查）返回 `"ARRIVED"`，不提交动作、不占用行动机会，可当 tick 继续取放或充电；未到达则沿缓存路径提交一步 `move`，返回其受理码。所有返回值（含 `ARRIVED`）均为 `Game.E` 常量。
 - 目的地接受 `move_to(x, y, opts)` 或 `move_to(target, opts)`，target 为坐标或对象：货架/充电桩/装卸口/机器人取 `pos`，车辆取 `interact_pos`，地面货物取所在格。
 - 到达判定默认 `opts.range = 1`，抵达目的地或与其正交相邻即算到达——游戏内一切交互都按相邻进行；其余 opts 原样转发 `find_path`。
-- 路径、目的地与 opts 缓存于 `r.memory._move`：仅当目的地或 opts 变化、下一步被静态障碍（新建筑、地面货物）占据时重新寻路；结算失败（如 `CELL_CONTESTED`）不使缓存失效，下一 tick 原路重试。
+- 路径、目的地与 opts 缓存于 `r.memory._move`：当目的地或 opts 变化、当前位置偏离缓存路径、下一步被静态障碍（新建筑、地面货物）占据时重新寻路；结算失败（如 `CELL_CONTESTED`）不使缓存失效，下一 tick 原路重试。缓存只按实际位置推进，不在受理成功时提前消费路径。
 - 目的地不可达返回 `"NO_PATH"`，不占用行动机会。
 
 ## 管理操作：即时生效
@@ -127,7 +133,7 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 - `Game.market.cancel` 取消已接订单，条件与手续费见 [市场与交易](04-orders-and-logistics.md)；车辆未恢复出现时状态返回 `GOODS_MOVED`。
 - `Game.borrow` / `Game.repay` 即时到账与扣减：每 tick 结算完成后按欠款 × 利率复利计入，`Game.debt` 即时可见；借款受信用额度限制，超额返回 `CREDIT_EXCEEDED`。借贷的定位见 [经营、商店与成长](06-economy-and-progression.md)。
 - **快照纯度的唯一例外**：tick 内查询立即可见管理操作的效果；机器人动作仍然不可见，结算前查询不变。
-- 机器人动作的受理基于"当前世界"（tick 快照 + 已生效管理操作 + 已受理意图）；结算时按当时世界重新校验，目标已被销毁的已受理动作失败并返回对应结果码。
+- 机器人动作的受理基于"当前世界"（tick 快照 + 已生效管理操作；意图只记录本机器人行动机会，不预占共享资源）；结算时按当时世界重新校验，目标已被销毁的已受理动作失败并返回对应结果码。
 - 同一 tick 内多个管理操作按调用顺序生效，如两笔 `buy` 争同一格先到先得；"结果不依赖调用顺序"的公平性原则只约束机器人动作的统一结算。
 - 新购对象当 tick 即可查询并使用。
 
@@ -156,8 +162,8 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 | 结算 | `CELL_CONTESTED` | 争抢同一格失败：被 id 更小的机器人取得 |
 | 结算 | `TARGET_CONTESTED` | 争抢同一货物或容器空位失败：被 id 更小的机器人取得 |
 | 结算 | `CHAIN_BLOCKED` | 移动链受阻 |
-| 受理/结算 | `CHARGER_BUSY` | 充电桩被占用：受理期＝已有持续充电，结算期＝同 tick 争抢 |
-| 结算 | `TARGET_MOVED` | 交互目标的机器人同 tick 移动，转交失败 |
+| 结算 | `CHARGER_BUSY` | 同 tick 争抢充电桩失败；没有跨 tick 锁定 |
+| 结算 | `TARGET_MOVED` | 交互目标的机器人同 tick 成功移动，转交失败 |
 | 结算 | `TARGET_GONE` | 目标被管理操作销毁或取消移除 |
 | 管理 | `NO_FUNDS` | 金币不足（buy、take 买入单、repay）；不自动借贷 |
 | 管理 | `CREDIT_EXCEEDED` | borrow：超出信用额度 |

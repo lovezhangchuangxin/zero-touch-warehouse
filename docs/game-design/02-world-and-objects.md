@@ -29,7 +29,7 @@
 
 ## 充电桩
 
-机器人在相邻格充电，无须进入充电桩所在格。一个充电桩每 tick 最多服务一台机器人；充电持续多个 tick，期间该桩不可再受理充电。
+机器人在相邻格充电，无须进入充电桩所在格。一个充电桩每 tick 最多服务一台机器人；每次 charge 只服务一个 tick，充到目标电量须逐 tick 重新申请，不存在跨 tick 锁定。
 
 多台机器人同 tick 争抢同一充电桩时，id 小者成功、其余失败（`CHARGER_BUSY`，裁决规则见 [Tick、动作与电力](03-simulation-and-actions.md)）。电力规则见 [Tick、动作与电力](03-simulation-and-actions.md)。
 

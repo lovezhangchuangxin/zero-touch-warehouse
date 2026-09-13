@@ -27,7 +27,7 @@
 
 ## macOS
 
-- 产出 universal bundle（arm64 + x86_64）。python-build-standalone 只提供单架构发行物，universal 需用 lipo 合并两个构建（在原型 4 验证）；标准库白名单为纯 Python，合并面限于 libpython 动态库与 stdlib 数据文件。
+- 产出 universal bundle（arm64 + x86_64）。python-build-standalone 只提供单架构发行物，universal 需用 lipo 合并两个构建（在原型 D 验证）；须枚举两个发行物的动态库、原生模块和依赖布局，逐项验证架构兼容与加载路径；标准库白名单不等于发行物没有原生依赖。
 - 全部二进制（含嵌入的 CPython 动态库）纳入签名与公证流程；hardened runtime 要求嵌入的动态库以同一开发者身份由内向外完成签名。
 - 不得启用 App Sandbox：Steamworks 与 `com.apple.security.app-sandbox` 不兼容。
 
