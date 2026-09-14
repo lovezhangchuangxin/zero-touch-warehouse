@@ -126,7 +126,8 @@ jobs:
         working-directory: web
 
       # ---- cargo 门禁（desktop 已入 workspace，test --workspace 即双平台构建覆盖；
-      #      tauri frontendDist 指向仓库内静态 stub，与 vite 产物无关）----
+      #      debug 走 tauri devUrl 不嵌资源，frontendDist 指向的 vite 产物由上方
+      #      web build 步骤产出，顺序已保证）----
       - name: cargo fmt --check
         run: cargo fmt --all --check
 

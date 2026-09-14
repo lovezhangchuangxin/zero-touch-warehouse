@@ -14,8 +14,8 @@
     "format:check": "oxfmt --check apps packages scripts",
     "sync:sprites": "node scripts/sync-sprites.mjs",
     "build:host": "cargo build --manifest-path ../Cargo.toml -p ztw-runtime -p ztw-runtime-py",
-    "app:dev": "pnpm build:host && tauri --config ../crates/desktop/tauri.conf.json dev",
-    "app:build": "pnpm build:host && tauri --config ../crates/desktop/tauri.conf.json build"
+    "app:dev": "pnpm build:host && cd ../crates/desktop && tauri dev",
+    "app:build": "pnpm build:host && cd ../crates/desktop && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
