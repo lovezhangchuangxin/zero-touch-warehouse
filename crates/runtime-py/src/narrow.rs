@@ -95,22 +95,37 @@ class _ZtwFinder:
 
 _ztw_sys.meta_path = [_ZtwFinder()] + _ztw_sys.meta_path
 
-# sys.path 只留发行物内的标准库目录（去 cwd 与 site-packages：不提供 pip）。
+# sys.path 只留发行物内的标准库目录（去 cwd 与 site-packages：不提供
+# pip）。Windows 的 sys.path 条目可能以相对形式或与 prefix 不同大小写/
+# 分隔符出现（盘符大小写、隔离式相对条目）——统一 normcase+normpath
+# 后基于 prefix 解析判定并输出绝对条目；裸 startswith 会整条误杀
+#（Windows CI 实测：import bisect 报 ModuleNotFoundError）。macOS 条目
+# 本就是绝对路径，行为不变。os 在启动快照内，sys.modules 命中不走 finder。
+import os as _ztw_os
 _prefix = _ztw_sys.prefix
-_ztw_sys.path = [
-    p for p in _ztw_sys.path
-    if p.startswith(_prefix) and 'site-packages' not in p
-]
+_ztw_prefix_key = _ztw_os.path.normcase(_ztw_os.path.normpath(_prefix))
+_ztw_new_path = []
+for _p in _ztw_sys.path:
+    if not _p:
+        continue  # '' 即 cwd：不提供按 cwd 导入
+    _cand = _p if _ztw_os.path.isabs(_p) else _ztw_os.path.join(_prefix, _p)
+    _key = _ztw_os.path.normcase(_ztw_os.path.normpath(_cand))
+    if 'site-packages' in _key:
+        continue
+    if _key == _ztw_prefix_key or _key.startswith(_ztw_prefix_key + _ztw_os.sep):
+        _ztw_new_path.append(_cand)
+_ztw_sys.path = _ztw_new_path
 
-# 前缀比较用规范化形态（两种分隔符都折成 '/'）：裸 startswith 可被
-# ../ 遍历与同级目录前缀碰撞绕过。符号链接级逃逸超出误用防护定位。
+# 前缀比较用规范化形态（两种分隔符都折成 '/'，Windows 文件系统大小写
+# 不敏感故统一小写）：裸 startswith 可被 ../ 遍历与同级目录前缀碰撞
+# 绕过。符号链接级逃逸超出误用防护定位。
 _ztw_prefix_norm = '/'.join(
     s for s in _prefix.replace('\\', '/').split('/') if s not in ('', '.')
-)
+).lower()
 
 def _ztw_under_prefix(p):
     segs = []
-    for seg in p.replace('\\', '/').split('/'):
+    for seg in p.replace('\\', '/').lower().split('/'):
         if seg in ('', '.'):
             continue
         if seg == '..':
