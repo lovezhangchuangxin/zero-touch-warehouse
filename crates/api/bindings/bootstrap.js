@@ -324,7 +324,10 @@
     if (seen.has(v)) throw ipcError("INVALID_VALUE", "memory 拒绝循环引用");
     seen.add(v);
     try {
-      if (v instanceof Position) return { List: [v[0], v[1]] };
+      if (v instanceof Position) {
+        // 线值元素须逐个包装（裸数字不是合法线值——A1 矩阵测试抓出）。
+        return { List: [toWire(v[0], seen), toWire(v[1], seen)] };
+      }
       if (Array.isArray(v)) {
         const items = [];
         for (let i = 0; i < v.length; i++) {

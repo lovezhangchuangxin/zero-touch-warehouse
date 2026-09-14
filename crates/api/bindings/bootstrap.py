@@ -370,7 +370,8 @@ def _to_wire(v, seen=None):
     if isinstance(v, str):
         return {"Str": v}
     if isinstance(v, Position):
-        return {"List": [v[0], v[1]]}
+        # 线值元素须逐个包装（与 bootstrap.js 同款修复，A1 矩阵对账锚点）。
+        return {"List": [_to_wire(v[0], seen), _to_wire(v[1], seen)]}
     vid = id(v)
     if vid in seen:
         raise GameError("INVALID_VALUE", "memory 拒绝循环引用")
