@@ -19,6 +19,8 @@
 //!   dup_request_corrupt:<n>     第 n 号请求同号异负载重发（协议故障路径）
 //!   dup_complete                完成帧连发两次（旧执行消息丢弃，只结算一次）
 //!   old_exec_request            请求帧改带上一执行号（EXEC_CLOSED 拒绝）
+//!   old_exec_request_first      仅本执行首个请求改带旧执行号，被拒后照常发号
+//!                               （验证拒绝计入对账：不触发 GAP / MISMATCH）
 //!   stale_epoch                 请求帧改带上一宿主代次（STALE_EPOCH 拒绝）
 //!   oversize_frame              首次 loop 执行前发送超大帧
 //!   hang_exec                   首次 loop 执行前挂起（模拟宿主无响应）
@@ -72,6 +74,9 @@ struct Faults {
     /// 完成帧连发两次（预期第二次被主进程按旧执行丢弃，不重复结算）。
     dup_complete: bool,
     old_exec_request: bool,
+    /// 仅本执行的首个请求改写为旧执行号：EXEC_CLOSED 被拒后宿主继续
+    /// 正常发号，验证主进程把拒绝计入对账（不误判 GAP / MISMATCH）。
+    old_exec_request_first: bool,
     stale_epoch: bool,
 }
 
@@ -96,6 +101,8 @@ fn parse_faults(raw: Option<String>) -> Faults {
             f.dup_complete = true;
         } else if part == "old_exec_request" {
             f.old_exec_request = true;
+        } else if part == "old_exec_request_first" {
+            f.old_exec_request_first = true;
         } else if part == "stale_epoch" {
             f.stale_epoch = true;
         } else if part == "oversize_frame" {
@@ -124,6 +131,9 @@ struct HostState {
     /// 供主进程做旧代次 / 旧执行拒绝（docs/architecture/03 v2 会话头）。
     host_epoch: u64,
     execution_id: u64,
+    /// 本执行是否已发出首个请求（old_exec_request_first 的一次性闸门，
+    /// 收到新 Exec 帧时复位）。
+    exec_first_request_sent: bool,
 }
 
 thread_local! {
@@ -136,6 +146,7 @@ thread_local! {
         frame_limit: 1024 * 1024,
         host_epoch: 0,
         execution_id: 0,
+        exec_first_request_sent: false,
     });
 }
 
@@ -155,12 +166,20 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
         let rid = h.request_id;
         let (epoch, exec_id) = (h.host_epoch, h.execution_id);
         // 注入改写：旧执行号 / 旧代次（主进程侧拒绝路径的触发器）。
+        // old_exec_request_first 只消费本执行的首个请求，其余照常——
+        // 场景是“被拒后继续发号”，须留给宿主后续正常请求。
         let frame_epoch = if h.faults.stale_epoch && epoch > 0 {
             epoch - 1
         } else {
             epoch
         };
-        let frame_exec = if h.faults.old_exec_request && exec_id > 0 {
+        let rewrite_old_exec = exec_id > 0
+            && (h.faults.old_exec_request
+                || (h.faults.old_exec_request_first && !h.exec_first_request_sent));
+        if h.faults.old_exec_request_first {
+            h.exec_first_request_sent = true;
+        }
+        let frame_exec = if rewrite_old_exec {
             exec_id - 1
         } else {
             exec_id
@@ -574,6 +593,7 @@ fn main() {
             h.stats = ExecStats::default();
             h.host_epoch = host_epoch;
             h.execution_id = execution_id;
+            h.exec_first_request_sent = false;
         });
         if is_init {
             // 初始化即重建执行环境（首次加载 / 热重载 / 环境故障恢复同路径）。

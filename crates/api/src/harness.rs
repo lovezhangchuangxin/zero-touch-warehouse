@@ -1056,6 +1056,13 @@ impl Session {
                         // 旧执行的消息：执行已关闭，拒绝且不执行；宿主继续
                         // 走它自己的终态（docs 03：执行关闭后拒绝全部旧消息）。
                         if execution_id != exec_id {
+                            // 拒绝也构成“已见”：宿主发出即消耗该请求号，
+                            // 完成帧的 last_request_id 引用它。不推进则
+                            // 捕获异常后继续发号的宿主会被 REQUEST_ID_GAP /
+                            // LAST_REQUEST_MISMATCH 误杀——可恢复拒绝被
+                            // 升格成协议故障。不入 exec_dedup：旧执行请求
+                            // 重发仍先命中本执行号检查，天然幂等。
+                            self.exec_seen_request_id = self.exec_seen_request_id.max(request_id);
                             let reply = err_result(
                                 "EXEC_CLOSED",
                                 &format!("执行已关闭：拒绝旧执行 #{execution_id} 的消息"),

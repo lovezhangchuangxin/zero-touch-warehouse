@@ -78,6 +78,38 @@ fn old_execution_request_rejected_as_closed() {
     assert!(s.resume_after_script_error());
 }
 
+/// EXEC_CLOSED 拒绝须计入已见号：在途旧执行请求被拒后，宿主捕获异常
+/// 继续发号、正常完成——不得被 REQUEST_ID_GAP / 完成帧对账误杀
+/// （可恢复拒绝不是协议故障；主进程与字段注释声称的语义一致）。
+#[test]
+fn exec_closed_rejected_request_keeps_reconciliation() {
+    let mut s = fault_session("old_exec_request_first");
+    assert!(s.load_code(&fixture("old_exec_recover.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Ok,
+        "被拒后继续发号 + 完成帧对账都应通过：{:?}",
+        s.fault
+    );
+    // 被拒请求不落地；后续正常请求照常生效。
+    assert!(
+        !s.logs.iter().any(|(_, l)| l.contains("rejected")),
+        "{:?}",
+        s.logs
+    );
+    assert!(
+        s.logs.iter().any(|(_, l)| l == "after-reject-1")
+            && s.logs.iter().any(|(_, l)| l == "after-reject-2"),
+        "{:?}",
+        s.logs
+    );
+    // 宿主存活，下一 tick 同款路径继续正常（注入按执行重置）。
+    assert!(s.host_alive());
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+}
+
 #[test]
 fn stale_epoch_request_kills_host() {
     let mut s = fault_session("stale_epoch");
