@@ -24,6 +24,7 @@ function loop() {
   Game.log("b4:" + Game.borrow(-1));
   Game.log("b5:" + Game.borrow("x"));
   Game.log("b6:" + Game.borrow(1e30));
+  Game.log("b11:" + Game.borrow(1e400)); // 字面量上溢为 Infinity → 非有限拒绝
   Game.log("b7:" + Game.borrow(2000)); // 超信用额度
 
   // 还款：部分归还、超额钳定到欠款。

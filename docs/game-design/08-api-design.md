@@ -167,6 +167,7 @@ r.drop(x, y, box_id=None)     # 将指定货物放到相邻空地面格
 | 结算 | `TARGET_MOVED` | 交互目标的机器人同 tick 成功移动，转交失败 |
 | 结算 | `TARGET_GONE` | 目标被管理操作销毁或取消移除 |
 | 管理 | `NO_FUNDS` | 金币不足（buy、take 买入单、repay）；不自动借贷 |
+| 管理 | `NOT_ON_WALL` | buy 装卸位：锚点不在边界墙上（或角格朝向无法唯一确定） |
 | 管理 | `CREDIT_EXCEEDED` | borrow：超出信用额度 |
 | 管理 | `ON_VEHICLE` | destroy：货物尚未卸离购入车辆 |
 | 管理 | `NO_FREE_DOCK` | 接单：没有空闲装卸位 |

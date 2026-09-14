@@ -12,6 +12,10 @@
 //! - 停摆刻度 = 首个「金币 < 当前最便宜整单成本 且 欠款 ≥ 信用额度」的
 //!   tick（无破产机制下的可观测 proxy，无则 N/A）；
 //! - 分货物毛利 = 该型已售均价 / 该型历史买入均价 − 1。
+//!
+//! 完成口径前提：订单离开 my_orders 即视为成交——本套脚本不调用
+//! market.cancel（撤单手续费会引入「接了但未成交」的中间态，收款与
+//! 完成数口径须另行处理）。
 
 use std::collections::BTreeMap;
 
@@ -77,12 +81,13 @@ impl Recorder {
         }
     }
 
-    /// 窗口收尾：累计本窗口净利润并清空窗口态（订单快照 / 停摆刻度）。
+    /// 窗口收尾：累计本窗口净利润并清空订单快照（新世界订单 id 重排）。
+    /// 停摆刻度是窗口级观测量，保留至合并（merge 取最早）——此处清空
+    /// 会让末窗口的 N/A 覆盖早窗口的真实停摆，断言随之恒真。
     fn finalize_window(&mut self, initial_gold: i64) {
         self.profit_sum +=
             self.terminal.gold + self.terminal.inventory - self.terminal.debt - initial_gold;
         self.known_orders.clear();
-        self.stall_tick = None;
     }
 
     fn merge(&mut self, other: Recorder) {
@@ -103,7 +108,7 @@ impl Recorder {
         self.sum_inventory += other.sum_inventory;
         self.samples += other.samples;
         self.orders_completed += other.orders_completed;
-        self.stall_tick = other.stall_tick;
+        self.stall_tick = self.stall_tick.or(other.stall_tick);
         self.terminal = other.terminal;
         self.profit_sum += other.profit_sum;
     }
@@ -231,18 +236,13 @@ impl Recorder {
             }
             let avg_buy = if bq > 0 { bm as f64 / bq as f64 } else { 0.0 };
             let margin = if sq > 0 {
-                (rv as f64 / sq as f64) / avg_buy - 1.0
+                format!("{:+.0}%", ((rv as f64 / sq as f64) / avg_buy - 1.0) * 100.0)
             } else {
-                f64::NAN
+                "—（在库）".into()
             };
             println!(
-                "  {g}: 买入 {bq} 箱 @均价 {:.2} | 已售 {sq} 箱 | 毛利 {}",
-                avg_buy / 1000.0,
-                if sq > 0 {
-                    format!("{:+.0}%", margin * 100.0)
-                } else {
-                    "—（在库）".into()
-                },
+                "  {g}: 买入 {bq} 箱 @均价 {:.2} | 已售 {sq} 箱 | 毛利 {margin}",
+                avg_buy / 1000.0
             );
         }
     }

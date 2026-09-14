@@ -187,6 +187,23 @@ fn buy_dock_orientation_and_wall_rules() {
     w2.add_ground_box("water", Position::new(6, 2));
     assert_eq!(w2.manage_buy("dock", 7, 2).0, codes::CELL_OCCUPIED);
     assert_eq!(w2.manage_buy("dock", 7, 4).0, codes::OK);
+
+    // 锚点墙格本身被占（场景构造器不校验占位，manage_buy 须自守）：
+    // 设施 → CELL_BLOCKED、地面货物 → CELL_OCCUPIED，与第二格检查对称。
+    let mut w3 = World::new_empty(8, 6, 2_500_000);
+    for x in 0..8 {
+        w3.add_wall(Position::new(x, 0));
+    }
+    w3.add_shelf(Position::new(5, 0));
+    assert_eq!(w3.manage_buy("dock", 5, 0).0, codes::CELL_BLOCKED);
+    w3.add_charger(Position::new(4, 0));
+    assert_eq!(w3.manage_buy("dock", 4, 0).0, codes::CELL_BLOCKED);
+    w3.add_ground_box("water", Position::new(3, 0));
+    assert_eq!(w3.manage_buy("dock", 3, 0).0, codes::CELL_OCCUPIED);
+    let (code, eff) = w3.manage_buy("dock", 2, 0);
+    assert_eq!(code, codes::OK);
+    assert_eq!(eff.unwrap().ext, Some((0, 1)));
+    check_invariants(&w3);
 }
 
 /// 已购对象可销毁回收；借贷 → 购机 → 销毁 → 还款的解围闭环资金守恒

@@ -21,7 +21,9 @@ use ztw_sim::{
     PRICE_ROBOT, PRICE_SHELF, World, Xoshiro256,
 };
 
-/// 测试侧期望账本（独立于 World 实现，只消费各 *Effect 与结算前快照）。
+/// 测试侧期望账本。独立性边界：期望值只从各 *Effect 返回值与结算前
+/// 快照推导，公式（计息、手续费钳定）在测试侧独立复算——不调用、也
+/// 不复用 World 的任何资金实现，两边共享的只有常量表。
 #[derive(Default)]
 struct Ledger {
     gold: i64,
@@ -72,6 +74,9 @@ fn accounting_identity_storm() {
         for _tick in 0..300 {
             let ops = 1 + rng.below(3);
             for _ in 0..ops {
+                // 权重（共 12 份）：take 4（市场流转是资金线主驱动）、
+                // borrow / buy 各 2（额度、计息与退款路径需要密度）、
+                // cancel / repay / destroy / no-op 各 1。
                 match rng.below(12) {
                     0..=3 => {
                         // take：随机侧，卖侧取最便宜（有资金压力）、买侧随机。
@@ -198,8 +203,18 @@ fn accounting_identity_storm() {
                             wall_idx += 1;
                             ("dock", p)
                         } else {
-                            let p = interior_spots[spot_idx % interior_spots.len()];
+                            // 机器人站立格轮转跳过（把 buy 成功路径让给
+                            // 空格；转满一周仍有占位则照买、按拒绝码对账）。
+                            let mut p = interior_spots[spot_idx % interior_spots.len()];
                             spot_idx += 1;
+                            let mut guard = 0;
+                            while guard < interior_spots.len()
+                                && w.robots.values().any(|r| r.pos == p)
+                            {
+                                p = interior_spots[spot_idx % interior_spots.len()];
+                                spot_idx += 1;
+                                guard += 1;
+                            }
                             match rng.below(3) {
                                 0 => ("shelf", p),
                                 1 => ("charger", p),

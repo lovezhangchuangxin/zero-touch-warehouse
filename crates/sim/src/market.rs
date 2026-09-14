@@ -167,8 +167,8 @@ impl World {
                 (0, pay, fee - pay) // 手续费扣金币、不足计欠款
             }
         };
-        self.gold_milli += refund - gold_pay;
-        self.debt_milli += debt_add;
+        self.gold_milli = self.gold_milli.saturating_add(refund - gold_pay);
+        self.debt_milli = self.debt_milli.saturating_add(debt_add);
         // 车辆与其上货物退回对方；未到场则撤销到场事件。
         if let Some(vid) = vehicle_id {
             if let Some(v) = self.vehicles.remove(&vid) {
@@ -287,7 +287,7 @@ impl World {
         price: MilliGold,
     ) -> (&'static str, Option<DestroyEffect>) {
         let refund = price / DESTROY_REFUND_DENOMINATOR * DESTROY_REFUND_NUMERATOR;
-        self.gold_milli += refund;
+        self.gold_milli = self.gold_milli.saturating_add(refund);
         (
             codes::OK,
             Some(DestroyEffect {
@@ -317,7 +317,7 @@ impl World {
             Some(_) => {}
             None => return (codes::CREDIT_EXCEEDED, None),
         }
-        self.gold_milli += amount_milli;
+        self.gold_milli = self.gold_milli.saturating_add(amount_milli);
         self.debt_milli += amount_milli;
         (codes::OK, Some(BorrowEffect { amount_milli }))
     }
@@ -365,6 +365,22 @@ impl World {
             };
             if !self.walls.contains(&pos) {
                 return (codes::NOT_ON_WALL, None);
+            }
+            // 锚点格虽必为墙，仍须排除被设施 / 地面货物占用的墙格（场景
+            // 构造器不校验占位；add_dock 的重叠断言仅 debug_assert，release
+            // 下静默产出「装卸位与货架同格」会腐蚀世界不变量）。
+            // 地面货物先于静态占位，与其余 kind 的校验次序一致。
+            if self.ground_box_at(pos).is_some() {
+                return (codes::CELL_OCCUPIED, None);
+            }
+            if self.shelves.values().any(|s| s.pos == pos)
+                || self.chargers.values().any(|c| c.pos == pos)
+                || self
+                    .docks
+                    .values()
+                    .any(|d| d.pos == pos || d.pos.step(d.ext.0, d.ext.1) == pos)
+            {
+                return (codes::CELL_BLOCKED, None);
             }
             let second = pos.step(inward.0, inward.1);
             if second.x < 0 || second.y < 0 || second.x >= self.map_w || second.y >= self.map_h {

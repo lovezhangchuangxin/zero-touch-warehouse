@@ -32,7 +32,8 @@ pub use rng::Xoshiro256;
 pub use world::World;
 
 // ---------------------------------------------------------------------------
-// 数值锚点（临时；docs/game-design/07 列为随原型平衡的待定项）
+// 数值锚点（里程碑 3 校准冻结，实测见 records/m3-calibration.md；后续平衡
+// 调整须重跑校准并更新记录——docs/game-design/09 锚点表与此同源）
 // ---------------------------------------------------------------------------
 
 /// 每 tick 充电量（封顶 energy_max）。
@@ -45,7 +46,7 @@ pub const ENERGY_COST_DROP: u32 = 3;
 /// 取消手续费 = 订单额 × 10%（向下取整，退款下限 0；docs/game-design/04）。
 pub const CANCEL_FEE_NUMERATOR: MilliGold = 1;
 pub const CANCEL_FEE_DENOMINATOR: MilliGold = 10;
-/// 销毁退款 = 设备价 × 50%；设备价取 docs/game-design/09 锚点（千分金币）。
+/// 销毁退款 = 设备价 × 50%（docs/game-design/09 冻结值）。
 pub const DESTROY_REFUND_NUMERATOR: MilliGold = 1;
 pub const DESTROY_REFUND_DENOMINATOR: MilliGold = 2;
 pub const PRICE_ROBOT: MilliGold = 650_000;
@@ -53,12 +54,12 @@ pub const PRICE_SHELF: MilliGold = 175_000;
 pub const PRICE_CHARGER: MilliGold = 300_000;
 pub const PRICE_DOCK: MilliGold = 500_000;
 /// 借贷利率：每 tick 复利 debt += debt / DEN × NUM（向下取整，与手续费
-/// 同款舍入；规则版本冻结点）。锚点 0.1%/tick——短期周转便宜、长期囤债
-/// 受罚；随里程碑 4 校准冻结。
+/// 同款舍入；规则版本冻结点）。冻结值 0.1%/tick——短期周转便宜、长期
+/// 囤债受罚。
 pub const INTEREST_NUMERATOR: MilliGold = 1;
 pub const INTEREST_DENOMINATOR: MilliGold = 1000;
-/// 信用额度（milli）。锚点 1000 gold > 机器人价 650（docs/game-design/06：
-/// 额度须高于购置一台机器人的解围成本）；随校准冻结。
+/// 信用额度（milli）。冻结值 1000 gold > 机器人价 650（docs/game-design/06：
+/// 额度须高于购置一台机器人的解围成本）。
 pub const CREDIT_LIMIT_MILLI: MilliGold = 1_000_000;
 
 /// 板面刷新间隔（docs/game-design/09：30–60 tick 窗口内取 40）。
@@ -69,8 +70,8 @@ pub const MARKET_REFRESH_INTERVAL: u64 = 40;
 /// 模块注释）。
 pub const MARKET_SPREAD_MARGIN_PER_MILLE: u32 = 120;
 
-/// 市场货物目录条目（docs/game-design/09；全部数值为示例锚点，随原型
-/// 平衡——里程碑 4 校准冻结）。平稳标准差 = σ / √(2k − k²)，带宽按
+/// 市场货物目录条目（docs/game-design/09 冻结值，校准记录见
+/// records/m3-calibration.md）。平稳标准差 = σ / √(2k − k²)，带宽按
 /// 锚价 ± 4 倍平稳标准差推导（见 m3_market 测试）。
 #[derive(Debug, Clone, Copy)]
 pub struct GoodsSpec {
@@ -82,7 +83,8 @@ pub struct GoodsSpec {
     pub k_den: u32,
     /// 每 tick 波动幅度 σ（milli）。
     pub sigma_milli: MilliGold,
-    /// 半价差采样范围（基准价的千分比；两侧全价差落在示例 20%–40% 带）。
+    /// 半价差采样范围（基准价的千分比；两侧全价差 19%–26% 带，
+    /// docs/game-design/09 冻结值）。
     pub half_spread_min_per_mille: u32,
     pub half_spread_max_per_mille: u32,
     /// 卖单（玩家买入）数量区间——买入单量大。

@@ -122,7 +122,9 @@ fn repair_goods(listings: &mut BTreeMap<Id, Order>, name: &str) -> bool {
         if ok {
             return changed;
         }
-        // 新挂单 id 恒最大，victim 必是滞留旧报价。
+        // victim 取较旧者。当前参数下同代新鲜挂单对不可能违例（见
+        // spread_floor_above_repair_margin 的终止性断言），故被移除的实际
+        // 总是滞留旧报价；参数越界时该性质不再成立，但迭代上限兜底。
         let victim = ask_id.min(bid_id);
         listings.remove(&victim);
         changed = true;
@@ -130,8 +132,8 @@ fn repair_goods(listings: &mut BTreeMap<Id, Order>, name: &str) -> bool {
 }
 
 impl World {
-    /// 启用市场生成器：以货物锚价播种基准价并生成初始板面（卖侧先行，
-    /// 买单生成时对最小卖价钳制）。须在 `with_seed` 之后调用。
+    /// 启用市场生成器：以货物锚价播种基准价并生成初始板面，再以修复环
+    /// 清除违例对（生成时无钳制，见模块注释）。须在 `with_seed` 之后调用。
     pub fn with_market(mut self) -> World {
         debug_assert!(self.market.is_none(), "市场重复启用");
         let mut m = MarketState {
@@ -232,8 +234,15 @@ impl World {
             let span = (g.board_max - g.board_min + 1) as usize;
             let target = g.board_min as usize + m.rng.below(span);
             // 补足与修复交替直到稳定：修复撤掉滞留旧报价后立即按当前
-            // 买卖线补足，常驻下限恒成立（板面规模有限，必然收敛）。
+            // 买卖线补足，常驻下限恒成立。收敛依赖「2×半价差下限 > 修复
+            // 裕量」（见 spread_floor_above_repair_margin 断言）；迭代上限
+            // 纯防御——参数越界时宁可板面临时低于常驻下限，不挂死世界线程。
+            let mut guard = 0usize;
             loop {
+                guard += 1;
+                if guard > 32 {
+                    break;
+                }
                 let mut acted = false;
                 for side in [OrderSide::Sell, OrderSide::Buy] {
                     while self
@@ -268,6 +277,23 @@ mod tests {
         assert_eq!(quantize_half_even(2.6), 3);
         assert_eq!(quantize_half_even(-0.5), 0); // -0 → 0
         assert_eq!(quantize_half_even(-1.5), -2);
+    }
+
+    /// 修复环终止性：同代挂单对的价差率下界 = 2×半价差下限（f(a,b) =
+    /// (a+b)/(2+a−b) 在 a=b=hs_min 取最小），须大于修复裕量——否则每张
+    /// 新挂单都与对侧极值违例，补足/修复交替环不收敛。参数（半价差、
+    /// 裕量）任何调整必须复核本断言。
+    #[test]
+    fn spread_floor_above_repair_margin() {
+        for g in GOODS {
+            assert!(
+                2 * g.half_spread_min_per_mille > MARKET_SPREAD_MARGIN_PER_MILLE,
+                "{}：2×{}‰ ≤ {}‰，刷新修复环可能不终止",
+                g.name,
+                g.half_spread_min_per_mille,
+                MARKET_SPREAD_MARGIN_PER_MILLE
+            );
+        }
     }
 
     #[test]

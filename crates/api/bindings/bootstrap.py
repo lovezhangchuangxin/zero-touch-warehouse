@@ -278,10 +278,15 @@ def _to_milli(v):
     """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    v = float(v)
-    if v != v or v in (float("inf"), float("-inf")):
+    try:
+        x = float(v) * 1000 + 0.5
+    except OverflowError:
+        # CPython 大 int 转 float 抛 OverflowError（JS 同输入得到 ±Infinity
+        # 后走非有限拒绝）；两侧同样落到 None → INVALID_ARGUMENT。
         return None
-    m = _math.floor(v * 1000 + 0.5)
+    if not _math.isfinite(x):
+        return None
+    m = _math.floor(x)
     if abs(m) > _MAX_SAFE:
         return None
     return m

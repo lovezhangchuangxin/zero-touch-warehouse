@@ -357,7 +357,7 @@ impl World {
             self.spawn_vehicle(order_id);
         }
         // 市场刷新（每 tick 边界调用一次的契约由 Session.tick / 测试循环维护；
-        // 价格演化与板面刷新见 gen.rs）。
+        // 价格演化与板面刷新见 marketgen.rs）。
         self.market_tick();
     }
 
@@ -426,7 +426,9 @@ impl World {
         // 计息：每 tick 结算完成后按欠款 × 利率复利计入（docs/game-design/08
         // 借贷）。整数有理数、先除后乘向下取整——与取消手续费同款舍入，
         // 规则随版本冻结；欠款不足 1 milli 利息时利息为 0。
-        self.debt_milli += self.debt_milli / INTEREST_DENOMINATOR * INTEREST_NUMERATOR;
+        self.debt_milli = self
+            .debt_milli
+            .saturating_add(self.debt_milli / INTEREST_DENOMINATOR * INTEREST_NUMERATOR);
         self.tick += 1;
     }
 

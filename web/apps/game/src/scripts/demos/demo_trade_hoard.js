@@ -111,8 +111,9 @@ function doAdjacent(r, x, y, act) {
   return null;
 }
 
-// 价格中枢：每 tick 以（最低 ask + 最高 bid）/ 2 的慢速 EMA 估计锚价
-// （0.5%/tick，约 200 tick 记忆——跨数个回归周期，长趋势中不追价）。
+// 价格中枢：每 tick 以两侧挂单均值（ask 均价与 bid 均价的中点）的慢速
+// EMA 估计锚价（0.5%/tick，约 200 tick 记忆——跨数个回归周期，长趋势中
+// 不追价）。
 function midOf(g) {
   // 两侧均值（而非极值）：吃掉最便宜 ask 不抬高中枢，估计不被自己的
   // 买入行为偏移。
@@ -186,6 +187,15 @@ function pendingBuy(g) {
   return n;
 }
 
+// 在途买入总量（全货物）：容量门按总箱数计——暂存格与货架槽不分货物。
+function pendingBuyAll() {
+  let n = 0;
+  for (const o of Game.my_orders()) {
+    if (o.side === "sell") n += o.qty;
+  }
+  return n;
+}
+
 function openBuys() {
   let n = 0;
   for (const o of Game.my_orders()) {
@@ -203,7 +213,7 @@ function tradePolicy() {
     const mid = m.mid[o.goods_type];
     if (!gate || mid === undefined || o.unit_price > mid * gate.buy) continue;
     if (Game.gold < o.unit_price * o.qty + RESERVE) continue;
-    if (o.qty > freeParking() - pendingBuy(o.goods_type)) continue;
+    if (o.qty > freeParking() - pendingBuyAll()) continue;
     if (Game.market.take(o.id) === Game.E.OK) {
       const g = o.goods_type;
       const q0 = m.q[g] || 0;
@@ -249,6 +259,17 @@ function findBoxToFetch(g, zone) {
   for (const [cx, cy] of zone.park) {
     for (const b of Game.ground_boxes()) {
       if (b.goods_type === g && b.location.x === cx && b.location.y === cy) return { x: cx, y: cy };
+    }
+  }
+  // 对侧分区暂存兜底：充电 / 绕行导致的偶发停靠会把箱落在对侧暂存行，
+  // 只扫本分区会取不到（直到货架兜底都取不到）。
+  for (const z of ZONES) {
+    if (z === zone) continue;
+    for (const [cx, cy] of z.park) {
+      for (const b of Game.ground_boxes()) {
+        if (b.goods_type === g && b.location.x === cx && b.location.y === cy)
+          return { x: cx, y: cy };
+      }
     }
   }
   for (const s of Game.shelves()) {

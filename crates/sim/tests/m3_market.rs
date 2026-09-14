@@ -75,7 +75,9 @@ fn check_market_invariants(w: &World, ctx: &str) {
         );
         // 板面跟踪：报价不得与基准价时代错位（旧低价 bid 与新高价 ask 共存
         // 会把价差拉到跨时代宽度，卖出门永不可及——校准实测暴露的病理，
-        // 由刷新的时代带清除 + 半板换手维持）。
+        // 由刷新的时代带清除 + 半板换手维持）。整数式等价于
+        // (ask − bid) / 中点 ≤ 2×13/40 = 65%：冻结全价差带 19%–26%，
+        // 留出相邻刷新间基准价漂移的错位余量。
         assert!(
             40 * (min_ask - max_bid) <= 13 * (min_ask + max_bid),
             "{ctx}：{} 板面价差率超带宽：ask={min_ask} bid={max_bid}",
@@ -119,7 +121,7 @@ fn invariants_sweep() {
 }
 
 /// 刷新节奏：每 MARKET_REFRESH_INTERVAL tick 替换每型每侧最旧挂单并
-/// 补足至采样目标数（板面维护性替换，见 gen.rs 模块注释）。
+/// 补足至采样目标数（板面维护性替换，见 marketgen.rs 模块注释）。
 #[test]
 fn refresh_replaces_oldest_and_keeps_board() {
     let mut w = market_world(7, 1_000_000);

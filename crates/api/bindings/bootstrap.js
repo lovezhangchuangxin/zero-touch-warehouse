@@ -179,10 +179,11 @@
         if (typeof d.debt_milli === "string") M.debt_milli = d.debt_milli;
       } else if (d.kind === "buy") {
         // 新对象全量视图原样入列（与下一次全量镜像同源），blocked 补丁追加。
-        const entry = d.robot || d.shelf || d.charger || d.dock;
+        // 视图按 object 类别取键：OR 链在视图值为假值时会静默错取下一类别。
         const list = {
           robot: "robots", shelf: "shelves", charger: "chargers", dock: "docks",
         }[d.object];
+        const entry = d[d.object];
         if (!entry || !list) {
           stale = true; // 增量与对象类别不一致，不猜测
           return;

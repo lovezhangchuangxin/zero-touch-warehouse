@@ -28,6 +28,7 @@ def loop():
     Game.log("b4:" + Game.borrow(-1))
     Game.log("b5:" + Game.borrow("x"))
     Game.log("b6:" + Game.borrow(1e30))
+    Game.log("b11:" + Game.borrow(10**400))  # 大 int 转 float 溢出 → 拒绝不抛
     Game.log("b7:" + Game.borrow(2000))  # 超信用额度
 
     # 还款：部分归还、超额钳定到欠款。

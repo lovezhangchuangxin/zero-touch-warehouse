@@ -446,6 +446,9 @@ impl MirrorDelta {
         MirrorDelta::Buy(BuyDelta {
             object,
             gold_milli: money(world_after.gold_milli),
+            // 已知偏差：dock 锚点开墙前已是 blocked 里的墙格，增量补丁会
+            // 追加出重复条目。blocked 不进玩家 API（两份 bootstrap 仅自维
+            // 护），下一次全量镜像单源重算自然收敛，不构成对账分叉。
             block: eff.blocked_cells.iter().map(|p| (p.x, p.y)).collect(),
             robot,
             shelf,

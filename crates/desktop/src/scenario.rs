@@ -90,6 +90,9 @@ pub static B2_ONE: ScenarioSpec = ScenarioSpec {
 
 /// M3 经济校准场景：同一张 B2 地图启用市场生成器——挂单常驻、价格随机
 /// 游走，供周转 / 囤货 / 杠杆策略对比量测（records/m3-calibration.md）。
+/// demo_trade_* 三份脚本对布局的几何假设：装卸位在北墙（y=1 交互行须
+/// 留空无设施）、充电桩贴南墙、货架两排 y=3/y=6、暂存行 y=1 无静态
+/// 障碍——改动此布局须同步三份脚本的 ZONES / park 表并重跑校准。
 pub static M3_TRADE: ScenarioSpec = ScenarioSpec {
     id: "m3-trade",
     name: "M3 · 持续经营",
@@ -282,6 +285,14 @@ mod tests {
     fn b2_initial_hashes_are_frozen() {
         assert_eq!(build(&B2_ONE).state_hash(), 0x1715_4103_b28b_08e9);
         assert_eq!(build(&B2_FIVE).state_hash(), 0x3803_4631_d84b_1230);
+    }
+
+    /// M3 场景冻结锚：市场初始板面（基准价 + 挂单 + "market" 流状态）随
+    /// seed 确定。哈希漂移即市场播种协议变更——校准记录的基准数字全部
+    /// 作废，须重跑并更新 records/m3-calibration.md。
+    #[test]
+    fn m3_trade_initial_hash_is_frozen() {
+        assert_eq!(build(&M3_TRADE).state_hash(), 0xb63f_2bfc_70fd_9fab);
     }
 
     /// B2 场景不启用市场：固定挂单长期不变（吃光不补、无价格演化）。
