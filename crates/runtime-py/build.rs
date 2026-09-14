@@ -56,10 +56,11 @@ fn main() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".dll") {
                 let dest = target_dir.join(&name);
-                if !dest.exists() {
-                    std::fs::copy(entry.path(), &dest)
-                        .unwrap_or_else(|e| panic!("复制 {name} 到 {}: {e}", target_dir.display()));
-                }
+                // 无条件覆盖：钉版升级后同名 DLL 必须跟新——按 exists
+                // 跳过会残留旧 DLL，链接新 import lib 却加载旧 DLL，
+                // ABI 错配极难排查。构建脚本低频运行，覆盖开销可忽略。
+                std::fs::copy(entry.path(), &dest)
+                    .unwrap_or_else(|e| panic!("复制 {name} 到 {}: {e}", target_dir.display()));
                 println!("cargo:rerun-if-changed={}", entry.path().display());
             }
         }

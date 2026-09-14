@@ -13,7 +13,6 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 
 const TAG = "20260901";
 const PYTHON_VERSION = "3.13.15";
@@ -25,6 +24,12 @@ const SHA256 = {
   "x86_64-pc-windows-msvc":
     "9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7",
 };
+
+// 下载与等锁上限：停滞连接（curl 默认无整体超时）与持锁进程卡死都
+// 必须有界退出，否则 cargo 表现为无输出挂死。
+const CONNECT_TIMEOUT_S = 20;
+const DOWNLOAD_MAX_S = 600;
+const LOCK_WAIT_MS = 10 * 60 * 1000;
 
 function detectTarget() {
   if (process.argv.includes("--target")) {
@@ -45,6 +50,15 @@ function detectTarget() {
 }
 
 const target = detectTarget();
+if (!SHA256[target]) {
+  console.error(`fetch-python: 目标 ${target} 无钉版哈希（支持：${Object.keys(SHA256).join(", ")}）`);
+  process.exit(2);
+}
+if (!import.meta.dirname) {
+  console.error("fetch-python: 需要 Node >= 20.11（import.meta.dirname）；项目要求 Node >= 24");
+  process.exit(2);
+}
+
 const root = path.resolve(import.meta.dirname, "..");
 const distRoot = path.join(root, "target", "python");
 const install = path.join(distRoot, "install");
@@ -52,7 +66,11 @@ const stamp = path.join(distRoot, "stamp.txt");
 const configPath = path.join(distRoot, "pyo3-config.txt");
 const stampContent = `${TAG} ${PYTHON_VERSION} ${target}`;
 
-if (fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8").trim() === stampContent) {
+function stampMatches() {
+  return fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8").trim() === stampContent;
+}
+
+if (stampMatches()) {
   console.log(`fetch-python: 已就绪 ${stampContent}（缓存命中）`);
   process.exit(0);
 }
@@ -64,30 +82,49 @@ const archive = path.join(distRoot, asset);
 fs.mkdirSync(distRoot, { recursive: true });
 
 // cargo 可能并行调用本脚本；用锁文件保证只下载/解压一次。
+// 锁内容 "PID ISO时间"：PID 探测在 PID 复用时会误判无关长驻进程为
+// 持锁者，等锁上限兜底；持锁进程退出后锁可被抢回。
 const lock = path.join(distRoot, ".lock");
+const lockDeadline = Date.now() + LOCK_WAIT_MS;
 try {
   while (true) {
     try {
-      fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
+      fs.writeFileSync(lock, `${process.pid} ${new Date().toISOString()}`, { flag: "wx" });
       break;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      // 陈旧锁（持有进程已退出）直接抢。
+      let alive = false;
       try {
-        const pid = Number(fs.readFileSync(lock, "utf8"));
+        const pid = Number(fs.readFileSync(lock, "utf8").split(" ")[0]);
         process.kill(pid, 0);
+        alive = true;
       } catch {
+        /* 持有进程已退出或锁内容不可解析：直接抢 */
+      }
+      if (!alive) {
         fs.rmSync(lock, { force: true });
         continue;
+      }
+      if (Date.now() > lockDeadline) {
+        throw new Error(
+          `等锁超时（${LOCK_WAIT_MS / 60000} 分钟）——持锁进程可能卡死，确认后删除 ${lock} 重试`,
+        );
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
     }
   }
-} catch {
-  /* 单进程场景不需要 */
+} catch (e) {
+  if (e.message?.startsWith("等锁超时")) throw e;
+  /* 单进程场景不需要锁 */
 }
 
-try {
+function main() {
+  // 拿到锁后复查 stamp：锁外检查通过的并发输家在此退出——否则会重复
+  // 下载 30-60MB，且 rmSync(install) 可能删掉赢家正在链接的 libpython。
+  if (stampMatches()) {
+    console.log(`fetch-python: 已就绪 ${stampContent}（并发缓存命中）`);
+    return;
+  }
   if (fs.existsSync(archive)) {
     fs.rmSync(archive);
   }
@@ -96,8 +133,19 @@ try {
     try {
       execFileSync(
         process.platform === "win32" ? "curl.exe" : "curl",
-        ["-fL", "--retry", "3", "-o", archive, url],
-        { stdio: "inherit" },
+        [
+          "-fL",
+          "--retry",
+          "3",
+          "--connect-timeout",
+          String(CONNECT_TIMEOUT_S),
+          "--max-time",
+          String(DOWNLOAD_MAX_S),
+          "-o",
+          archive,
+          url,
+        ],
+        { stdio: "inherit", timeout: (DOWNLOAD_MAX_S + 60) * 1000 },
       );
       break;
     } catch (e) {
@@ -108,8 +156,10 @@ try {
   const expect = SHA256[target];
   const got = createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   if (got !== expect) {
-    console.error(`fetch-python: sha256 不符\n  期望 ${expect}\n  实际 ${got}\n  发行物可能被篡改或上游重传，请核实后更新钉版哈希。`);
-    process.exit(1);
+    // throw 而非 process.exit：finally 得以清锁。
+    throw new Error(
+      `sha256 不符\n  期望 ${expect}\n  实际 ${got}\n  发行物可能被篡改或上游重传，请核实后更新钉版哈希。`,
+    );
   }
   fs.rmSync(install, { recursive: true, force: true });
   console.log("fetch-python: 校验通过，解压…");
@@ -117,7 +167,10 @@ try {
   fs.rmSync(tmpExtract, { recursive: true, force: true });
   fs.mkdirSync(tmpExtract, { recursive: true });
   // Windows 10+ 与 macOS 都自带 bsdtar，统一 -xzf。
-  execFileSync("tar", ["-xzf", archive, "-C", tmpExtract], { stdio: "inherit" });
+  execFileSync("tar", ["-xzf", archive, "-C", tmpExtract], {
+    stdio: "inherit",
+    timeout: 180_000,
+  });
   // 压缩包顶层目录固定为 python/。
   fs.renameSync(path.join(tmpExtract, "python"), install);
   fs.rmSync(tmpExtract, { recursive: true, force: true });
@@ -145,6 +198,10 @@ try {
   fs.writeFileSync(stamp, `${stampContent}\n`);
   console.log(`fetch-python: 完成 ${stampContent}`);
   console.log(`fetch-python: ${install}`);
+}
+
+try {
+  main();
 } finally {
   fs.rmSync(lock, { force: true });
 }
