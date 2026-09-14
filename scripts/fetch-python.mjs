@@ -166,8 +166,11 @@ function main() {
   const tmpExtract = path.join(distRoot, ".extract");
   fs.rmSync(tmpExtract, { recursive: true, force: true });
   fs.mkdirSync(tmpExtract, { recursive: true });
-  // Windows 10+ 与 macOS 都自带 bsdtar，统一 -xzf。
-  execFileSync("tar", ["-xzf", archive, "-C", tmpExtract], {
+  // 相对路径 + cwd：Git bash 的 PATH 里 GNU tar 遮蔽系统 bsdtar，会把
+  // "D:\..." 的冒号解析为远程主机（"Cannot connect to D"）；相对路径
+  // 对 GNU tar 与 bsdtar 都无歧义。
+  execFileSync("tar", ["-xzf", asset, "-C", ".extract"], {
+    cwd: distRoot,
     stdio: "inherit",
     timeout: 180_000,
   });
