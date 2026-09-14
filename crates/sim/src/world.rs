@@ -12,6 +12,7 @@ use ztw_model::{
 use crate::MarketState;
 use crate::intent::{Intent, LastResult, TargetRef};
 use crate::rng::Xoshiro256;
+use crate::{INTEREST_DENOMINATOR, INTEREST_NUMERATOR};
 
 /// take 排定的车辆到场事件（tick 边界、loop() 之前生效）。
 #[derive(Debug, Clone)]
@@ -25,8 +26,9 @@ pub struct World {
     pub tick: u64,
     pub map_w: i32,
     pub map_h: i32,
-    /// 静态障碍之外的墙（测试用）；货架 / 充电桩 / 装卸位 / 地面货物另行计入。
-    walls: BTreeSet<Position>,
+    /// 静态障碍之外的墙（测试与场景构造；manage.buy 购买装卸位时锚点开墙，
+    /// 见 remove_wall）；货架 / 充电桩 / 装卸位 / 地面货物另行计入。
+    pub(crate) walls: BTreeSet<Position>,
     /// 世界种子：一切子 PRNG 流的派生根。
     pub seed: u64,
     /// 装卸位分配流（docs/architecture/02：市场、装卸位分配、场景独立分流）。
@@ -95,6 +97,11 @@ impl World {
 
     pub fn add_wall(&mut self, p: Position) {
         self.walls.insert(p);
+    }
+
+    /// 撤墙（manage.buy 购买装卸位：锚点格开墙成缺口，docs/game-design/02）。
+    pub(crate) fn remove_wall(&mut self, p: Position) {
+        self.walls.remove(&p);
     }
 
     pub fn add_robot(&mut self, pos: Position) -> Id {
@@ -411,11 +418,15 @@ impl World {
     // 阶段 5 收尾与确定性摘要
     // -----------------------------------------------------------------------
 
-    /// 结算后收尾（阶段 5 最小版）：tick +1。计息 / 渲染快照不在 B1。
+    /// 结算后收尾（阶段 5）：清意图 → 计息 → tick +1（渲染快照由上层承担）。
     /// 正常时序为 settle → end_tick；若跳过结算直接推进，防御性丢弃未结算
     /// 意图，防止陈旧意图在后续 tick 照常执行（公开 API 脚枪加固）。
     pub fn end_tick(&mut self) {
         self.intents.clear();
+        // 计息：每 tick 结算完成后按欠款 × 利率复利计入（docs/game-design/08
+        // 借贷）。整数有理数、先除后乘向下取整——与取消手续费同款舍入，
+        // 规则随版本冻结；欠款不足 1 milli 利息时利息为 0。
+        self.debt_milli += self.debt_milli / INTEREST_DENOMINATOR * INTEREST_NUMERATOR;
         self.tick += 1;
     }
 

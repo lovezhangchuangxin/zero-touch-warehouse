@@ -31,7 +31,7 @@
     ON_VEHICLE: "ON_VEHICLE", NO_FREE_DOCK: "NO_FREE_DOCK",
     NOT_EMPTY: "NOT_EMPTY", HAS_VEHICLE: "HAS_VEHICLE",
     ORDER_GONE: "ORDER_GONE", GOODS_MOVED: "GOODS_MOVED",
-    INIT_PHASE: "INIT_PHASE",
+    NOT_ON_WALL: "NOT_ON_WALL", INIT_PHASE: "INIT_PHASE",
   });
 
   function ipcError(code, message) {
@@ -174,6 +174,23 @@
           const drop = new Set(d.unblock.map(function (c) { return c[0] + "," + c[1]; }));
           M.blocked = (M.blocked || []).filter(function (c) { return !drop.has(c[0] + "," + c[1]); });
         }
+      } else if (d.kind === "funds") {
+        // 借款 / 还款：只动金币与欠款（金币已在分支顶部统一回放）。
+        if (typeof d.debt_milli === "string") M.debt_milli = d.debt_milli;
+      } else if (d.kind === "buy") {
+        // 新对象全量视图原样入列（与下一次全量镜像同源），blocked 补丁追加。
+        const entry = d.robot || d.shelf || d.charger || d.dock;
+        const list = {
+          robot: "robots", shelf: "shelves", charger: "chargers", dock: "docks",
+        }[d.object];
+        if (!entry || !list) {
+          stale = true; // 增量与对象类别不一致，不猜测
+          return;
+        }
+        M[list] = (M[list] || []).concat([entry]);
+        if (Array.isArray(d.block) && d.block.length) {
+          M.blocked = (M.blocked || []).concat(d.block);
+        }
       } else {
         stale = true; // 未知增量种类不猜测
       }
@@ -265,6 +282,16 @@
     if (x === null || x === undefined) return null;
     if (typeof x === "number") return x;
     return typeof x.id === "number" ? x.id : null;
+  }
+  // 金额显示值 → milli（docs/game-design/08「金额为定点显示值」）。与
+  // bootstrap.py 的 _to_milli 位级一致：正数 half-up（floor(x*1000+0.5)），
+  // 非有限数与超出安全整数范围拒绝（返回 null → INVALID_ARGUMENT）。
+  // 0.1 这类不可精确表示的值两侧乘法误差相同，换算结果一致。
+  function toMilli(v) {
+    if (typeof v !== "number" || !isFinite(v)) return null;
+    const m = Math.floor(v * 1000 + 0.5);
+    if (Math.abs(m) > MAX_SAFE) return null;
+    return m;
   }
   function isUnitStep(p) {
     const dx = p[0], dy = p[1];
@@ -575,7 +602,27 @@
       },
     },
 
-    // 管理操作（即时生效；docs/game-design/08）。购买属后续里程碑。
+    // 管理操作（即时生效；docs/game-design/08）。buy 的装卸位朝向由
+    // 锚点边界墙唯一推导（角格 / 非墙格 NOT_ON_WALL）。
+    buy(kind, x, y) {
+      const res = rt("manage.buy", { kind: String(kind), x: x | 0, y: y | 0 });
+      if (res.delta) applyDelta(res.delta);
+      return res.code;
+    },
+    borrow(amount) {
+      const m = toMilli(amount);
+      if (m === null) return E.INVALID_ARGUMENT;
+      const res = rt("manage.borrow", { amount_milli: m });
+      if (res.delta) applyDelta(res.delta);
+      return res.code;
+    },
+    repay(amount) {
+      const m = toMilli(amount);
+      if (m === null) return E.INVALID_ARGUMENT;
+      const res = rt("manage.repay", { amount_milli: m });
+      if (res.delta) applyDelta(res.delta);
+      return res.code;
+    },
     destroy(id) {
       const res = rt("manage.destroy", { target_id: idOf(id) });
       if (res.delta) applyDelta(res.delta);

@@ -1678,6 +1678,115 @@ impl Session {
                     ok_result(serde_json::json!({ "code": code }))
                 }
             }
+            "manage.borrow" => {
+                let p = parse!();
+                if self.in_init {
+                    return self.reject_init_phase("manage.borrow", None);
+                }
+                let Some(amount_milli) = p["amount_milli"].as_i64() else {
+                    return err_result("BAD_PAYLOAD", "manage.borrow 参数缺失");
+                };
+                let (code, eff) = self.world.manage_borrow(amount_milli);
+                if code == ztw_model::codes::OK {
+                    let eff = eff.expect("OK 必带影响摘要");
+                    self.diag_push(
+                        DiagTapKind::Manage,
+                        "manage.borrow",
+                        code,
+                        None,
+                        format!(
+                            "借款 {} milli，余额 {} milli，欠款 {} milli",
+                            eff.amount_milli, self.world.gold_milli, self.world.debt_milli
+                        ),
+                    );
+                    let delta = MirrorDelta::from_borrow(&self.world, &eff);
+                    self.mgmt_ok(delta)
+                } else {
+                    self.diag_push(
+                        DiagTapKind::AcceptFail,
+                        "manage.borrow",
+                        code,
+                        None,
+                        format!("amount={amount_milli}"),
+                    );
+                    ok_result(serde_json::json!({ "code": code }))
+                }
+            }
+            "manage.repay" => {
+                let p = parse!();
+                if self.in_init {
+                    return self.reject_init_phase("manage.repay", None);
+                }
+                let Some(amount_milli) = p["amount_milli"].as_i64() else {
+                    return err_result("BAD_PAYLOAD", "manage.repay 参数缺失");
+                };
+                let (code, eff) = self.world.manage_repay(amount_milli);
+                if code == ztw_model::codes::OK {
+                    let eff = eff.expect("OK 必带影响摘要");
+                    self.diag_push(
+                        DiagTapKind::Manage,
+                        "manage.repay",
+                        code,
+                        None,
+                        format!(
+                            "归还 {} milli，余额 {} milli，欠款 {} milli",
+                            eff.amount_milli, self.world.gold_milli, self.world.debt_milli
+                        ),
+                    );
+                    let delta = MirrorDelta::from_repay(&self.world, &eff);
+                    self.mgmt_ok(delta)
+                } else {
+                    self.diag_push(
+                        DiagTapKind::AcceptFail,
+                        "manage.repay",
+                        code,
+                        None,
+                        format!("amount={amount_milli}"),
+                    );
+                    ok_result(serde_json::json!({ "code": code }))
+                }
+            }
+            "manage.buy" => {
+                let p = parse!();
+                if self.in_init {
+                    return self.reject_init_phase("manage.buy", None);
+                }
+                let (Some(kind), Some(x), Some(y)) =
+                    (p["kind"].as_str(), p["x"].as_i64(), p["y"].as_i64())
+                else {
+                    return err_result("BAD_PAYLOAD", "manage.buy 参数缺失");
+                };
+                let (code, eff) = self.world.manage_buy(kind, x as i32, y as i32);
+                if code == ztw_model::codes::OK {
+                    let eff = eff.expect("OK 必带影响摘要");
+                    self.diag_push(
+                        DiagTapKind::Manage,
+                        "manage.buy",
+                        code,
+                        Some(eff.id),
+                        format!(
+                            "购入 {:?} #{} @({},{})，支出 {} milli，余额 {} milli",
+                            eff.kind,
+                            eff.id,
+                            eff.pos.x,
+                            eff.pos.y,
+                            eff.price_milli,
+                            self.world.gold_milli
+                        ),
+                    );
+                    let delta = MirrorDelta::from_buy(&self.world, &eff);
+                    self.mgmt_ok(delta)
+                } else {
+                    self.diag_push(
+                        DiagTapKind::AcceptFail,
+                        "manage.buy",
+                        code,
+                        None,
+                        format!("kind={kind} at({x},{y})"),
+                    );
+                    ok_result(serde_json::json!({ "code": code }))
+                }
+            }
             "log" => {
                 let p = parse!();
                 let Some(line) = p["line"].as_str() else {

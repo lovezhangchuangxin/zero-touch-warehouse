@@ -11,8 +11,8 @@
 //! B1 范围（docs/architecture/08 原型 B 的模拟核心）：move 之外补全 charge /
 //! take / give / pick / drop 与机器人间被动转交；车辆离场 → 订单完成 → 收款 →
 //! 装卸位释放闭环；market.cancel 与最小 manage_destroy；xoshiro 分流 PRNG
-//! 承担装卸位分配。M3 起市场生成器落地（marketgen）；购买类管理操作、
-//! find_path 属后续里程碑。
+//! 承担装卸位分配。M3 起市场生成器落地（marketgen）与借贷 / 商店管理
+//! 操作（market）；find_path 属后续里程碑。
 
 mod accept;
 mod intent;
@@ -23,7 +23,10 @@ mod settle;
 mod world;
 
 pub use intent::{Intent, LastResult, TargetRef};
-pub use market::{CancelEffect, DestroyEffect, DestroyedKind, TakeEffect};
+pub use market::{
+    BorrowEffect, BoughtKind, BuyEffect, CancelEffect, DestroyEffect, DestroyedKind, RepayEffect,
+    TakeEffect,
+};
 pub use marketgen::MarketState;
 pub use rng::Xoshiro256;
 pub use world::World;
@@ -49,12 +52,20 @@ pub const PRICE_ROBOT: MilliGold = 650_000;
 pub const PRICE_SHELF: MilliGold = 175_000;
 pub const PRICE_CHARGER: MilliGold = 300_000;
 pub const PRICE_DOCK: MilliGold = 500_000;
+/// 借贷利率：每 tick 复利 debt += debt / DEN × NUM（向下取整，与手续费
+/// 同款舍入；规则版本冻结点）。锚点 0.1%/tick——短期周转便宜、长期囤债
+/// 受罚；随里程碑 4 校准冻结。
+pub const INTEREST_NUMERATOR: MilliGold = 1;
+pub const INTEREST_DENOMINATOR: MilliGold = 1000;
+/// 信用额度（milli）。锚点 1000 gold > 机器人价 650（docs/game-design/06：
+/// 额度须高于购置一台机器人的解围成本）；随校准冻结。
+pub const CREDIT_LIMIT_MILLI: MilliGold = 1_000_000;
 
 /// 板面刷新间隔（docs/game-design/09：30–60 tick 窗口内取 40）。
 pub const MARKET_REFRESH_INTERVAL: u64 = 40;
 /// 新挂单对对侧在挂极值的钳制裕量（基准价千分比）。须大于取消手续费率
 /// （100‰）：「任一时刻同类型 bid < ask」与「价差恒大于手续费率」两条
-/// 不变量由此结构成立（见 gen.rs 模块注释）。
+/// 不变量由此结构成立（见 marketgen.rs 模块注释）。
 pub const MARKET_CLAMP_MARGIN_PER_MILLE: u32 = 120;
 
 /// 市场货物目录条目（docs/game-design/09；全部数值为示例锚点，随原型

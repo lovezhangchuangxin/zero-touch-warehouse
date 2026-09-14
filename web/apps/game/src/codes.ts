@@ -33,6 +33,7 @@ export const CODE_LABELS: Record<string, string> = {
   HAS_VEHICLE: "有车辆停靠",
   ORDER_GONE: "订单已不在市场",
   GOODS_MOVED: "货物已转移",
+  NOT_ON_WALL: "锚点不在边界墙上（或朝向无法唯一确定）",
   INIT_PHASE: "初始化阶段禁用",
 };
 

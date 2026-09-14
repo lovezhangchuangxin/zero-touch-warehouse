@@ -45,6 +45,7 @@ export type GameCode =
   | "HAS_VEHICLE"
   | "ORDER_GONE"
   | "GOODS_MOVED"
+  | "NOT_ON_WALL"
   | "INIT_PHASE";
 
 export interface GameCodes {
@@ -79,6 +80,7 @@ export interface GameCodes {
   HAS_VEHICLE: "HAS_VEHICLE";
   ORDER_GONE: "ORDER_GONE";
   GOODS_MOVED: "GOODS_MOVED";
+  NOT_ON_WALL: "NOT_ON_WALL";
   INIT_PHASE: "INIT_PHASE";
   [key: string]: GameCode;
 }
@@ -242,7 +244,10 @@ export interface Game {
   readonly debt: number;
   readonly tick: number;
   readonly market: Market;
-  /** 管理操作（即时生效；购买属后续里程碑）。 */
+  /** 管理操作（即时生效）。buy 的装卸位朝向由锚点边界墙唯一推导。 */
+  buy(kind: "robot" | "shelf" | "charger" | "dock", x: number, y: number): GameCode;
+  borrow(amount: number): GameCode;
+  repay(amount: number): GameCode;
   destroy(id: number | TargetLike): GameCode;
   log(...args: unknown[]): void;
   /** 受控根 memory（映射代理）。 */

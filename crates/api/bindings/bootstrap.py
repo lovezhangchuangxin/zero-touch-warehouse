@@ -39,7 +39,7 @@ E = {
     "ON_VEHICLE": "ON_VEHICLE", "NO_FREE_DOCK": "NO_FREE_DOCK",
     "NOT_EMPTY": "NOT_EMPTY", "HAS_VEHICLE": "HAS_VEHICLE",
     "ORDER_GONE": "ORDER_GONE", "GOODS_MOVED": "GOODS_MOVED",
-    "INIT_PHASE": "INIT_PHASE",
+    "NOT_ON_WALL": "NOT_ON_WALL", "INIT_PHASE": "INIT_PHASE",
 }
 
 
@@ -203,6 +203,24 @@ def _apply_delta(d):
             if isinstance(d.get("unblock"), list) and d["unblock"]:
                 drop = {(c[0], c[1]) for c in d["unblock"]}
                 M["blocked"] = [c for c in M.get("blocked", []) if (c[0], c[1]) not in drop]
+        elif d.get("kind") == "funds":
+            # 借款 / 还款：只动金币与欠款（金币已在分支顶部统一回放）。
+            if isinstance(d.get("debt_milli"), str):
+                M["debt_milli"] = d["debt_milli"]
+        elif d.get("kind") == "buy":
+            # 新对象全量视图原样入列（与下一次全量镜像同源），blocked 追加。
+            lists = {
+                "robot": "robots", "shelf": "shelves",
+                "charger": "chargers", "dock": "docks",
+            }
+            key = lists.get(d.get("object"))
+            entry = d.get(d.get("object"))
+            if key is None or not isinstance(entry, dict):
+                stale = True  # 增量与对象类别不一致，不猜测
+                return
+            M.setdefault(key, []).append(entry)
+            if isinstance(d.get("block"), list) and d["block"]:
+                M["blocked"] = M.get("blocked", []) + d["block"]
         else:
             stale = True  # 未知增量种类不猜测
     except Exception:
@@ -246,6 +264,27 @@ def _id_of(x):
     if isinstance(ident, int):
         return ident
     return None
+
+
+_MAX_SAFE = 9007199254740991
+
+
+def _to_milli(v):
+    """金额显示值 → milli（docs/game-design/08「金额为定点显示值」）。
+
+    与 bootstrap.js 的 toMilli 位级一致：正数 half-up（floor(x*1000+0.5)），
+    非有限数与超出安全整数范围拒绝（返回 None → INVALID_ARGUMENT）。
+    0.1 这类不可精确表示的值两侧乘法误差相同，换算结果一致。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    m = _math.floor(v * 1000 + 0.5)
+    if abs(m) > _MAX_SAFE:
+        return None
+    return m
 
 
 def _is_unit_step(p):
@@ -356,8 +395,6 @@ def _vehicle_view(v):
 
 
 # ---- 受控 memory 包装器 ----------------------------------------------------
-
-_MAX_SAFE = 9007199254740991
 
 
 def _to_wire(v, seen=None):
@@ -680,6 +717,32 @@ class Game:
     def tick(self):
         _ensure_mirror()
         return M["tick"]
+
+    def buy(self, kind, x, y):
+        """购买设备（即时建成）。装卸位朝向由锚点边界墙唯一推导
+        （角格 / 非墙格 NOT_ON_WALL）。"""
+        res = _ipc("manage.buy", {"kind": str(kind), "x": int(x), "y": int(y)})
+        if res.get("delta"):
+            _apply_delta(res["delta"])
+        return res["code"]
+
+    def borrow(self, amount):
+        m = _to_milli(amount)
+        if m is None:
+            return E["INVALID_ARGUMENT"]
+        res = _ipc("manage.borrow", {"amount_milli": m})
+        if res.get("delta"):
+            _apply_delta(res["delta"])
+        return res["code"]
+
+    def repay(self, amount):
+        m = _to_milli(amount)
+        if m is None:
+            return E["INVALID_ARGUMENT"]
+        res = _ipc("manage.repay", {"amount_milli": m})
+        if res.get("delta"):
+            _apply_delta(res["delta"])
+        return res["code"]
 
     def destroy(self, target):
         res = _ipc("manage.destroy", {"target_id": _id_of(target)})

@@ -1,11 +1,12 @@
 //! 管理操作（即时生效；docs/game-design/08）：market.take / market.cancel /
-//! manage.destroy，以及供 api 层构造镜像增量的效果摘要。
+//! manage.destroy / manage.borrow / manage.repay / manage.buy，以及供 api 层
+//! 构造镜像增量的效果摘要。
 
 use ztw_model::{Id, MilliGold, Order, OrderSide, Position, VehicleKind, codes};
 
 use crate::world::{PendingArrival, World};
 use crate::{
-    CANCEL_FEE_DENOMINATOR, CANCEL_FEE_NUMERATOR, DESTROY_REFUND_DENOMINATOR,
+    CANCEL_FEE_DENOMINATOR, CANCEL_FEE_NUMERATOR, CREDIT_LIMIT_MILLI, DESTROY_REFUND_DENOMINATOR,
     DESTROY_REFUND_NUMERATOR, PRICE_CHARGER, PRICE_DOCK, PRICE_ROBOT, PRICE_SHELF,
 };
 
@@ -35,6 +36,40 @@ pub enum DestroyedKind {
     Charger,
     Dock,
     GroundBox,
+}
+
+/// borrow 的镜像同步增量素材。
+#[derive(Debug, Clone)]
+pub struct BorrowEffect {
+    pub amount_milli: MilliGold,
+}
+
+/// repay 的镜像同步增量素材。
+#[derive(Debug, Clone)]
+pub struct RepayEffect {
+    /// 实际归还额（以欠款为上限钳定后）。
+    pub amount_milli: MilliGold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoughtKind {
+    Robot,
+    Shelf,
+    Charger,
+    Dock,
+}
+
+/// buy 的镜像同步增量素材。
+#[derive(Debug, Clone)]
+pub struct BuyEffect {
+    pub kind: BoughtKind,
+    pub id: Id,
+    pub pos: Position,
+    /// 装卸位朝向（唯一内向法向推导）；其余对象为 None。
+    pub ext: Option<(i32, i32)>,
+    pub price_milli: MilliGold,
+    /// 新增静态障碍格（装卸位两格；机器人无）。
+    pub blocked_cells: Vec<Position>,
 }
 
 /// destroy 的镜像同步增量素材。
@@ -262,5 +297,146 @@ impl World {
                 freed_cells,
             }),
         )
+    }
+
+    /// 借款即时到账，受信用额度限制（docs/game-design/06：借贷是零金币
+    /// 零库存时重启经营的保底；额度须高于购置一台机器人的解围成本）。
+    pub fn manage_borrow(
+        &mut self,
+        amount_milli: MilliGold,
+    ) -> (&'static str, Option<BorrowEffect>) {
+        if amount_milli <= 0 {
+            return (codes::INVALID_ARGUMENT, None);
+        }
+        // 溢出视同超额：任何超出额度的组合都归 CREDIT_EXCEEDED。
+        match self
+            .debt_milli
+            .checked_add(amount_milli)
+            .filter(|d| *d <= CREDIT_LIMIT_MILLI)
+        {
+            Some(_) => {}
+            None => return (codes::CREDIT_EXCEEDED, None),
+        }
+        self.gold_milli += amount_milli;
+        self.debt_milli += amount_milli;
+        (codes::OK, Some(BorrowEffect { amount_milli }))
+    }
+
+    /// 归还部分或全部欠款：金额以欠款为上限，金币不足返回 NO_FUNDS、
+    /// 不自动借贷（docs/game-design/08 管理操作）。
+    pub fn manage_repay(&mut self, amount_milli: MilliGold) -> (&'static str, Option<RepayEffect>) {
+        if amount_milli <= 0 {
+            return (codes::INVALID_ARGUMENT, None);
+        }
+        let amount = amount_milli.min(self.debt_milli);
+        if amount > self.gold_milli {
+            return (codes::NO_FUNDS, None);
+        }
+        self.gold_milli -= amount;
+        self.debt_milli -= amount;
+        (
+            codes::OK,
+            Some(RepayEffect {
+                amount_milli: amount,
+            }),
+        )
+    }
+
+    /// 商店购买：即时扣费、即时建成生效（docs/game-design/06）。校验次序
+    /// 沿用 take 先例（放置类校验在前、资金在后）：越界 → 地面货物 →
+    /// 静态障碍 → 金币。装卸位锚点必须是边界墙格，ext 取唯一内向法向，
+    /// 角格（两个内向法向）与非墙格拒绝 NOT_ON_WALL。
+    pub fn manage_buy(&mut self, kind: &str, x: i32, y: i32) -> (&'static str, Option<BuyEffect>) {
+        let price = match kind {
+            "robot" => PRICE_ROBOT,
+            "shelf" => PRICE_SHELF,
+            "charger" => PRICE_CHARGER,
+            "dock" => PRICE_DOCK,
+            _ => return (codes::INVALID_ARGUMENT, None),
+        };
+        if x < 0 || y < 0 || x >= self.map_w || y >= self.map_h {
+            return (codes::OUT_OF_BOUNDS, None);
+        }
+        let pos = Position::new(x, y);
+        // 装卸位：锚点开在边界墙上（缺口格），朝向自边界唯一推导。
+        let ext = if kind == "dock" {
+            let Some(inward) = self.inward_normal(x, y) else {
+                return (codes::NOT_ON_WALL, None);
+            };
+            if !self.walls.contains(&pos) {
+                return (codes::NOT_ON_WALL, None);
+            }
+            let second = pos.step(inward.0, inward.1);
+            if second.x < 0 || second.y < 0 || second.x >= self.map_w || second.y >= self.map_h {
+                return (codes::OUT_OF_BOUNDS, None);
+            }
+            if self.ground_box_at(second).is_some() {
+                return (codes::CELL_OCCUPIED, None);
+            }
+            if !self.statically_passable(second) {
+                return (codes::CELL_BLOCKED, None);
+            }
+            Some(inward)
+        } else {
+            if self.ground_box_at(pos).is_some() {
+                return (codes::CELL_OCCUPIED, None);
+            }
+            if !self.statically_passable(pos) {
+                return (codes::CELL_BLOCKED, None);
+            }
+            None
+        };
+        if price > self.gold_milli {
+            return (codes::NO_FUNDS, None);
+        }
+        self.gold_milli -= price;
+        let (id, blocked_cells) = match kind {
+            // 构造器复用（含 id 分配与容器初始化）；先扣款后建成对调用方
+            // 原子——构造器无失败路径。
+            "robot" => (self.add_robot(pos), Vec::new()),
+            "shelf" => (self.add_shelf(pos), vec![pos]),
+            "charger" => (self.add_charger(pos), vec![pos]),
+            _ => {
+                let (ex, ey) = ext.expect("装卸位已推导朝向");
+                self.remove_wall(pos);
+                (self.add_dock(pos, (ex, ey)), vec![pos, pos.step(ex, ey)])
+            }
+        };
+        let bought = match kind {
+            "robot" => BoughtKind::Robot,
+            "shelf" => BoughtKind::Shelf,
+            "charger" => BoughtKind::Charger,
+            _ => BoughtKind::Dock,
+        };
+        (
+            codes::OK,
+            Some(BuyEffect {
+                kind: bought,
+                id,
+                pos,
+                ext,
+                price_milli: price,
+                blocked_cells,
+            }),
+        )
+    }
+
+    /// 边界墙格的唯一内向法向：北 (0,1)、南 (0,-1)、西 (1,0)、东 (-1,0)；
+    /// 角格两个内向方向歧义、非边界格无墙可贴，均返回 None。
+    fn inward_normal(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        let on_ns = (y == 0) as u8 + (y == self.map_h - 1) as u8;
+        let on_we = (x == 0) as u8 + (x == self.map_w - 1) as u8;
+        if on_ns + on_we != 1 {
+            return None; // 角格（两条边界）或内部格（零条）
+        }
+        if y == 0 {
+            Some((0, 1))
+        } else if y == self.map_h - 1 {
+            Some((0, -1))
+        } else if x == 0 {
+            Some((1, 0))
+        } else {
+            Some((-1, 0))
+        }
     }
 }

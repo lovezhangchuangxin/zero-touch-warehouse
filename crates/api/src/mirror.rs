@@ -10,7 +10,10 @@
 
 use serde::Serialize;
 use ztw_model::{Id, MilliGold, Order, OrderSide, Position};
-use ztw_sim::{CancelEffect, DestroyEffect, DestroyedKind, TakeEffect, World};
+use ztw_sim::{
+    BorrowEffect, BoughtKind, BuyEffect, CancelEffect, DestroyEffect, DestroyedKind, RepayEffect,
+    TakeEffect, World,
+};
 
 fn money(v: MilliGold) -> String {
     v.to_string()
@@ -138,6 +141,55 @@ fn ground_box_view(b: &ztw_model::GroundBox) -> BoxView {
     }
 }
 
+/// 实体 → 视图（from_world 全量镜像与 from_buy 增量共用，保证同源）。
+fn robot_view_of(world: &World, r: &ztw_model::Robot) -> RobotView {
+    RobotView {
+        id: r.id,
+        x: r.pos.x,
+        y: r.pos.y,
+        energy: r.energy,
+        energy_max: r.energy_max,
+        carry: r.carry.map(|id| ground_box_view(&world.ground_boxes[&id])),
+        last_result: world.last_results.get(&r.id).map(|lr| LastResultView {
+            action: lr.action.to_string(),
+            arg: lr.arg.clone(),
+            code: lr.code.clone(),
+        }),
+    }
+}
+
+fn shelf_view_of(world: &World, s: &ztw_model::Shelf) -> ShelfView {
+    ShelfView {
+        id: s.id,
+        x: s.pos.x,
+        y: s.pos.y,
+        boxes: s
+            .box_ids
+            .iter()
+            .map(|id| ground_box_view(&world.ground_boxes[id]))
+            .collect(),
+        capacity: s.capacity,
+    }
+}
+
+fn charger_view_of(c: &ztw_model::Charger) -> ChargerView {
+    ChargerView {
+        id: c.id,
+        x: c.pos.x,
+        y: c.pos.y,
+    }
+}
+
+fn dock_view_of(d: &ztw_model::Dock) -> DockView {
+    DockView {
+        id: d.id,
+        x: d.pos.x,
+        y: d.pos.y,
+        ext: d.ext,
+        docked_vehicle: d.docked_vehicle,
+    }
+}
+
 impl MirrorView {
     pub fn from_world(world: &World, revision: u64) -> MirrorView {
         let mut blocked = Vec::new();
@@ -164,51 +216,15 @@ impl MirrorView {
             robots: world
                 .robots
                 .values()
-                .map(|r| RobotView {
-                    id: r.id,
-                    x: r.pos.x,
-                    y: r.pos.y,
-                    energy: r.energy,
-                    energy_max: r.energy_max,
-                    carry: r.carry.map(box_view),
-                    last_result: world.last_results.get(&r.id).map(|lr| LastResultView {
-                        action: lr.action.to_string(),
-                        arg: lr.arg.clone(),
-                        code: lr.code.clone(),
-                    }),
-                })
+                .map(|r| robot_view_of(world, r))
                 .collect(),
             shelves: world
                 .shelves
                 .values()
-                .map(|s| ShelfView {
-                    id: s.id,
-                    x: s.pos.x,
-                    y: s.pos.y,
-                    boxes: s.box_ids.iter().map(|id| box_view(*id)).collect(),
-                    capacity: s.capacity,
-                })
+                .map(|s| shelf_view_of(world, s))
                 .collect(),
-            chargers: world
-                .chargers
-                .values()
-                .map(|c| ChargerView {
-                    id: c.id,
-                    x: c.pos.x,
-                    y: c.pos.y,
-                })
-                .collect(),
-            docks: world
-                .docks
-                .values()
-                .map(|d| DockView {
-                    id: d.id,
-                    x: d.pos.x,
-                    y: d.pos.y,
-                    ext: d.ext,
-                    docked_vehicle: d.docked_vehicle,
-                })
-                .collect(),
+            chargers: world.chargers.values().map(charger_view_of).collect(),
+            docks: world.docks.values().map(dock_view_of).collect(),
             vehicles: world
                 .vehicles
                 .values()
@@ -267,6 +283,9 @@ pub enum MirrorDelta {
     Take(TakeDelta),
     Cancel(CancelDelta),
     Destroy(DestroyDelta),
+    /// 借款 / 还款共用：只动金币与欠款两根线。
+    Funds(FundsDelta),
+    Buy(BuyDelta),
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -301,6 +320,32 @@ pub struct DestroyDelta {
     pub unblock: Vec<(i32, i32)>,
     /// 嵌套视图受影响（销毁被携带 / 在架货物）→ 增量不猜测，宿主整体重建。
     pub rebuild: bool,
+}
+
+/// borrow / repay 的资金增量。
+#[derive(Serialize, Debug, Clone)]
+pub struct FundsDelta {
+    pub gold_milli: String,
+    pub debt_milli: String,
+}
+
+/// buy 的增量：object 指明入列目标，同名可选字段携带新对象全量视图
+/// （回放端原样 push，不猜测字段；构造侧与全量镜像同源，无模板漂移）。
+#[derive(Serialize, Debug, Clone)]
+pub struct BuyDelta {
+    /// 对象类别：robot / shelf / charger / dock。
+    pub object: String,
+    pub gold_milli: String,
+    /// 新增静态障碍格（blocked 数组补丁；机器人无）。
+    pub block: Vec<(i32, i32)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub robot: Option<RobotView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shelf: Option<ShelfView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charger: Option<ChargerView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dock: Option<DockView>,
 }
 
 impl MirrorDelta {
@@ -346,6 +391,67 @@ impl MirrorDelta {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("增量序列化不失败")
+    }
+
+    pub fn from_borrow(world_after: &World, _eff: &BorrowEffect) -> MirrorDelta {
+        MirrorDelta::Funds(FundsDelta {
+            gold_milli: money(world_after.gold_milli),
+            debt_milli: money(world_after.debt_milli),
+        })
+    }
+
+    pub fn from_repay(world_after: &World, _eff: &RepayEffect) -> MirrorDelta {
+        MirrorDelta::Funds(FundsDelta {
+            gold_milli: money(world_after.gold_milli),
+            debt_milli: money(world_after.debt_milli),
+        })
+    }
+
+    pub fn from_buy(world_after: &World, eff: &BuyEffect) -> MirrorDelta {
+        let object = match eff.kind {
+            BoughtKind::Robot => "robot",
+            BoughtKind::Shelf => "shelf",
+            BoughtKind::Charger => "charger",
+            BoughtKind::Dock => "dock",
+        }
+        .to_string();
+        // 构造后的世界直接取全量视图：与下一次全量镜像同源，回放端原样
+        // 入列即一致。
+        let (robot, shelf, charger, dock) = match eff.kind {
+            BoughtKind::Robot => (
+                Some(robot_view_of(world_after, &world_after.robots[&eff.id])),
+                None,
+                None,
+                None,
+            ),
+            BoughtKind::Shelf => (
+                None,
+                Some(shelf_view_of(world_after, &world_after.shelves[&eff.id])),
+                None,
+                None,
+            ),
+            BoughtKind::Charger => (
+                None,
+                None,
+                Some(charger_view_of(&world_after.chargers[&eff.id])),
+                None,
+            ),
+            BoughtKind::Dock => (
+                None,
+                None,
+                None,
+                Some(dock_view_of(&world_after.docks[&eff.id])),
+            ),
+        };
+        MirrorDelta::Buy(BuyDelta {
+            object,
+            gold_milli: money(world_after.gold_milli),
+            block: eff.blocked_cells.iter().map(|p| (p.x, p.y)).collect(),
+            robot,
+            shelf,
+            charger,
+            dock,
+        })
     }
 }
 
@@ -472,5 +578,59 @@ mod tests {
         assert_eq!(j["object"], "box");
         assert_eq!(j["rebuild"], true);
         assert_eq!(j["unblock"], serde_json::json!([]));
+
+        // funds（borrow / repay 共用）：只动金币与欠款两根线。
+        let mut w6 = World::new_empty(6, 5, 123_000);
+        let (code, eff) = w6.manage_borrow(50_000);
+        assert_eq!(code, "OK");
+        let eff = eff.unwrap();
+        let j = serde_json::to_value(MirrorDelta::from_borrow(&w6, &eff)).unwrap();
+        assert_eq!(j["kind"], "funds");
+        assert_eq!(j["gold_milli"], "173000");
+        assert_eq!(j["debt_milli"], "50000");
+        let (code, eff) = w6.manage_repay(20_000);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_repay(&w6, &eff.unwrap())).unwrap();
+        assert_eq!(j["gold_milli"], "153000");
+        assert_eq!(j["debt_milli"], "30000");
+
+        // buy：对象类别、全量视图入列、blocked 补丁；dock 朝向随视图携带。
+        let mut w7 = World::new_empty(8, 6, 1_000_000);
+        for y in 0..6 {
+            w7.add_wall(Position::new(0, y));
+            w7.add_wall(Position::new(7, y));
+        }
+        for x in 0..8 {
+            w7.add_wall(Position::new(x, 0));
+            w7.add_wall(Position::new(x, 5));
+        }
+        let (code, eff) = w7.manage_buy("shelf", 3, 3);
+        assert_eq!(code, "OK");
+        let j = serde_json::to_value(MirrorDelta::from_buy(&w7, &eff.unwrap())).unwrap();
+        assert_eq!(j["kind"], "buy");
+        assert_eq!(j["object"], "shelf");
+        assert_eq!(j["gold_milli"], "825000"); // 1000 − 175
+        assert_eq!(j["block"], serde_json::json!([[3, 3]]));
+        assert_eq!(j["shelf"]["x"], 3);
+        assert_eq!(j["shelf"]["capacity"], 4);
+        assert_eq!(j["shelf"]["boxes"], serde_json::json!([]));
+        assert!(j["robot"].is_null()); // 未购对象字段整体缺省
+
+        // buy dock：锚点开墙、两格 blocked、ext 指向库内。
+        let (code, eff) = w7.manage_buy("dock", 0, 3);
+        assert_eq!(code, "OK");
+        let eff = eff.unwrap();
+        let j = serde_json::to_value(MirrorDelta::from_buy(&w7, &eff)).unwrap();
+        assert_eq!(j["object"], "dock");
+        assert_eq!(j["gold_milli"], "325000"); // 825 − 500
+        assert_eq!(j["block"], serde_json::json!([[0, 3], [1, 3]]));
+        assert_eq!(j["dock"]["ext"], serde_json::json!([1, 0]));
+        assert_eq!(j["dock"]["docked_vehicle"], serde_json::Value::Null);
+        // 增量回放与全量镜像同源：直接对比视图序列化。
+        let full = MirrorView::from_world(&w7, 1);
+        assert_eq!(
+            j["dock"],
+            serde_json::to_value(full.docks.iter().find(|d| d.id == eff.id).unwrap()).unwrap()
+        );
     }
 }

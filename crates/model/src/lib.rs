@@ -74,6 +74,8 @@ pub mod codes {
     pub const HAS_VEHICLE: &str = "HAS_VEHICLE";
     pub const ORDER_GONE: &str = "ORDER_GONE";
     pub const GOODS_MOVED: &str = "GOODS_MOVED";
+    /// buy 购买装卸位：锚点不在边界墙上（或角格朝向无法唯一确定）。
+    pub const NOT_ON_WALL: &str = "NOT_ON_WALL";
     /// 初始化阶段禁用动作与管理操作（docs/architecture/03 执行模型）。
     pub const INIT_PHASE: &str = "INIT_PHASE";
 
@@ -110,6 +112,7 @@ pub mod codes {
         ("HAS_VEHICLE", HAS_VEHICLE),
         ("ORDER_GONE", ORDER_GONE),
         ("GOODS_MOVED", GOODS_MOVED),
+        ("NOT_ON_WALL", NOT_ON_WALL),
         ("INIT_PHASE", INIT_PHASE),
     ];
 }

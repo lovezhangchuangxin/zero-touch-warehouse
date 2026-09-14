@@ -76,6 +76,67 @@ fn memory_value_model_matrix_same_outcome_both_languages() {
 }
 
 // ---------------------------------------------------------------------------
+// M3 管理操作双语言矩阵：E 码表对账、金额换算、borrow/repay/buy 路径
+// ---------------------------------------------------------------------------
+
+/// M3 新增管理操作（docs/game-design/06/08）：同一驱动跑两语言宿主，
+/// 日志序列（含 E 码表逐字对账与资金线 milli 值）与世界终态哈希一致。
+#[test]
+fn m3_manage_ops_matrix_same_outcome_both_languages() {
+    let mut js = session_with(&common::js_bin());
+    let mut py = common::session(demo_world());
+    assert!(
+        js.load_code(&fixture("m3_ops.js")).ok,
+        "JS 初始化失败：{:?}",
+        js.fault
+    );
+    assert!(
+        py.load_code(&fixture("m3_ops.py")).ok,
+        "PY 初始化失败：{:?}",
+        py.fault
+    );
+    assert_eq!(js.tick().kind, OutcomeKind::Ok, "{:?}", js.fault);
+    assert_eq!(py.tick().kind, OutcomeKind::Ok, "{:?}", py.fault);
+
+    let (js_logs, py_logs) = (logs_of(&js), logs_of(&py));
+    assert_eq!(
+        js_logs, py_logs,
+        "两语言管理操作序列（码表 / 金额 / 结果码）必须完全一致"
+    );
+    // 关键语义锚点抽查（完整对账见上）。
+    for anchor in [
+        "b1:OK",
+        "b3:INVALID_ARGUMENT",
+        "b7:CREDIT_EXCEEDED",
+        "r2:OK",
+        "y1:OK",
+        "y2:NO_FUNDS",
+        "y3:OK",
+        "y4:NOT_ON_WALL",
+        "y5:INVALID_ARGUMENT",
+        "y6:CELL_BLOCKED",
+        "y7:OUT_OF_BOUNDS",
+        "y9:NO_FUNDS",
+        "b9:OK",
+        "b10:CREDIT_EXCEEDED",
+        "y10:OK",
+        "x1:OK",
+        "f:112500,950000",
+    ] {
+        assert!(
+            js_logs.iter().any(|l| l == anchor),
+            "缺少锚点 {anchor}：{js_logs:?}"
+        );
+    }
+    // 终态世界完全一致（含金币 / 欠款 / 对象集合）。
+    assert_eq!(
+        js.world.state_hash(),
+        py.world.state_hash(),
+        "两语言终态世界必须一致"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Python 宿主协议注入冒烟：与 JS 侧 a1_protocol 同款语义
 // ---------------------------------------------------------------------------
 
