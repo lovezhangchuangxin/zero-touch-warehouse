@@ -8,6 +8,23 @@ pub fn host_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ztw-host-py")
 }
 
+/// JS 宿主二进制：与 ztw-host-py 同目录（同一 target profile）。本包不依赖
+/// ztw-runtime（bin 不随依赖构建），按兄弟路径解析；`cargo test --workspace`
+/// （CI / just gate）恒可用，单独跑本包前先 `cargo build -p ztw-runtime`。
+#[allow(dead_code)]
+pub fn js_bin() -> std::path::PathBuf {
+    let sibling = std::path::Path::new(env!("CARGO_BIN_EXE_ztw-host-py"))
+        .parent()
+        .expect("可执行目录")
+        .join(format!("ztw-host-js{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        sibling.exists(),
+        "未找到 {}——先 cargo build -p ztw-runtime（或 cargo test --workspace）",
+        sibling.display()
+    );
+    sibling
+}
+
 #[allow(dead_code)]
 pub fn demo_world() -> World {
     let mut w = World::new_empty(12, 8, 200_000);

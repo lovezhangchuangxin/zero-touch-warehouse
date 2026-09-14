@@ -5,7 +5,6 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::demo_world;
@@ -14,19 +13,6 @@ use ztw_api::harness::{OutcomeKind, Session, SessionConfig};
 fn fixture(name: &str) -> String {
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
     std::fs::read_to_string(format!("{p}{name}")).expect("fixture 存在")
-}
-
-fn js_bin() -> PathBuf {
-    let sibling = std::path::Path::new(env!("CARGO_BIN_EXE_ztw-host-py"))
-        .parent()
-        .expect("可执行目录")
-        .join("ztw-host-js");
-    assert!(
-        sibling.exists(),
-        "未找到 {}——先 cargo build -p ztw-runtime（或 cargo test --workspace）",
-        sibling.display()
-    );
-    sibling
 }
 
 fn percentile(mut v: Vec<u64>, q: f64) -> u64 {
@@ -71,7 +57,7 @@ fn soak(bin: &std::path::Path, fixture_name: &str, reloads: usize) {
 
 #[test]
 fn soak_1000_hot_reloads_js() {
-    soak(&js_bin(), "soak_player.js", 1000);
+    soak(&common::js_bin(), "soak_player.js", 1000);
 }
 
 #[test]

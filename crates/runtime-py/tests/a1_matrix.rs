@@ -8,28 +8,12 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 use common::demo_world;
 use ztw_api::harness::{OutcomeKind, Session, SessionConfig};
 
 fn fixture(name: &str) -> String {
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
     std::fs::read_to_string(format!("{p}{name}")).expect("fixture 存在")
-}
-
-/// JS 宿主二进制：与 ztw-host-py 同目录（同一 target profile）。
-fn js_bin() -> PathBuf {
-    let sibling = std::path::Path::new(env!("CARGO_BIN_EXE_ztw-host-py"))
-        .parent()
-        .expect("可执行目录")
-        .join("ztw-host-js");
-    assert!(
-        sibling.exists(),
-        "未找到 {}——先 cargo build -p ztw-runtime（或 cargo test --workspace）",
-        sibling.display()
-    );
-    sibling
 }
 
 fn session_with(bin: &std::path::Path) -> Session {
@@ -46,7 +30,7 @@ fn logs_of(s: &Session) -> Vec<String> {
 
 #[test]
 fn memory_value_model_matrix_same_outcome_both_languages() {
-    let mut js = session_with(&js_bin());
+    let mut js = session_with(&common::js_bin());
     let mut py = common::session(demo_world());
     assert!(
         js.load_code(&fixture("matrix_memory.js")).ok,

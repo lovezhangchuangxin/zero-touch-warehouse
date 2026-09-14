@@ -1,7 +1,8 @@
 # A1 引擎与工程结论（Python 宿主）
 
 - 日期：2026-09-14；平台 macOS 15 / Apple M4（arm64）；Windows 未本地实测
-  （CI macos-latest + windows-latest 自 A1 第 2 步起常跑）。
+  （首次推送后由 CI macos-latest + windows-latest 常跑——2026-09-14 评审
+  修正：此前"自 A1 第 2 步起常跑"的说法超前于事实，A1 提交当时尚未推送）。
 - 钉版：CPython 3.13.15 + python-build-standalone 20260901（install_only
   变体，三平台 sha256 见 scripts/fetch-python.mjs）；PyO3 0.29.2。
 
