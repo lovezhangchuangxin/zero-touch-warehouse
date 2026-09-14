@@ -18,6 +18,7 @@ pub struct DockSpec {
     pub ext: (i32, i32),
 }
 
+#[derive(Clone)]
 pub struct ScenarioSpec {
     pub id: &'static str,
     pub name: &'static str,
@@ -87,6 +88,24 @@ pub static B2_ONE: ScenarioSpec = ScenarioSpec {
     market: false,
 };
 
+/// M3 经济校准场景：同一张 B2 地图启用市场生成器——挂单常驻、价格随机
+/// 游走，供周转 / 囤货 / 杠杆策略对比量测（records/m3-calibration.md）。
+pub static M3_TRADE: ScenarioSpec = ScenarioSpec {
+    id: "m3-trade",
+    name: "M3 · 持续经营",
+    desc: "市场常驻刷新：低买高卖、囤货与借贷杠杆的对比场。",
+    map_w: 16,
+    map_h: 12,
+    gold_milli: 300_000,
+    seed: 20260913,
+    robots: &[(2, 3), (2, 5)],
+    shelves: &[(5, 3), (6, 3), (7, 3), (5, 6), (6, 6), (7, 6)],
+    chargers: &[(6, 10), (7, 10)],
+    docks: docks!(3, 0, 0, 1; 12, 0, 0, 1;),
+    listings: &[],
+    market: true,
+};
+
 /// 五台机器人：任务分配与交通规划改变吞吐的对比配置（同一地图）。
 pub static B2_FIVE: ScenarioSpec = ScenarioSpec {
     id: "b2-five",
@@ -113,7 +132,7 @@ pub static B2_FIVE: ScenarioSpec = ScenarioSpec {
     market: false,
 };
 
-pub static SCENARIOS: [&ScenarioSpec; 2] = [&B2_ONE, &B2_FIVE];
+pub static SCENARIOS: [&ScenarioSpec; 3] = [&B2_ONE, &B2_FIVE, &M3_TRADE];
 pub const DEFAULT_ID: &str = "b2-one";
 
 pub fn by_id(id: &str) -> Option<&'static ScenarioSpec> {

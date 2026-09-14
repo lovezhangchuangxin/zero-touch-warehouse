@@ -73,6 +73,14 @@ fn check_market_invariants(w: &World, ctx: &str) {
             "{ctx}：{} 价差率 ≤ 手续费率：ask={min_ask} bid={max_bid}",
             g.name
         );
+        // 板面跟踪：报价不得与基准价时代错位（旧低价 bid 与新高价 ask 共存
+        // 会把价差拉到跨时代宽度，卖出门永不可及——校准实测暴露的病理，
+        // 由刷新的时代带清除 + 半板换手维持）。
+        assert!(
+            40 * (min_ask - max_bid) <= 13 * (min_ask + max_bid),
+            "{ctx}：{} 板面价差率超带宽：ask={min_ask} bid={max_bid}",
+            g.name
+        );
         // 3. 均值回归保证价格有界且为正（锚价 ± 4 倍平稳标准差）。
         let price = w.market_price(g.name).expect("市场启用");
         assert!(price > 0, "{ctx}：{} 基准价非正 {price}", g.name);

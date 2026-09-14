@@ -6,6 +6,9 @@ import demoOne from "./demos/demo_one.js?raw";
 import demoFiveLanes from "./demos/demo_five_lanes.js?raw";
 import demoFiveNaive from "./demos/demo_five_naive.js?raw";
 import demoPyBasics from "./demos/demo_py_basics.py?raw";
+import demoTradeFast from "./demos/demo_trade_fast.js?raw";
+import demoTradeHoard from "./demos/demo_trade_hoard.js?raw";
+import demoTradeLeverage from "./demos/demo_trade_leverage.js?raw";
 
 /** 玩家代码语言（与桌面端 Language 对应，"js" / "py"）。 */
 export type Language = "js" | "py";
@@ -46,5 +49,26 @@ export const DEMO_SCRIPTS: DemoScript[] = [
     desc: "与 JS 同地图对照：切换语言会重启宿主，Game.memory 保留",
     language: "py",
     code: demoPyBasics,
+  },
+  {
+    id: "demo-trade-fast",
+    name: "经营 · 快转（M3）",
+    desc: "m3-trade 地图：只做矿泉水，紧阈值低买高卖、零库存目标",
+    language: "js",
+    code: demoTradeFast,
+  },
+  {
+    id: "demo-trade-hoard",
+    name: "经营 · 囤货（M3）",
+    desc: "三货物低吸高抛，货架囤波段——资金沉淀在库存里",
+    language: "js",
+    code: demoTradeHoard,
+  },
+  {
+    id: "demo-trade-leverage",
+    name: "经营 · 杠杆囤货（M3）",
+    desc: "囤货 + 借贷：现金枯竭时借款扫低价货，回款还债",
+    language: "js",
+    code: demoTradeLeverage,
   },
 ];

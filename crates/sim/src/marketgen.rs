@@ -3,12 +3,12 @@
 //! 前按 half-even 量化回 milli——舍入规则随规则与存档版本冻结
 //! （docs/architecture/02 确定性规则·数学）。
 //!
-//! 板面维护性的「替换最旧挂单」不是 docs/game-design/07 排除的「挂单撤回
-//! 与改价」玩家侧风险事件，而是市场生成器职责：挂单价格生成后不再变动，
-//! 价格漂移下的不变量（任一时刻同类型 bid < ask、价差恒大于手续费率）由
-//! 生成时对对侧在挂极值钳制保证——新 ask 不低于最高 bid × (1 + 裕量)、
-//! 新 bid 不高于最低 ask × (1 − 裕量)，裕量大于取消手续费率，交叉与
-//! 价差收窄在结构上不可发生。
+//! 板面维护性的「替换最旧 / 撤滞留挂单」不是 docs/game-design/07 排除的
+//! 「挂单撤回与改价」玩家侧风险事件，而是市场生成器职责。挂单价格生成
+//! 后不再变动、始终围绕当前基准价的买卖线采样（跟踪价格漂移）；不变量
+//! （任一时刻同类型 bid < ask、价差恒大于手续费率）由修复环保证：同型
+//! 最好买卖对的价差率低于裕量（含交叉）时移除其中较旧者——新挂单 id
+//! 恒最新，被移除的必是滞留的旧报价，板面不被旧极值钉死。
 
 use std::collections::BTreeMap;
 
@@ -16,7 +16,7 @@ use ztw_model::{Id, MilliGold, Order, OrderSide};
 
 use crate::rng::Xoshiro256;
 use crate::world::World;
-use crate::{GOODS, GoodsSpec, MARKET_CLAMP_MARGIN_PER_MILLE, MARKET_REFRESH_INTERVAL};
+use crate::{GOODS, GoodsSpec, MARKET_REFRESH_INTERVAL, MARKET_SPREAD_MARGIN_PER_MILLE};
 
 /// 市场状态：各货物当前基准价（milli）+ 独立 PRNG 流。流身份 "market"
 /// 随存档格式冻结（与 "dock" 同款约定），改名即换流。
@@ -57,10 +57,10 @@ fn is_side(o: &Order, name: &str, side: OrderSide) -> bool {
     o.side == side && o.goods_type == name
 }
 
-/// 生成一张挂单：数量按侧采样，价格围绕当前基准价 ∓ 半价差并对对侧
-/// 在挂极值钳制。借用拆分：next_id / listings / market 是不同字段，
+/// 生成一张挂单：数量按侧采样，价格围绕当前基准价 ∓ 半价差采样
+/// （无对侧钳制——越线由 repair_goods 撤较旧者维持不变量，板面得以
+/// 跟踪基准价漂移）。借用拆分：next_id / listings / market 是不同字段，
 /// 借用检查允许在持有 market 可变借用时直接推进。
-#[allow(clippy::too_many_arguments)]
 fn market_add_listing(
     listings: &mut BTreeMap<Id, Order>,
     next_id: &mut Id,
@@ -71,33 +71,13 @@ fn market_add_listing(
     let price = m.prices[g.name];
     let hs_span = (g.half_spread_max_per_mille - g.half_spread_min_per_mille + 1) as usize;
     let hs_per_mille = g.half_spread_min_per_mille as usize + m.rng.below(hs_span);
-    // 卖单（ask）钳制对象是最高买价；买单（bid）是最低卖价。
-    let opposite_extreme: Option<MilliGold> = match side {
-        OrderSide::Sell => listings
-            .values()
-            .filter(|o| is_side(o, g.name, OrderSide::Buy))
-            .map(|o| o.unit_price_milli)
-            .max(),
-        OrderSide::Buy => listings
-            .values()
-            .filter(|o| is_side(o, g.name, OrderSide::Sell))
-            .map(|o| o.unit_price_milli)
-            .min(),
-    };
-    let margin = MARKET_CLAMP_MARGIN_PER_MILLE as f64 / 1000.0;
     let unit_price_milli = match side {
         OrderSide::Sell => {
-            let mut ask = price as f64 * (1.0 + hs_per_mille as f64 / 1000.0);
-            if let Some(max_bid) = opposite_extreme {
-                ask = ask.max(max_bid as f64 * (1.0 + margin));
-            }
+            let ask = price as f64 * (1.0 + hs_per_mille as f64 / 1000.0);
             quantize_half_even(ask).max(1)
         }
         OrderSide::Buy => {
-            let mut bid = price as f64 * (1.0 - hs_per_mille as f64 / 1000.0);
-            if let Some(min_ask) = opposite_extreme {
-                bid = bid.min(min_ask as f64 * (1.0 - margin));
-            }
+            let bid = price as f64 * (1.0 - hs_per_mille as f64 / 1000.0);
             quantize_half_even(bid).max(1)
         }
     };
@@ -117,6 +97,36 @@ fn market_add_listing(
             dock: None,
         },
     );
+}
+
+/// 不变量修复环：同型最低 ask 与最高 bid 的价差率低于裕量（含交叉）时
+/// 移除较旧者，重复至无违例。价差率 > 裕量 ⇔ 2000·gap > 裕量·(ask+bid)
+/// （整数形式，无浮点）。返回是否发生移除。
+fn repair_goods(listings: &mut BTreeMap<Id, Order>, name: &str) -> bool {
+    let mut changed = false;
+    loop {
+        let min_ask = listings
+            .values()
+            .filter(|o| is_side(o, name, OrderSide::Sell))
+            .map(|o| (o.id, o.unit_price_milli))
+            .min_by_key(|(_, p)| *p);
+        let max_bid = listings
+            .values()
+            .filter(|o| is_side(o, name, OrderSide::Buy))
+            .map(|o| (o.id, o.unit_price_milli))
+            .max_by_key(|(_, p)| *p);
+        let (Some((ask_id, ask)), Some((bid_id, bid))) = (min_ask, max_bid) else {
+            return changed;
+        };
+        let ok = 2000 * (ask - bid) > MARKET_SPREAD_MARGIN_PER_MILLE as i64 * (ask + bid);
+        if ok {
+            return changed;
+        }
+        // 新挂单 id 恒最大，victim 必是滞留旧报价。
+        let victim = ask_id.min(bid_id);
+        listings.remove(&victim);
+        changed = true;
+    }
 }
 
 impl World {
@@ -139,6 +149,7 @@ impl World {
                     market_add_listing(&mut self.listings, &mut self.next_id, &mut m, g, side);
                 }
             }
+            repair_goods(&mut self.listings, g.name);
         }
         self.market = Some(m);
         self
@@ -171,28 +182,73 @@ impl World {
             return;
         }
         for g in GOODS {
+            // 时代带清除：偏离当前理论线 ±20% 的滞留报价随刷新退场，
+            // 板面得以跟踪基准价（否则旧低价 bid 与新高价 ask 共存，价差
+            // 被拉宽到卖出门永不可及——校准实测暴露的病理）。
+            let base = m.prices[g.name] as f64;
+            let hs_min = g.half_spread_min_per_mille as f64 / 1000.0;
+            let hs_max = g.half_spread_max_per_mille as f64 / 1000.0;
+            let bands = [
+                (
+                    OrderSide::Sell,
+                    0.8 * base * (1.0 + hs_min),
+                    1.2 * base * (1.0 + hs_max),
+                ),
+                (
+                    OrderSide::Buy,
+                    0.8 * base * (1.0 - hs_max),
+                    1.2 * base * (1.0 - hs_min),
+                ),
+            ];
+            for (side, lo, hi) in bands {
+                let stale: Vec<Id> = self
+                    .listings
+                    .values()
+                    .filter(|o| {
+                        is_side(o, g.name, side)
+                            && ((o.unit_price_milli as f64) < lo
+                                || (o.unit_price_milli as f64) > hi)
+                    })
+                    .map(|o| o.id)
+                    .collect();
+                for id in stale {
+                    self.listings.remove(&id);
+                }
+            }
+            // 部分刷新：每侧替换最旧的 ⌈n/2⌉ 张（带内换手，报价不过度老化）。
             for side in [OrderSide::Sell, OrderSide::Buy] {
-                let oldest = self
+                let mut ids: Vec<Id> = self
                     .listings
                     .values()
                     .filter(|o| is_side(o, g.name, side))
                     .map(|o| o.id)
-                    .min();
-                if let Some(id) = oldest {
+                    .collect();
+                ids.sort_unstable();
+                let replace = ids.len().div_ceil(2);
+                for id in ids.into_iter().take(replace) {
                     self.listings.remove(&id);
                 }
-                let span = (g.board_max - g.board_min + 1) as usize;
-                let target = g.board_min as usize + m.rng.below(span);
-                loop {
-                    let count = self
+            }
+            let span = (g.board_max - g.board_min + 1) as usize;
+            let target = g.board_min as usize + m.rng.below(span);
+            // 补足与修复交替直到稳定：修复撤掉滞留旧报价后立即按当前
+            // 买卖线补足，常驻下限恒成立（板面规模有限，必然收敛）。
+            loop {
+                let mut acted = false;
+                for side in [OrderSide::Sell, OrderSide::Buy] {
+                    while self
                         .listings
                         .values()
                         .filter(|o| is_side(o, g.name, side))
-                        .count();
-                    if count >= target {
-                        break;
+                        .count()
+                        < target
+                    {
+                        market_add_listing(&mut self.listings, &mut self.next_id, m, g, side);
+                        acted = true;
                     }
-                    market_add_listing(&mut self.listings, &mut self.next_id, m, g, side);
+                }
+                if !repair_goods(&mut self.listings, g.name) && !acted {
+                    break;
                 }
             }
         }

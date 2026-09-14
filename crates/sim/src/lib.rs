@@ -63,10 +63,11 @@ pub const CREDIT_LIMIT_MILLI: MilliGold = 1_000_000;
 
 /// 板面刷新间隔（docs/game-design/09：30–60 tick 窗口内取 40）。
 pub const MARKET_REFRESH_INTERVAL: u64 = 40;
-/// 新挂单对对侧在挂极值的钳制裕量（基准价千分比）。须大于取消手续费率
-/// （100‰）：「任一时刻同类型 bid < ask」与「价差恒大于手续费率」两条
-/// 不变量由此结构成立（见 marketgen.rs 模块注释）。
-pub const MARKET_CLAMP_MARGIN_PER_MILLE: u32 = 120;
+/// 板面价差修复裕量（千分比）：同型最好买卖对价差率低于该值（含交叉）
+/// 时刷新环移除较旧者。须大于取消手续费率（100‰）——「任一时刻同类型
+/// bid < ask」与「价差恒大于手续费率」两条不变量由此成立（见 marketgen.rs
+/// 模块注释）。
+pub const MARKET_SPREAD_MARGIN_PER_MILLE: u32 = 120;
 
 /// 市场货物目录条目（docs/game-design/09；全部数值为示例锚点，随原型
 /// 平衡——里程碑 4 校准冻结）。平稳标准差 = σ / √(2k − k²)，带宽按
@@ -101,9 +102,9 @@ pub const GOODS: &[GoodsSpec] = &[
         anchor_milli: 4_500,
         k_num: 1,
         k_den: 64,
-        sigma_milli: 150,
+        sigma_milli: 175,
         half_spread_min_per_mille: 100,
-        half_spread_max_per_mille: 160,
+        half_spread_max_per_mille: 130,
         sell_qty: (8, 16),
         buy_qty: (2, 6),
         board_min: 2,
@@ -114,9 +115,9 @@ pub const GOODS: &[GoodsSpec] = &[
         anchor_milli: 15_000,
         k_num: 1,
         k_den: 64,
-        sigma_milli: 400,
-        half_spread_min_per_mille: 110,
-        half_spread_max_per_mille: 170,
+        sigma_milli: 580,
+        half_spread_min_per_mille: 95,
+        half_spread_max_per_mille: 125,
         sell_qty: (4, 8),
         buy_qty: (2, 4),
         board_min: 2,
@@ -127,9 +128,9 @@ pub const GOODS: &[GoodsSpec] = &[
         anchor_milli: 60_000,
         k_num: 1,
         k_den: 48,
-        sigma_milli: 2_500,
-        half_spread_min_per_mille: 130,
-        half_spread_max_per_mille: 200,
+        sigma_milli: 2_900,
+        half_spread_min_per_mille: 100,
+        half_spread_max_per_mille: 130,
         sell_qty: (2, 4),
         buy_qty: (1, 2),
         board_min: 2,

@@ -2,16 +2,16 @@
 
 单机 2D 编程游戏：玩家写代码运营自动化仓库。设计文档见 `docs/`（语义以文档为准）。
 
-## 当前状态：原型 A1（完整协议与双语言）
+## 当前状态：A1 + 里程碑 3（经济系统）
 
-A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D（双平台构建冒烟）
-之上完成 A1：IPC 协议 v2 会话语义（host_epoch / execution_id / request_id
-去重缓存、执行关闭与旧消息拒绝、每执行请求数上限）；Python 宿主
-（PyO3 内嵌 vendored CPython 3.13，三域配额分配器、中断注入、能力收窄）
-与 bootstrap.py 绑定层；双语言 memory 值模型矩阵、1000 次热重载浸泡与
-量测（验收证据见 `records/a1-protocol-playthrough.md` 与
-`records/a1-findings.md`）。桌面/前端可在 JS / Python 间切换试玩。
-无存档（属原型 C）。
+A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D（双平台构建
+冒烟）、A1（完整协议与双语言，验收证据见 `records/a1-protocol-playthrough.md`
+与 `records/a1-findings.md`）之上完成里程碑 3：市场生成器（三货物均值
+回归价格、双向常驻挂单、板面刷新与不变量维护）、借贷（按 tick 复利、
+信用额度）与商店购买（robot/shelf/charger/dock，装卸位朝向自边界墙
+推导）；经济不变量属性测试（会计恒等式风暴 + 借贷穷举矩阵）与周转 /
+囤货 / 杠杆三策略校准（`records/m3-calibration.md`，`m3-trade` 场景 +
+三支示例脚本可试玩）。无存档（属原型 C）。
 
 ## 布局
 
@@ -71,3 +71,5 @@ hook 只是快速反馈、可被绕过，强制门禁在 CI。常用任务见 `j
   上限校验（构造场景限定）；退款加法未统一 saturating；JS pick/drop 缺参
   静默视为 (0,0)；销毁已预留装卸位复用 HAS_VEHICLE 码；满电充电返回 OK
   且增益 0；世界不变量断言器不校验悬挂引用（docked_vehicle 等）。
+- 界面管理操作按钮（take/cancel/buy/borrow 的 UI 面）属里程碑 4 编辑器
+  完善，当前管理操作全部经玩家代码。
