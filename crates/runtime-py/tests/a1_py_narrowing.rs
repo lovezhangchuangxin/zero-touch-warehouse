@@ -74,6 +74,37 @@ fn whitelisted_modules_work_with_transitive_deps() {
 }
 
 #[test]
+fn narrowing_hardening_blocks_escape_chains() {
+    // 评审加固：sys.modules 最小保留（_signal/_thread/_io/__main__ 拒绝）
+    // + 真 builtins / sys 的危险入口源头拆除（docs 03 误用防护定位）。
+    let mut s = common::session(demo_world());
+    let init = s.load_code(&fixture("narrow_escape.py"));
+    assert!(init.ok, "初始化失败：{:?}", init.fault);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    let log: Vec<&str> = s.logs.iter().map(|(_, l)| l.as_str()).collect();
+    for expected in [
+        "import _signal: DENIED",
+        "import _thread: DENIED",
+        "import __main__: DENIED",
+        // _io 是 import 机器惰性依赖（get_data 读源码），保留但文件面封死：
+        "import _io: KEPT",
+        "_io.read_outside: RuntimeError",
+        "_io.read_traversal: RuntimeError",
+        "_io.write_inside: RuntimeError",
+        "builtins.open: GONE",
+        "builtins.print: GONE",
+        "builtins.input: GONE",
+        "builtins.eval: KEPT",
+        "sys.stdout: GONE",
+        "sys.stdin: GONE",
+        "sys.modules: PRESENT", // 只读残余，文档化不追捕
+    ] {
+        assert!(log.contains(&expected), "缺少 {expected}；实际：{log:?}");
+    }
+}
+
+#[test]
 fn source_error_stack_shows_player_frames() {
     // 脚本级错误带 <player> 帧定位（docs 03 故障分级：展示错误类型、
     // 源码位置与堆栈）。

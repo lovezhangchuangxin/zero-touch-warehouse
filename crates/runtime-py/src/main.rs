@@ -33,9 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use pyo3::prelude::*;
-use pyo3::types::{
-    PyCode, PyCodeInput, PyCodeMethods, PyDict, PyDictMethods, PyModule, PyTraceback,
-};
+use pyo3::types::{PyCode, PyCodeInput, PyDict, PyDictMethods, PyModule, PyTraceback};
 use ztw_api::BOOTSTRAP_PY;
 use ztw_api::protocol::{ExecStats, HostFrame, MainFrame, err_result, read_frame, write_frame};
 
@@ -514,9 +512,9 @@ fn main() {
             h.host_epoch = host_epoch;
             h.execution_id = execution_id;
         });
-        if is_init {
-            ctx.ns = None; // 初始化即重建命名空间（首次加载 / 热重载同路径）
-        }
+        // 旧命名空间的释放只走 run_exec 内、GIL 持有下的 drop + GC——
+        // 主循环这里不得预先置 None（GIL 外 drop 走 pyo3 延迟 decref 队列，
+        // 释放时机依赖 attach 入口冲刷的实现细节，不可依赖）。
         // 本执行预算与互证标志复位（分配器计数不回退——命名空间可能仍
         // 持有上一执行的分配）。
         deadline.store(now_ms().saturating_add(budget_ms), Ordering::Relaxed);
@@ -622,6 +620,21 @@ fn spawn_interrupt_watchdog(deadline: Arc<AtomicU64>, fired: Arc<AtomicBool>) {
         .expect("spawn interrupt watchdog");
 }
 
+/// 直接以给定命名空间执行编译产物：pyo3 的 `PyCode::run` 无条件
+/// `PyImport_AddModule("__main__")` 兜底（pyo3 code.rs 实现），会把收窄时
+/// 从 sys.modules 洗除的 `__main__` 重建回来（玩家 `import __main__` 即
+/// 可达真 builtins 字典）。这里绕过该实现细节；`__builtins__` 由调用方
+/// 显式注入命名空间，不依赖兜底。
+fn eval_in<'py>(
+    py: Python<'py>,
+    code: &pyo3::Bound<'py, PyCode>,
+    ns: &pyo3::Bound<'py, PyDict>,
+) -> pyo3::PyResult<pyo3::Bound<'py, PyAny>> {
+    let r = unsafe { pyo3::ffi::PyEval_EvalCode(code.as_ptr(), ns.as_ptr(), ns.as_ptr()) };
+    // 所有权契约：PyEval_EvalCode 返回新引用（异常时 NULL + 置错误）。
+    unsafe { pyo3::Bound::from_owned_ptr_or_err(py, r) }
+}
+
 /// 单次执行：init = 全新命名空间（白名单 builtins → 绑定层 → 玩家源码）；
 /// loop = 调用入口函数。每次执行前注入全量镜像。
 fn run_exec(
@@ -649,19 +662,24 @@ fn run_exec(
                 stack: String::new(),
             });
         };
-        let ns = PyDict::new(py);
         let builtins = new_builtins
             .call(py, (), None)
             .map_err(|e| classify(py, &e, interrupt_fired))?;
-        ns.set_item("__builtins__", builtins)
+        // 绑定层执行进独立引导命名空间：内部符号（M/GEN/_ipc/_apply_delta
+        // 等）不进入玩家命名空间——JS 侧 IIFE 封装的同款语义；玩家侧只
+        // 发布公开表面 Game / Position / GameError（docs 04）。
+        let boot_ns = PyDict::new(py);
+        boot_ns
+            .set_item("__builtins__", builtins.clone_ref(py))
             .map_err(|e| classify(py, &e, interrupt_fired))?;
-        ns.set_item("__name__", "__ztw_player__")
+        boot_ns
+            .set_item("__name__", "__ztw_bootstrap__")
             .map_err(|e| classify(py, &e, interrupt_fired))?;
-        // 绑定层执行进玩家命名空间（属宿主引导，任何失败都是环境级）。
+        // 绑定层执行（属宿主引导，任何失败都是环境级）。
         let bootstrap = CString::new(BOOTSTRAP_PY).expect("bootstrap 无 NUL");
         let bootstrap_name = CString::new(BOOTSTRAP_FILENAME).unwrap();
         let bootstrap_run = PyCode::compile(py, &bootstrap, &bootstrap_name, PyCodeInput::File)
-            .and_then(|c| c.run(Some(&ns), Some(&ns)).map(|_| ()));
+            .and_then(|c| eval_in(py, &c, &boot_ns).map(|_| ()));
         if let Err(e) = bootstrap_run {
             return Err(FaultOut {
                 class: "environment",
@@ -670,20 +688,51 @@ fn run_exec(
                 stack: String::new(),
             });
         }
+        let boot_missing = |what: &str| FaultOut {
+            class: "environment",
+            code: "BOOTSTRAP_FAILED".into(),
+            message: format!("绑定层缺少导出 {what}"),
+            stack: String::new(),
+        };
         ctx.set_mirror = Some(
-            ns.get_item("_ztw_set_mirror")
+            boot_ns
+                .get_item("_ztw_set_mirror")
                 .ok()
                 .flatten()
-                .expect("bootstrap 提供 _ztw_set_mirror")
+                .ok_or_else(|| boot_missing("_ztw_set_mirror"))?
                 .unbind(),
         );
         ctx.stats_fn = Some(
-            ns.get_item("_ztw_stats")
+            boot_ns
+                .get_item("_ztw_stats")
                 .ok()
                 .flatten()
-                .expect("bootstrap 提供 _ztw_stats")
+                .ok_or_else(|| boot_missing("_ztw_stats"))?
                 .unbind(),
         );
+        let publish = |key: &str| {
+            boot_ns
+                .get_item(key)
+                .ok()
+                .flatten()
+                .ok_or_else(|| boot_missing(key))
+        };
+        let game = publish("Game")?;
+        let position = publish("Position")?;
+        let game_error = publish("GameError")?;
+        let ns = PyDict::new(py);
+        ns.set_item("__builtins__", builtins)
+            .map_err(|e| classify(py, &e, interrupt_fired))?;
+        ns.set_item("__name__", "__ztw_player__")
+            .map_err(|e| classify(py, &e, interrupt_fired))?;
+        for (k, v) in [
+            ("Game", game),
+            ("Position", position),
+            ("GameError", game_error),
+        ] {
+            ns.set_item(k, v)
+                .map_err(|e| classify(py, &e, interrupt_fired))?;
+        }
         ctx.ns = Some(ns.unbind());
     } else if ctx.ns.is_none() {
         return Err(FaultOut {
@@ -724,7 +773,7 @@ fn run_exec(
             Ok(c) => c,
             Err(e) => return Err(classify(py, &e, interrupt_fired)),
         };
-        if let Err(e) = code.run(Some(ns), Some(ns)) {
+        if let Err(e) = eval_in(py, &code, ns) {
             return Err(classify(py, &e, interrupt_fired));
         }
         let has_loop = ns

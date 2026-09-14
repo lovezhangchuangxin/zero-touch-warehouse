@@ -13,23 +13,33 @@
 //! - itertools / re：不可中断的纯 C 入口（count/cycle、回溯匹配），
 //!   只能靠主进程杀进程兜底——但 collections 的模块级实现依赖前者，
 //!   故引导期预导入后从 sys.modules 洗除（见 NARROW_PY 尾部）；
+//! - weakref：顶层依赖 sys + itertools，与上述排除互斥——因此
+//!   functools.singledispatch / singledispatchmethod 受限不可用（触发时
+//!   得到白名单可读错误，非静默损坏）；
 //! - fractions：依赖 re（随之排除，如需可后续评审）；
 //! - random：独立派生流待定（docs 03 待定节）；
 //! - time / os / io / sys / subprocess 等：非纯计算，一概拒绝。
+//!
+//! 已知残余（误用防护定位，不追捕到零）：已加载模块的属性链（如
+//! `collections._sys`）仍可达真实 sys / builtins 模块对象——危险入口
+//! （open/input/print/breakpoint、stdin/stdout）已在源头从这两个模块上
+//! 拆除，但 sys.modules 等只读面仍可见；`import __ztw` 可达内部桥
+//! （服务端对每个 op 仍全量校验，绕过绑定层增量回放属自伤面）；
+//! exec/eval/compile 保留在真 builtins（collections.namedtuple 运行期
+//! 需要 eval，且沙箱内它们只能做纯计算）。
 
-/// 白名单模块的私有传递依赖（stdlib C 加速层与纯 Python 回退；不向
-/// 玩家宣传，但按名 import 也放行——纯计算，无能力面扩张）。
+/// 白名单模块的私有传递依赖（stdlib C 加速层；不向玩家宣传，但按名
+/// import 也放行——纯计算，无能力面扩张）。_pydecimal / _typing 为
+/// 死条目已清（前者永不加载——_decimal 恒在；后者随 typing 一并排除）。
 pub const TRANSITIVE: &[&str] = &[
-    // 私有 C 加速层与纯 Python 回退
     "_collections",
+    "_collections_abc",
     "_decimal",
-    "_pydecimal",
     "_json",
     "_functools",
     "_bisect",
     "_heapq",
     "_operator",
-    "_typing",
     "_contextvars",
     // 白名单模块的公共传递依赖（纯计算）
     "abc",
@@ -92,6 +102,23 @@ _ztw_sys.path = [
     if p.startswith(_prefix) and 'site-packages' not in p
 ]
 
+# 前缀比较用规范化形态（两种分隔符都折成 '/'）：裸 startswith 可被
+# ../ 遍历与同级目录前缀碰撞绕过。符号链接级逃逸超出误用防护定位。
+_ztw_prefix_norm = '/'.join(
+    s for s in _prefix.replace('\\', '/').split('/') if s not in ('', '.')
+)
+
+def _ztw_under_prefix(p):
+    segs = []
+    for seg in p.replace('\\', '/').split('/'):
+        if seg in ('', '.'):
+            continue
+        if seg == '..':
+            return False  # 任何上翻分量直接拒绝
+        segs.append(seg)
+    norm = '/'.join(segs)
+    return norm == _ztw_prefix_norm or norm.startswith(_ztw_prefix_norm + '/')
+
 def _ztw_audit(event, args):
     _DENY = {
         'os.system', 'os.exec', 'os.fork', 'os.spawn', 'os.posix_spawn',
@@ -102,16 +129,24 @@ def _ztw_audit(event, args):
         raise RuntimeError(
             f"能力收窄：事件 {event!r} 被拒绝（系统/网络访问不可用；"
             "误用防护，非安全边界）")
-    if event == 'open':
-        # 只放行标准库自身目录的读取（import 系统需要）；其余文件一律
-        # 可读错误。args = (path, mode, flags)。
+    if event in ('open', 'open_code'):
+        # 只放行标准库目录内的只读打开（import 系统读源码走 open_code）：
+        # - 路径规范化后必须仍位于发行物前缀之下——裸 startswith 可被
+        #   ../ 遍历与同级目录前缀碰撞绕过；
+        # - 写模式一律拒绝——_io 保留在 sys.modules（import 机器的惰性
+        #   依赖）后这是仅剩的文件写入面。mode 含 w/a/x/+ 同拒；flags
+        #   低两位为访问模式（0 只读 / 1 写 / 2 读写，POSIX 与 Windows
+        #   CRT 同值）。args = (path, mode, flags)。
         p = args[0] if args else None
-        if isinstance(p, bytes):
-            p = p.decode('utf-8', 'replace')
-        if not (isinstance(p, str) and p.startswith(_prefix)):
+        p_str = p.decode('utf-8', 'replace') if isinstance(p, bytes) else p
+        mode = args[1] if len(args) > 1 and isinstance(args[1], str) else ''
+        flags = args[2] if len(args) > 2 else None
+        writable = any(c in mode for c in 'wax+') or (
+            isinstance(flags, int) and flags & 3 != 0)
+        if writable or not (isinstance(p, str) and _ztw_under_prefix(p)):
             raise RuntimeError(
-                f"能力收窄：拒绝打开 {str(p)[:120]!r}（文件访问不可用，"
-                "仅标准库目录内部可读；误用防护，非安全边界）")
+                f"能力收窄：拒绝打开 {str(p_str)[:120]!r}（文件访问不可用，"
+                "仅标准库目录内部只读；误用防护，非安全边界）")
 
 _ztw_sys.addaudithook(_ztw_audit)
 
@@ -142,13 +177,42 @@ def _ztw_new_builtins():
 
 # 洗除白名单外的全部 sys.modules 缓存（sys.modules 命中会绕过 finder）：
 # 解释器启动时已加载的 os / io / time / importlib 等一律移除——已加载
-# 模块内部的引用不受影响，只有"按名再导入"会走 finder 被拒。保留宿主
-# 机器所需的受保护根与下划线私有模块（frozen importlib 等）。
-_ZTW_PROTECTED = _ZTW_WHITELIST | {'builtins', '_signal', '__ztw', '__main__'}
+# 模块内部的引用不受影响，只有"按名再导入"会走 finder 被拒。
+# 下划线私有模块不再整类保留（评审发现：import builtins / _thread / _io
+# 可直接取回危险对象、import __main__ 可取回真 builtins 字典），改为
+# 显式最小保留——import 机器（frozen importlib 链、_imp）、编解码
+# （_codecs）与告警机器（_warnings）。_signal 一并移除：C 级 SIGINT
+# 处理器在引导期已注册且不依赖 sys.modules 条目，玩家再 import _signal
+# 只会被 finder 拒绝，无法用 SIG_IGN 拆除看门狗注入（第二层中断保真）。
+_ZTW_PROTECTED = _ZTW_WHITELIST | {'builtins', '__ztw'}
+_ZTW_KEEP_PRIVATE = frozenset((
+    '_frozen_importlib', '_frozen_importlib_external', '_imp', '_codecs',
+    '_warnings',
+    # _io：import 机器的惰性运行期依赖——_bootstrap_external.get_data
+    # 读源码时 import _io（sys.modules 命中）——不能洗除。玩家由此可达
+    # 的文件面由审计钩子（只读 + 前缀内）封住。
+    '_io',
+))
 for _m in [m for m in list(_ztw_sys.modules)
            if m.split('.', 1)[0] not in _ZTW_PROTECTED
-           and not m.startswith('_')]:
+           and m.split('.', 1)[0] not in _ZTW_KEEP_PRIVATE]:
     del _ztw_sys.modules[_m]
+
+# 已加载模块的属性链（collections._sys、json.decoder.re 等）仍指向真实
+# 模块对象——逐链追捕不可靠，改为在源头拆除危险入口：
+# - 真 builtins 模块删除 open/input/print/breakpoint（玩家白名单 dict
+#   早已不含它们，这里断的是"绕回真 builtins"的链——print 污染 stdout
+#   即 IPC 出流、input 读 stdin 即 IPC 入流、open 是文件面）；exec/eval/
+#   compile 保留：collections.namedtuple 运行期依赖 eval，且沙箱内它们
+#   只能做纯计算。宿主与绑定层自身不使用被拆除的入口。
+# - sys 拆除 stdin/stdout（含 __stdin__/__stdout__ 备份）：stdin/stdout
+#   是 IPC 帧流，Python 层写入/读取都会破坏协议；stderr 留给诊断。
+for _n in ('open', 'input', 'print', 'breakpoint'):
+    if hasattr(_b, _n):
+        delattr(_b, _n)
+for _n in ('stdin', 'stdout', '__stdin__', '__stdout__'):
+    if hasattr(_ztw_sys, _n):
+        delattr(_ztw_sys, _n)
 "#;
 
 /// 执行收窄。返回 `_ztw_new_builtins` 可调用（每次建立玩家命名空间时

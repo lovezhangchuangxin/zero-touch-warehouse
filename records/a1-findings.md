@@ -24,16 +24,40 @@
 ## 白名单传递依赖实测清单（narrow.rs TRANSITIVE 的依据）
 
 - collections → itertools（洗除）、keyword、operator、reprlib、
-  _collections、collections.abc
-- decimal → numbers、_decimal / _pydecimal（C 加速与纯回退）、_contextvars
-- functools → types、_functools；json → json.*、_json
-- typing → **sys**（顶层 import，与收窄互斥→typing 移出白名单）、
-  copyreg、_typing；abc 由 numbers 引入
+  _collections、_collections_abc、collections.abc
+- decimal → numbers、_decimal（C 加速；纯回退 _pydecimal 为死条目已
+  清——_decimal 恒在）、_contextvars
+- functools → types、_functools、_collections_abc；json → json.*、_json
+- typing → **sys**（顶层 import，与收窄互斥→typing 移出白名单）；
+  copyreg；_typing 随之清除（死条目）；abc 由 numbers 引入
 - heapq/bisect → _heapq/_bisect；cmath/math 为内建模块（经
   BuiltinImporter 解析——meta_path 不能整链替换）
+- 保留在 sys.modules 的机器私有项：_frozen_importlib(_external)、_imp、
+  _codecs、_warnings、**_io**（_bootstrap_external.get_data 读源码时
+  惰性 import _io——洗除会炸掉一切新 import；其文件面由审计钩子以
+  只读 + 前缀内封住）
 - 刻意排除：itertools / re（不可中断纯 C 入口，靠洗除+finder 双拒）、
-  fractions（依赖 re）、random（独立派生流待定）、time/os/io/sys/
-  subprocess/socket 等
+  weakref（顶层依赖 sys + itertools，故 functools.singledispatch 受限
+  ——触发时得到白名单可读错误）、fractions（依赖 re）、random（独立
+  派生流待定）、time/os/io/sys/subprocess/socket 等
+
+## 收窄加固（2026-09-14 评审落地）
+
+- sys.modules 下划线整类保留改为显式最小清单：_signal（防 SIG_IGN 拆
+  看门狗注入）、_thread（真线程破坏 IPC 帧流）、__main__（真 builtins
+  字典旁路）等一律拒绝。注意 pyo3 `PyCode::run` 无条件
+  `PyImport_AddModule("__main__")` 兜底会把洗除的 __main__ 重建回来，
+  执行须改走 `PyEval_EvalCode`（runtime-py eval_in）。
+- 真 builtins 源头拆除 open/input/print/breakpoint（eval/exec/compile
+  保留——namedtuple 运行期依赖，且沙箱内仅纯计算）；sys 拆
+  stdin/stdout/__stdin__/__stdout__（IPC 帧流；stderr 留诊断）。
+- 绑定层执行进独立引导命名空间，玩家命名空间只发布 Game / Position /
+  GameError——bootstrap 内部符号（M/GEN/_ipc 等）不再泄漏（对齐 JS 侧
+  IIFE 封装）。已知残余：collections._sys 等属性链仍可达真 sys/builtins
+  模块对象（危险入口已在源头拆除，只读面可见）；`import __ztw` 可达
+  内部桥（服务端逐 op 全量校验，绕过增量回放属自伤面）。
+- 审计钩子 open/open_code 事件：路径规范化（拒 .. 分量、防同级前缀
+  碰撞）+ 写模式一律拒绝（mode 含 w/a/x/+ 或 flags 访问位非只读）。
 
 ## 构建与分发结论
 
