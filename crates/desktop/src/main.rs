@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::State;
 use tauri::ipc::Channel;
-use ztw_desktop::hostbin::resolve_host_bin_or_default;
+use ztw_desktop::hostbin::resolve_host_bins;
 use ztw_desktop::world_thread::{Ctrl, Sink};
 use ztw_desktop::{DEFAULT_ID, DiagPage, StatusView, WorldHandle};
 
@@ -90,8 +90,12 @@ async fn step(state: State<'_, App>) -> Result<(), String> {
 
 /// 热重载：当前 tick 结束后暂停 → 保存即重建执行环境（docs/architecture/05）。
 #[tauri::command]
-async fn hot_reload(state: State<'_, App>, code: String) -> Result<(), String> {
-    state.handle.ctrl(Ctrl::LoadCode { code })
+async fn hot_reload(state: State<'_, App>, code: String, language: String) -> Result<(), String> {
+    let lang = ztw_desktop::hostbin::Language::parse(&language)?;
+    state.handle.ctrl(Ctrl::LoadCode {
+        code,
+        language: lang,
+    })
 }
 
 /// 重开场景（保留玩家源码并自动重新初始化）。
@@ -149,7 +153,7 @@ async fn logs_ack(state: State<'_, App>, cursor: u64) -> Result<(), String> {
 
 fn main() {
     // 宿主二进制解析失败不阻断启动：load_code 报 SPAWN_FAILED（面板可见）。
-    let handle = WorldHandle::spawn(DEFAULT_ID, resolve_host_bin_or_default());
+    let handle = WorldHandle::spawn(DEFAULT_ID, resolve_host_bins());
     tauri::Builder::default()
         .manage(App { handle })
         .invoke_handler(tauri::generate_handler![

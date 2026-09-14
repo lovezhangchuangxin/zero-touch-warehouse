@@ -22,8 +22,11 @@ struct Report {
 }
 
 fn run_five(code: &str, max_ticks: u64) -> Report {
-    let bin = hostbin::resolve_host_bin().expect("宿主二进制应可解析");
-    let mut s = Session::new(SessionConfig::new(bin), scenario::build(&scenario::B2_FIVE));
+    let bins = hostbin::resolve_host_bins();
+    let mut s = Session::new(
+        SessionConfig::new(bins.js),
+        scenario::build(&scenario::B2_FIVE),
+    );
     let init = s.load_code(code);
     assert!(init.ok, "脚本加载应成功：{:?}", init.fault);
 

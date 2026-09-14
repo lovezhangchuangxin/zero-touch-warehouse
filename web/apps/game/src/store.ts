@@ -27,6 +27,8 @@ export const store = reactive({
   selectedRobot: null as number | null,
   /** 编辑器草稿（保存并重载时提交给 hot_reload）。 */
   code: "",
+  /** 编辑器语言草稿（保存时随 code 提交；切换语言重启宿主）。 */
+  language: "js" as string,
   lastScenario: "",
 });
 

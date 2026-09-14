@@ -49,8 +49,11 @@ pub enum Ctrl {
     Step,
     /// 热重载：编辑代码在当前 tick 结束后暂停，保存即重建执行环境
     /// （docs/game-design/05 §执行生命周期；宿主进程不重启）。
+    /// 语言与当前不同时先重建会话（= 宿主进程重启；docs/architecture/03
+    /// 执行模型：切换语言重启宿主），已提交 Game.memory 保留。
     LoadCode {
         code: String,
+        language: crate::hostbin::Language,
     },
     /// 重开场景：世界 / memory 重建，玩家源码保留并自动重新初始化
     /// （docs/architecture/02 §场景）。
@@ -68,6 +71,8 @@ pub struct StatusView {
     pub loaded: bool,
     pub fault_class: Option<String>,
     pub tick: u64,
+    /// 当前玩家代码语言（"js" / "py"）。
+    pub language: String,
 }
 
 /// 快照推送槽（lib 不依赖 Tauri：壳层把 Channel 适配成 `Fn(&str)`）。
@@ -109,6 +114,7 @@ impl Shared {
                 loaded: false,
                 fault_class: None,
                 tick: 0,
+                language: "js".into(),
             }),
             static_info: Mutex::new(Value::Null),
         }
@@ -199,14 +205,14 @@ pub struct WorldHandle {
 impl WorldHandle {
     /// 启动世界线程（未知场景 id 回落默认场景，静默处理——启动阶段
     /// 前端尚未 attach，诊断事件无人消费）。
-    pub fn spawn(scenario_id: &str, host_bin: PathBuf) -> WorldHandle {
+    pub fn spawn(scenario_id: &str, bins: crate::hostbin::HostBins) -> WorldHandle {
         let spec = scenario::by_id(scenario_id).unwrap_or(scenario::SCENARIOS[0]);
         let shared = Arc::new(Shared::new());
         let (tx, rx) = mpsc::channel::<Ctrl>();
         let thread_shared = shared.clone();
         let join = std::thread::Builder::new()
             .name("ztw-world".into())
-            .spawn(move || run(spec, host_bin, rx, thread_shared))
+            .spawn(move || run(spec, bins, rx, thread_shared))
             .expect("spawn world thread");
         WorldHandle {
             ctrl_tx: tx,
@@ -251,15 +257,18 @@ struct RunState {
     /// 单步请求：安全点执行一个 tick 后回暂停。
     stepping: bool,
     next_tick_at: Option<Instant>,
+    /// 当前语言与两语言宿主二进制（解析一次，切换语言直接换 bin）。
+    language: crate::hostbin::Language,
+    bins: crate::hostbin::HostBins,
 }
 
 fn run(
     spec: &'static ScenarioSpec,
-    host_bin: PathBuf,
+    bins: crate::hostbin::HostBins,
     rx: mpsc::Receiver<Ctrl>,
     shared: Arc<Shared>,
 ) {
-    let mut st = init_state(spec, host_bin);
+    let mut st = init_state(spec, bins);
     bootstrap(&st, &shared);
     publish(&mut st, &shared);
     loop {
@@ -306,15 +315,17 @@ fn fresh_session(spec: &'static ScenarioSpec, host_bin: PathBuf) -> Session {
     Session::new(SessionConfig::new(host_bin), scenario::build(spec))
 }
 
-fn init_state(spec: &'static ScenarioSpec, host_bin: PathBuf) -> RunState {
+fn init_state(spec: &'static ScenarioSpec, bins: crate::hostbin::HostBins) -> RunState {
     RunState {
         spec,
-        session: fresh_session(spec, host_bin),
+        session: fresh_session(spec, bins.js.clone()),
         code: None,
         running: false,
         tps: 0,
         stepping: false,
         next_tick_at: None,
+        language: crate::hostbin::Language::Js,
+        bins,
     }
 }
 
@@ -368,10 +379,31 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
             }
             st.stepping = true;
         }
-        Ctrl::LoadCode { code } => {
+        Ctrl::LoadCode { code, language } => {
             // 编辑即暂停（docs/architecture/05：当前 tick 结束后暂停，保存即重载）。
             st.running = false;
             st.next_tick_at = None;
+            // 语言切换 = 宿主进程重启（docs 03）。Session（世界与受控
+            // memory 树）保留，只换宿主二进制并干净重启：restart_host 在
+            // code=None 时只做 drop_host（清 killed 标记、收尸），随后
+            // load_code 以新 bin spawn——已提交 Game.memory 跨语言保留。
+            if language != st.language {
+                diag_push(
+                    shared,
+                    st.session.world.tick,
+                    "control",
+                    json!({
+                        "op": "switch_language",
+                        "from": st.language.as_str(),
+                        "to": language.as_str(),
+                    }),
+                );
+                st.language = language;
+                st.session.cfg.host_bin = bin_of(st);
+                st.code = None;
+                let _ = st.session.restart_host();
+                *shared.host_ctl.lock().expect("host_ctl 锁") = None;
+            }
             load_code(st, shared, code);
             publish(st, shared);
         }
@@ -409,9 +441,12 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
     }
 }
 
-/// SessionConfig 的宿主二进制路径从旧 session 借出（同一份解析结果）。
+/// 按当前语言取宿主二进制。
 fn bin_of(st: &RunState) -> PathBuf {
-    st.session.cfg.host_bin.clone()
+    match st.language {
+        crate::hostbin::Language::Js => st.bins.js.clone(),
+        crate::hostbin::Language::Py => st.bins.py.clone(),
+    }
 }
 
 fn load_code(st: &mut RunState, shared: &Shared, code: String) {
@@ -526,6 +561,7 @@ fn publish(st: &mut RunState, shared: &Shared) {
         loaded: st.session.initialized,
         fault_class,
         tick: st.session.world.tick,
+        language: st.language.as_str().to_string(),
     };
 }
 

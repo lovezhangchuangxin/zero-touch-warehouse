@@ -114,6 +114,8 @@ export interface StatusView {
   loaded: boolean;
   fault_class: string | null;
   tick: number;
+  /** 当前玩家代码语言（"js" / "py"）。 */
+  language: string;
 }
 
 /** 场景静态信息里的装卸位（与快照 docks 字段一致；渲染以快照为准）。 */

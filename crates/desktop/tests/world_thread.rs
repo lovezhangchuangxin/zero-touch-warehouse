@@ -5,12 +5,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ztw_desktop::hostbin::resolve_host_bin;
+use ztw_desktop::hostbin::Language;
 use ztw_desktop::scenario::{self, B2_ONE};
 use ztw_desktop::{Ctrl, StatusView, WorldHandle};
 
 fn spawn(scenario: &str) -> WorldHandle {
-    WorldHandle::spawn(scenario, resolve_host_bin().expect("宿主二进制应可解析"))
+    WorldHandle::spawn(scenario, ztw_desktop::hostbin::resolve_host_bins())
 }
 
 fn status(h: &WorldHandle) -> StatusView {
@@ -130,6 +130,7 @@ fn load_step_pause_resume_flow() {
 
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() {}".to_string(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
@@ -179,6 +180,7 @@ fn full_loop_completes_orders_with_diag_events() {
     let h = spawn(B2_ONE.id);
     h.ctrl(Ctrl::LoadCode {
         code: SIMPLE_LOOP.to_string(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
@@ -267,6 +269,7 @@ fn script_fault_pauses_and_resume_recovers() {
     let h = spawn(B2_ONE.id);
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() { throw new Error('boom'); }".into(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
@@ -297,6 +300,7 @@ fn script_fault_pauses_and_resume_recovers() {
     // 修码 → 热重载 → 恢复：干净代码持续运行。
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() {}".into(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(
@@ -318,6 +322,7 @@ fn hot_reload_preserves_world_and_reset_rebuilds() {
     let h = spawn(B2_ONE.id);
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() {}".into(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
@@ -330,6 +335,7 @@ fn hot_reload_preserves_world_and_reset_rebuilds() {
     // 热重载：世界与 tick 保留（只重建执行环境），加载后仍暂停。
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() {}".into(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "重载成功");
@@ -363,6 +369,7 @@ fn snapshot_sink_gating_merges_when_slow() {
     }));
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() {}".into(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
@@ -398,6 +405,7 @@ fn snapshot_pushes_control_plane_change_while_paused() {
     h.shared().ack_snapshot(); // 确认初始帧，清在途标记
     h.ctrl(Ctrl::LoadCode {
         code: "function loop() {}".into(),
+        language: Language::Js,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
@@ -407,5 +415,76 @@ fn snapshot_pushes_control_plane_change_while_paused() {
         Some(&true),
         "暂停中热重载后应推送 loaded=true 帧，实际收到 {got:?}"
     );
+    h.join();
+}
+
+// ---------------------------------------------------------------------------
+// A1：语言切换（docs/architecture/03：切换语言重启宿主，已提交 memory 保留）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn language_switch_restarts_host_and_preserves_memory() {
+    let h = spawn(B2_ONE.id);
+    // JS：写 memory 并推进。
+    h.ctrl(Ctrl::LoadCode {
+        code: "Game.memory['n'] = 41;\nfunction loop() { Game.memory['n'] += 1; }".to_string(),
+        language: Language::Js,
+    })
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded, "JS 加载成功");
+    h.ctrl(Ctrl::Step).expect("cmd");
+    wait_status(&h, |s| s.tick >= 1, "JS tick1");
+    assert_eq!(status(&h).language, "js");
+
+    // 切换 Python：宿主重启（会话重建），memory 由主进程持有应保留；
+    // 初始 tick 阶段即可读旧值。
+    h.ctrl(Ctrl::LoadCode {
+        code: "def loop():\n    Game.memory['n'] = Game.memory['n'] + 1\n    Game.log('py n', Game.memory['n'])\n".to_string(),
+        language: Language::Py,
+    })
+    .expect("cmd");
+    wait_status(
+        &h,
+        |s| s.loaded && s.language == "py",
+        "PY 加载成功且语言切换",
+    );
+    h.ctrl(Ctrl::Step).expect("cmd");
+    wait_status(&h, |s| s.tick >= 2, "PY tick2");
+    // 日志面读回 n=43（41 + JS 一次 + PY 一次）：已提交 memory 跨语言保留。
+    let mut found = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let page = h.shared().logs_pull(0, 64);
+        if let Some(ev) = page.events.iter().find(|e| {
+            e.payload
+                .get("line")
+                .and_then(|l| l.as_str())
+                .unwrap_or("")
+                .starts_with("py n")
+        }) {
+            found = Some(
+                ev.payload
+                    .get("line")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        found.as_deref(),
+        Some("py n 43.0"),
+        "memory 跨语言保留：{found:?}"
+    );
+    // 回 JS：再次切换同样成立。
+    h.ctrl(Ctrl::LoadCode {
+        code: "function loop() { Game.log('js n', Game.memory['n']); }".to_string(),
+        language: Language::Js,
+    })
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded && s.language == "js", "切回 JS");
     h.join();
 }

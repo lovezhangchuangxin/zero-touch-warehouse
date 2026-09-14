@@ -6,8 +6,10 @@ import { DEMO_SCRIPTS } from "../scripts";
 
 // 代码输入（B2 为纯 textarea；Monaco / CodeMirror 选型属后续里程碑）。
 // “保存并重载”= 热重载：当前 tick 结束后暂停 → 保存即重建执行环境
-// （docs/architecture/05 §代码编辑器）。
+// （docs/architecture/05 §代码编辑器）。语言切换走宿主重启（docs 03：
+// 同一存档同一时间只运行一种语言），已提交 Game.memory 保留。
 const local = ref(store.code);
+const langSel = ref(store.language);
 const demoSel = ref("");
 const busy = ref(false);
 
@@ -17,7 +19,8 @@ async function save() {
   saveError.value = "";
   try {
     store.code = local.value;
-    await api.hotReload(local.value);
+    store.language = langSel.value;
+    await api.hotReload(local.value, langSel.value);
   } catch (e) {
     saveError.value = `重载失败：${String(e)}`;
   } finally {
@@ -28,6 +31,7 @@ function loadDemo() {
   const d = DEMO_SCRIPTS.find((s) => s.id === demoSel.value);
   if (d) {
     local.value = d.code;
+    langSel.value = d.language;
     demoSel.value = "";
   }
 }
@@ -40,6 +44,10 @@ function loadDemo() {
         <option value="" disabled>载入示例…</option>
         <option v-for="d in DEMO_SCRIPTS" :key="d.id" :value="d.id">{{ d.name }}</option>
       </select>
+      <select v-model="langSel" aria-label="语言">
+        <option value="js">JavaScript</option>
+        <option value="py">Python</option>
+      </select>
       <button :disabled="busy" @click="save">保存并重载</button>
       <span class="dim hint">重载会暂停世界并重建执行环境；Game.memory 保留，普通全局变量重置</span>
       <span v-if="saveError" class="warn">{{ saveError }}</span>
@@ -47,8 +55,8 @@ function loadDemo() {
     <textarea
       v-model="local"
       spellcheck="false"
+      :placeholder="langSel === 'py' ? 'def loop(): …' : 'function loop() { … }'"
       class="code mono"
-      placeholder="function loop() { … }"
     />
   </section>
 </template>

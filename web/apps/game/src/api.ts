@@ -39,8 +39,8 @@ export function step(): Promise<void> {
   return invoke("step");
 }
 
-export function hotReload(code: string): Promise<void> {
-  return invoke("hot_reload", { code });
+export function hotReload(code: string, language: string): Promise<void> {
+  return invoke("hot_reload", { code, language });
 }
 
 export function resetScenario(scenario: string): Promise<void> {
