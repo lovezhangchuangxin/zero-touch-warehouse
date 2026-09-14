@@ -427,7 +427,8 @@ def _mem_proxy(node, kind):
 
 class MemoryMap(MutableMapping):
     """受控映射：每一次读写都是一次同步 IPC（与 JS 版一致，无缓冲）。
-    键一律转字符串键；相等性按（会话代次, 节点号）判定（docs 06）。"""
+    键一律转字符串键；相等性按（会话代次, 节点号）判定（docs 06）。
+    操作面以文档为准——变更型 ABC 混入（pop/update/clear 等）显式拒绝。"""
 
     def __init__(self, gen, node):
         self._gen = gen
@@ -439,6 +440,25 @@ class MemoryMap(MutableMapping):
             and other._gen == self._gen
             and other._node == self._node
         )
+
+    # docs 06：支持的操作由文档明确列出，不承诺全部原生容器方法。ABC
+    # 混入的变更型方法会绕过文档面"意外可用"（今天能用、文档没写、
+    # 绑定层一重构即断），显式拒绝并给可读指引；只读协议方法
+    #（get/keys/items/values/in）是容器协议的自然组成，保留。
+    def pop(self, *_args):
+        raise GameError("INVALID_OPERATION", "受控映射不支持 pop（删除请用 del m[key]）")
+
+    def popitem(self):
+        raise GameError("INVALID_OPERATION", "受控映射不支持 popitem（删除请用 del m[key]）")
+
+    def clear(self):
+        raise GameError("INVALID_OPERATION", "受控映射不支持 clear（逐键删除请用 del m[key]）")
+
+    def update(self, *_args, **_kwargs):
+        raise GameError("INVALID_OPERATION", "受控映射不支持 update（写入请用 m[key] = value）")
+
+    def setdefault(self, *_args):
+        raise GameError("INVALID_OPERATION", "受控映射不支持 setdefault（读取请用 m[key] 或 in）")
 
     def __getitem__(self, key):
         r = _ipc("mem.map_get", {"gen": self._gen, "node": self._node, "key": str(key)})
@@ -521,6 +541,12 @@ class MemoryList(MutableSequence):
 
     def insert(self, index, value):
         raise GameError("INVALID_OPERATION", "受控列表不支持 insert（用 append/remove 组合）")
+
+    def pop(self, *_args):
+        raise GameError("INVALID_OPERATION", "受控列表不支持 pop（删除请用 remove(index)）")
+
+    def extend(self, *_args):
+        raise GameError("INVALID_OPERATION", "受控列表不支持 extend（追加请逐个 append）")
 
     def to_list(self):
         return _wire_to_plain(_ipc("mem.to_value", {"gen": self._gen, "node": self._node})["value"])

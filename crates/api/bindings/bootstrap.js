@@ -539,7 +539,10 @@
     },
     get_object_by_id(id) {
       ensureMirror();
-      id = Number(id);
+      // 接受对象或 id（docs 04；与 destroy 同款——Number() 会把视图
+      // 对象转成 NaN，让"传对象"这条文档承诺失效）。
+      id = idOf(id);
+      if (id === null) return null;
       for (const c of [
         [M.robots, robotView], [M.shelves, shelfView], [M.chargers, chargerView],
         [M.docks, dockView], [M.vehicles, vehicleView], [M.ground_boxes, boxView],
@@ -559,13 +562,14 @@
     market: {
       sell_orders() { ensureMirror(); return M.sell_orders.map(orderView); },
       buy_orders() { ensureMirror(); return M.buy_orders.map(orderView); },
+      // 接受对象或 id（docs 04——与 destroy 同款，勿回退到 Number()）。
       take(orderId) {
-        const res = rt("market.take", { order_id: Number(orderId) });
+        const res = rt("market.take", { order_id: idOf(orderId) });
         if (res.delta) applyDelta(res.delta);
         return res.code;
       },
       cancel(orderId) {
-        const res = rt("market.cancel", { order_id: Number(orderId) });
+        const res = rt("market.cancel", { order_id: idOf(orderId) });
         if (res.delta) applyDelta(res.delta);
         return res.code;
       },

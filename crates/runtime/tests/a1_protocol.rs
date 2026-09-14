@@ -254,3 +254,46 @@ fn request_limit_pauses_execution() {
     assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Script));
     assert_eq!(s.fault.as_ref().unwrap().code, "REQUEST_LIMIT");
 }
+
+#[test]
+fn request_limit_fault_path_reports_limit_code() {
+    // 触限后脚本不捕获绑定层抛错：错误冒泡成 Fault 帧（宿主只报异常名
+    // 不携带错误码），结局仍须改判 REQUEST_LIMIT——与捕获后正常完成的
+    // 路径一致（docs 03：触限即暂停报超限，脚本级可恢复）。
+    let mut cfg = SessionConfig::new(host_bin());
+    cfg.request_limit_per_exec = 3;
+    let mut s = Session::new(cfg, demo_world());
+    assert!(s.load_code(&fixture("request_limit_fault.js")).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Fault(FaultClass::Script));
+    let rec = s.fault.as_ref().unwrap();
+    assert_eq!(rec.code, "REQUEST_LIMIT", "Fault 终态同款改判：{rec:?}");
+    assert!(rec.message.contains("上限"), "保留超限语义：{rec:?}");
+    assert!(
+        rec.message.contains("原故障"),
+        "原始错误留在 message：{rec:?}"
+    );
+}
+
+#[test]
+fn market_accepts_objects_per_docs() {
+    // docs 04：凡接受 id 的参数同样接受对象本身。JS 侧曾用 Number() 把
+    // 视图对象转成 NaN 而违背该承诺（评审修复，与 destroy 的 idOf 对齐）。
+    let mut s = Session::new(SessionConfig::new(host_bin()), demo_world());
+    assert!(
+        s.load_code(
+            "function loop() {\n  const r = Game.robots()[0];\n  Game.log('by_obj ' + (Game.get_object_by_id(r).id === r.id));\n  Game.market.take(Game.market.sell_orders()[0]);\n}\n"
+        )
+        .ok,
+        "{:?}",
+        s.fault
+    );
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    assert!(
+        s.logs.iter().any(|(_, l)| l == "by_obj true"),
+        "{:?}",
+        s.logs
+    );
+    assert_single_take(&s);
+}

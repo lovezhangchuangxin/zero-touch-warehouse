@@ -1289,6 +1289,25 @@ impl Session {
                             "environment" => FaultClass::Environment,
                             _ => FaultClass::HostTerminated("protocol"),
                         };
+                        // 触限后脚本未捕获绑定层抛错、直接冒泡成 Fault 帧
+                        // 的，结局同样改判为超限暂停——与完成帧路径同款语义
+                        //（docs 03：触限即 REQUEST_LIMIT，脚本级可恢复）。
+                        // 宿主故障帧只报异常名不携带绑定层错误码，改判由
+                        // 主进程执行；原始错误保留在 message 供诊断。
+                        if self.exec_limit_hit && matches!(fc, FaultClass::Script) {
+                            break ExecResult::Faulted {
+                                class: FaultClass::Script,
+                                code: "REQUEST_LIMIT".into(),
+                                message: format!(
+                                    "本执行请求数达到上限 {}（原故障 {code}：{message}）",
+                                    self.cfg.request_limit_per_exec
+                                ),
+                                stack,
+                                stats,
+                                requests_served,
+                                last_request_id,
+                            };
+                        }
                         break ExecResult::Faulted {
                             class: fc,
                             code,
