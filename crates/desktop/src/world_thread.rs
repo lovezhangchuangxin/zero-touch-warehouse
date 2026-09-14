@@ -48,9 +48,9 @@ pub enum Ctrl {
     /// 推进一个完整 tick 后回到暂停。
     Step,
     /// 热重载：编辑代码在当前 tick 结束后暂停，保存即重建执行环境
-    /// （docs/game-design/05 §执行生命周期；宿主进程不重启）。
-    /// 语言与当前不同时先重建会话（= 宿主进程重启；docs/architecture/03
-    /// 执行模型：切换语言重启宿主），已提交 Game.memory 保留。
+    /// （docs/game-design/05 §执行生命周期）。同语言热重载不重启宿主
+    /// 进程；语言与当前不同时先丢弃宿主、换新语言二进制重启
+    /// （docs/architecture/03 执行模型），已提交 Game.memory 保留。
     LoadCode {
         code: String,
         language: crate::hostbin::Language,
@@ -384,9 +384,10 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
             st.running = false;
             st.next_tick_at = None;
             // 语言切换 = 宿主进程重启（docs 03）。Session（世界与受控
-            // memory 树）保留，只换宿主二进制并干净重启：restart_host 在
-            // code=None 时只做 drop_host（清 killed 标记、收尸），随后
-            // load_code 以新 bin spawn——已提交 Game.memory 跨语言保留。
+            // memory 树）保留，只换宿主二进制：drop_host_for_switch 杀掉
+            // 旧宿主并清空待重载代码（不可用 restart_host——它会把旧语言
+            // 代码拿到新宿主上重跑一次 init），随后 load_code 以新 bin
+            // spawn——已提交 Game.memory 跨语言保留。
             if language != st.language {
                 diag_push(
                     shared,
@@ -401,7 +402,7 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
                 st.language = language;
                 st.session.cfg.host_bin = bin_of(st);
                 st.code = None;
-                let _ = st.session.restart_host();
+                st.session.drop_host_for_switch();
                 *shared.host_ctl.lock().expect("host_ctl 锁") = None;
             }
             load_code(st, shared, code);

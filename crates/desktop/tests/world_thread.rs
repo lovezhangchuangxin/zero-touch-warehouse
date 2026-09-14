@@ -488,3 +488,34 @@ fn language_switch_restarts_host_and_preserves_memory() {
     wait_status(&h, |s| s.loaded && s.language == "js", "切回 JS");
     h.join();
 }
+
+/// 切换专用“只丢弃”契约（Session 级）：drop_host_for_switch 不得走
+/// restart_host 路径——后者会把旧代码拿到新宿主重跑一次 init 并计入
+/// host_restarts；已提交 memory 必须保留给新代码。
+#[test]
+fn drop_host_for_switch_never_reruns_old_code() {
+    let bins = ztw_desktop::hostbin::resolve_host_bins();
+    let mut s = ztw_api::harness::Session::new(
+        ztw_api::harness::SessionConfig::new(&bins.js),
+        scenario::build(&B2_ONE),
+    );
+    assert!(
+        s.load_code("Game.memory['n'] = 1;\nfunction loop() {}").ok,
+        "{:?}",
+        s.fault
+    );
+    let restarts = s.stats.host_restarts;
+    s.drop_host_for_switch();
+    assert_eq!(s.stats.host_restarts, restarts, "切换丢弃不是恢复重启路径");
+    assert!(
+        s.load_code("function loop() { Game.log('n', Game.memory['n']); }")
+            .ok,
+        "{:?}",
+        s.fault
+    );
+    s.tick();
+    // memory 保留：旧值 1 对新代码可见（若旧代码被重跑重置也无从分辨，
+    // 上面的 restarts 断言才是“未重跑”的直接证据）。
+    let lines: Vec<String> = s.logs.iter().map(|(_, l)| l.clone()).collect();
+    assert!(lines.iter().any(|l| l == "n 1"), "memory 保留：{lines:?}");
+}

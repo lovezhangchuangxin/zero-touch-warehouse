@@ -520,7 +520,11 @@ impl Session {
                         fault: Some(FaultRecord {
                             class: FaultClass::HostTerminated("spawn"),
                             code: "SPAWN_FAILED".into(),
-                            message: e.to_string(),
+                            message: format!(
+                                "{}（宿主二进制 {}）——先构建对应宿主（cargo build -p ztw-runtime / -p ztw-runtime-py）或设置 ZTW_HOST_BIN / ZTW_HOST_PY_BIN",
+                                e,
+                                self.cfg.host_bin.display()
+                            ),
                             stack: String::new(),
                             tick: self.world.tick,
                             last_request_id: 0,
@@ -770,6 +774,16 @@ impl Session {
             }
         };
         self.load_code(&code)
+    }
+
+    /// 语言切换 / 换宿主二进制专用：只杀宿主进程并清空待重载代码。
+    /// 与 restart_host 的区别：绝不拿旧代码在新宿主上重跑初始化——
+    /// 换语言后旧代码对新宿主是外语，重跑只产出一次注定失败且被吞的
+    /// init。切换后由调用方以新代码 load_code（docs 03：语言切换走宿主
+    /// 重启，已提交 memory 保留）。
+    pub fn drop_host_for_switch(&mut self) {
+        self.drop_host();
+        self.code = None;
     }
 
     /// 主进程主动终止（“终止按钮”路径）：直接杀进程，不经过 Game 队列。
