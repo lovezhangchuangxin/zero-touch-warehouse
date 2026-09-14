@@ -36,8 +36,8 @@
 ## 构建与发布
 
 - CI 矩阵：Windows（msvc、x86_64）与 macOS（arm64、x86_64），从第一天跑通；rquickjs 在 Windows msvc 需要尽早验证构建与测试。
-- 发布产物包含主程序与宿主进程（runtime host）两个二进制，均纳入 Windows 安装包与 macOS 签名公证。
-- CPython 与 quickjs-ng 版本随构建锁定，写入构建元数据与存档兼容信息。
+- 发布产物包含主程序与两个宿主进程二进制（ztw-host-js / ztw-host-py），均纳入 Windows 安装包与 macOS 签名公证。
+- CPython 与 quickjs-ng 版本随构建锁定，写入构建元数据与存档兼容信息。当前钉版：CPython 3.13.15 + python-build-standalone 20260901（install_only 变体，scripts/fetch-python.mjs 校验 sha256）；quickjs-ng 随 rquickjs 0.13。
 
 ## 待定
 

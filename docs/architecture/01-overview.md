@@ -66,6 +66,7 @@ Rust workspace，`sim` 与 `api` 不依赖 Tauri 与 Steam，可独立测试：
 | `crates/model` | 实体、坐标、订单、结果码等纯数据类型 |
 | `crates/sim` | tick 状态机、动作受理与统一结算（语义见 [Tick、动作与电力](../game-design/03-simulation-and-actions.md)）、冲突裁决、市场 |
 | `crates/api` | Game 门面定义、快照视图、受控 memory 操作；绑定、IPC 协议与文档的唯一来源（见 [04](04-api-bindings.md)） |
-| `crates/runtime` | JS / Python 宿主、资源限制、热重载、故障处理；构建为宿主进程二进制（见 [03](03-player-runtime.md)） |
+| `crates/runtime` | JS 宿主（ztw-host-js）：rquickjs、堆限额分配器、中断、热重载、故障处理（见 [03](03-player-runtime.md)） |
+| `crates/runtime-py` | Python 宿主（ztw-host-py）：PyO3 内嵌 vendored CPython、三域配额分配器、中断注入、能力收窄（见 [03](03-player-runtime.md)） |
 | `crates/desktop` | Tauri 组装、宿主进程生命周期管理、Steam adapter、存档 IO |
 | `web/` | Vue + Pixi 前端（见 [05](05-frontend.md)） |

@@ -2,13 +2,16 @@
 
 单机 2D 编程游戏：玩家写代码运营自动化仓库。设计文档见 `docs/`（语义以文档为准）。
 
-## 当前状态：原型 B1（模拟核心补全）
+## 当前状态：原型 A1（完整协议与双语言）
 
-在 A0 地基（独立宿主进程、同步 IPC、失控终止、受控 memory、查询镜像）
-之上补全模拟核心：电力与充电、take / give / pick / drop 与被动转交、
-车辆离场 → 订单完成 → 收款 → 装卸位释放闭环、market.cancel 与最小
-destroy、xoshiro 分流 PRNG（装卸位分配），配齐原型 B 模拟回归清单
-（含 ≤5 台全排列确定性）。无 UI、无 Python、无存档（分别属 B2 / A1 / C）。
+A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D（双平台构建冒烟）
+之上完成 A1：IPC 协议 v2 会话语义（host_epoch / execution_id / request_id
+去重缓存、执行关闭与旧消息拒绝、每执行请求数上限）；Python 宿主
+（PyO3 内嵌 vendored CPython 3.13，三域配额分配器、中断注入、能力收窄）
+与 bootstrap.py 绑定层；双语言 memory 值模型矩阵、1000 次热重载浸泡与
+量测（验收证据见 `records/a1-protocol-playthrough.md` 与
+`records/a1-findings.md`）。桌面/前端可在 JS / Python 间切换试玩。
+无存档（属原型 C）。
 
 ## 布局
 
@@ -16,18 +19,24 @@ destroy、xoshiro 分流 PRNG（装卸位分配），配齐原型 B 模拟回归
 | --- | --- |
 | `crates/model` | 实体、坐标、结果码、memory 线值（纯数据） |
 | `crates/sim` | tick 状态机、六动作受理与三段式结算、市场与车辆生命周期、PRNG |
-| `crates/api` | Game 门面、查询镜像、受控 memory、IPC 协议、绑定层（bootstrap.js）、headless 测试 harness |
+| `crates/api` | Game 门面、查询镜像、受控 memory、IPC 协议、绑定层（bootstrap.js / bootstrap.py）、headless 测试 harness |
 | `crates/runtime` | JS 宿主进程二进制 `ztw-host-js`（rquickjs / quickjs-ng） |
-| `tests/fixtures` | 玩家示例与故障注入脚本 |
+| `crates/runtime-py` | Python 宿主进程二进制 `ztw-host-py`（PyO3 + vendored CPython、配额分配器、能力收窄） |
+| `crates/desktop` | B2 桌面壳（Tauri 2 世界线程）+ 语言切换 |
+| `web/` | pnpm monorepo：Vue 3 + Pixi 8 前端与 game-types 包 |
+| `tests/fixtures` | 玩家示例与故障注入脚本（.js / .py 对照） |
 
 ## 构建与测试
 
 ```sh
-cargo test --workspace          # 全部验收测试（含进程级故障注入）
-cargo test -p ztw-runtime --test a0_measure -- --nocapture   # 量测（写入 records/）
+just python-dist                 # 首次：获取钉版本 python-build-standalone
+                                 # （~25MB；cargo 任何编译都需要它）
+cargo test --workspace           # 全部验收测试（含进程级故障注入与双语言矩阵）
+cargo test -p ztw-runtime-py --test a1_measure -- --nocapture   # Python 量测（写 records/）
 ```
 
-量测与引擎行为记录在 `records/`（本地生成物，不入库；见该目录下引擎结论文件）。
+量测与引擎行为记录在 `records/`（本地生成物不入库；里程碑验收证据
+`git add -f` 单独入库）。双语言结论见 `records/a1-findings.md`。
 
 ## 开发工作流（git hooks 与常用任务）
 
@@ -46,15 +55,17 @@ just hooks                     # 或：sh scripts/install-hooks.sh（无 just �
 - `pre-push`：完整门禁（与 CI 同款）。耗时可观，跳过一次用 `--no-verify`。
 
 hook 只是快速反馈、可被绕过，强制门禁在 CI。常用任务见 `justfile`
-（`just lint` 快检 / `just gate` 完整门禁 / `just dev` 桌面开发模式）。
-pnpm 建议经 corepack 启用，版本由 `web/package.json` 的 `packageManager` 钉死，
-与 CI 一致。
+（`just lint` 快检 / `just gate` 完整门禁 / `just dev` 桌面开发模式 /
+`just python-dist` 获取 Python 发行物）。pnpm 建议经 corepack 启用，
+版本由 `web/package.json` 的 `packageManager` 钉死，与 CI 一致。
 
 ## 已知边界
 
-- 快速引擎结论（中断不可捕获、OOM 可捕获等）见 `records/a0-engine-findings.md`。
+- Python 宿主引擎结论（`_signal` 前置、MemoryError 脚本级、能力收窄坑）
+  见 `records/a1-findings.md`；JS 引擎结论见 `records/a0-engine-findings.md`。
 - 伪造 InternalError 可触发环境重建（误用自伤，非安全边界）。
-- 平台：当前仅 macOS arm64 实测；Windows 构建冒烟属原型 D。
+- 平台：当前仅 macOS arm64 实测；Windows 双平台 CI 自 A1 起常跑，
+  签名公证与 universal 合并属原型 D 收尾。
 - B1 code review 遗留技术债（低危，后续随相关里程碑处理）：take-from-robot
   结算草稿不更新被动方 carry（transferred 封锁使其当前无害）；挂单 qty 无
   上限校验（构造场景限定）；退款加法未统一 saturating；JS pick/drop 缺参
