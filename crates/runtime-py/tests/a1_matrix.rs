@@ -111,3 +111,47 @@ fn py_host_stale_epoch_rejected() {
     assert_eq!(s.fault.as_ref().unwrap().code, "STALE_EPOCH");
     assert!(s.logs.is_empty(), "旧代次消息不得执行");
 }
+
+/// 与 JS 侧 old_execution_request_rejected_as_closed 同款语义：旧执行
+/// 消息以 EXEC_CLOSED 错误结果拒绝——绑定层抛 GameError、未捕获归
+/// 脚本级、宿主存活可恢复（评审跟进：补齐 Python 侧该路径的零覆盖）。
+#[test]
+fn py_host_old_execution_request_rejected_as_closed() {
+    let mut s = Session::new(
+        SessionConfig::new(env!("CARGO_BIN_EXE_ztw-host-py")).with_fault("old_exec_request"),
+        demo_world(),
+    );
+    assert!(
+        s.load_code("def loop():\n    Game.log('hello')\n").ok,
+        "{:?}",
+        s.fault
+    );
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(ztw_api::harness::FaultClass::Script)
+    );
+    let rec = s.fault.as_ref().unwrap();
+    assert!(
+        rec.message.contains("执行已关闭"),
+        "错误链应携带 EXEC_CLOSED 语义：{rec:?}"
+    );
+    // 被拒绝的请求不得执行：日志环为空。
+    assert!(s.logs.is_empty(), "被拒的 log 不应落地：{:?}", s.logs);
+    // 宿主存活（可恢复拒绝，不是协议破坏）；恢复后注入依旧生效、同样被拒。
+    assert!(s.host_alive());
+    assert!(s.resume_after_script_error());
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(ztw_api::harness::FaultClass::Script),
+        "{:?}",
+        s.fault
+    );
+    assert!(
+        s.fault.as_ref().unwrap().message.contains("执行已关闭"),
+        "恢复后同款拒绝：{:?}",
+        s.fault
+    );
+    assert!(s.host_alive());
+}

@@ -15,7 +15,7 @@
 | 重复请求不重复执行 | `a1_protocol::duplicate_request_replays_cached_result_without_reexecution`；Python 侧 `a1_matrix::py_host_duplicate_request_deduped` | 通过：同号同负载重发原结果，扣款恰好一次 |
 | 异负载同号拒绝 | `a1_protocol::duplicate_request_with_different_payload_is_protocol_fault` | 通过：DUP_REQUEST_MISMATCH 终止宿主 |
 | 旧 epoch 拒绝 | `a1_protocol::stale_epoch_request_kills_host`（含跨代次复验）；`a1_matrix::py_host_stale_epoch_rejected` | 通过：STALE_EPOCH，被拒请求不执行 |
-| 已关闭执行拒绝 | `a1_protocol::old_execution_request_rejected_as_closed` | 通过：EXEC_CLOSED 错误结果、不执行、宿主可恢复 |
+| 已关闭执行拒绝 | `a1_protocol::old_execution_request_rejected_as_closed`；Python 侧 `a1_matrix::py_host_old_execution_request_rejected_as_closed`（评审跟进补齐） | 通过：EXEC_CLOSED 错误结果、不执行、宿主可恢复 |
 | 正常完成与强制关闭竞态只结算一次 | `a1_protocol::duplicate_complete_frame_settles_once`、`late_kill_after_complete_does_not_resettle` | 通过：残留完成帧按旧执行丢弃；迟到强杀不回滚不二次结算 |
 | 请求上限暂停 | `a1_protocol::request_limit_pauses_execution` | 通过：REQUEST_LIMIT 脚本级暂停、可恢复、按执行重计 |
 | memory 值模型全量、两语言同结果 | `a1_matrix::memory_value_model_matrix_same_outcome_both_languages` | 通过：日志序列（ok/err:<code>/值）与终态树逐项一致——别名深拷贝、循环拒绝、嵌套写入、失效句柄、字符串数字键插入序（10,1,02,2）、±(2^53-1) 边界、Position/普通数组往返 |
