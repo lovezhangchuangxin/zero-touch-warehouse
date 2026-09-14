@@ -9,7 +9,7 @@ _lib_file = _json.__file__  # 发行物前缀内的真实路径（只读面应�
 
 
 def loop():
-    for name in ("_signal", "_thread", "__main__"):
+    for name in ("_signal", "_thread", "__main__", "_imp"):
         try:
             __import__(name)
             Game.log("import " + name + ": ALLOWED")

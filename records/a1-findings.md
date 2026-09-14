@@ -32,10 +32,12 @@
   copyreg；_typing 随之清除（死条目）；abc 由 numbers 引入
 - heapq/bisect → _heapq/_bisect；cmath/math 为内建模块（经
   BuiltinImporter 解析——meta_path 不能整链替换）
-- 保留在 sys.modules 的机器私有项：_frozen_importlib(_external)、_imp、
-  _codecs、_warnings、**_io**（_bootstrap_external.get_data 读源码时
-  惰性 import _io——洗除会炸掉一切新 import；其文件面由审计钩子以
-  只读 + 前缀内封住）
+- 保留在 sys.modules 的机器私有项（逐项实证后收敛）：**仅 _io 与
+  _warnings**——_io 是 _bootstrap_external.get_data 读源码的惰性硬依赖，
+  _warnings 是 C 层告警路径的取模块入口；frozen importlib 链 / _imp /
+  _codecs 不依赖 sys.modules 条目（import 机器持模块对象引用），且
+  `import _imp` 会开放无审计的原生库加载原语（create_dynamic），一并
+  洗除。_io 的文件面由审计钩子以只读 + 前缀内封住。
 - 刻意排除：itertools / re（不可中断纯 C 入口，靠洗除+finder 双拒）、
   weakref（顶层依赖 sys + itertools，故 functools.singledispatch 受限
   ——触发时得到白名单可读错误）、fractions（依赖 re）、random（独立

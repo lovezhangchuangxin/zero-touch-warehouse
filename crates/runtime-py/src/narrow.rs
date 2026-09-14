@@ -194,20 +194,21 @@ def _ztw_new_builtins():
 # 解释器启动时已加载的 os / io / time / importlib 等一律移除——已加载
 # 模块内部的引用不受影响，只有"按名再导入"会走 finder 被拒。
 # 下划线私有模块不再整类保留（评审发现：import builtins / _thread / _io
-# 可直接取回危险对象、import __main__ 可取回真 builtins 字典），改为
-# 显式最小保留——import 机器（frozen importlib 链、_imp）、编解码
-# （_codecs）与告警机器（_warnings）。_signal 一并移除：C 级 SIGINT
-# 处理器在引导期已注册且不依赖 sys.modules 条目，玩家再 import _signal
-# 只会被 finder 拒绝，无法用 SIG_IGN 拆除看门狗注入（第二层中断保真）。
+# 可直接取回危险对象、import __main__ 可取回真 builtins 字典、import
+# _imp 的 create_dynamic 可无审计加载原生库），改为逐项实证的显式最小
+# 保留（见 _ZTW_KEEP_PRIVATE）。_signal 一并移除：C 级 SIGINT 处理器在
+# 引导期已注册且不依赖 sys.modules 条目，玩家再 import _signal 只会被
+# finder 拒绝，无法用 SIG_IGN 拆除看门狗注入（第二层中断保真）。
 _ZTW_PROTECTED = _ZTW_WHITELIST | {'builtins', '__ztw'}
-_ZTW_KEEP_PRIVATE = frozenset((
-    '_frozen_importlib', '_frozen_importlib_external', '_imp', '_codecs',
-    '_warnings',
-    # _io：import 机器的惰性运行期依赖——_bootstrap_external.get_data
-    # 读源码时 import _io（sys.modules 命中）——不能洗除。玩家由此可达
-    # 的文件面由审计钩子（只读 + 前缀内）封住。
-    '_io',
-))
+# 显式最小保留，逐项实证依据（钉版 3.13.15 逐项踢出后全量探测）：
+# - _io：import 机器的硬需求——_bootstrap_external.get_data 读源码时
+#   惰性 import _io（sys.modules 命中）；其文件面由审计钩子封住。
+# - _warnings：C 层告警路径 PyErr_WarnExplicitEx 经 PyImport_ImportModule
+#   ("_warnings") 取模块，被 finder 拒绝会把告警变成错误。
+# frozen importlib 链 / _imp / _codecs 均不依赖 sys.modules 条目（import
+# 机器持有模块对象引用），且保留会开放危险面——尤其 `import _imp` 的
+# create_dynamic 可加载任意原生库且不经过任何审计事件。
+_ZTW_KEEP_PRIVATE = frozenset(('_io', '_warnings'))
 for _m in [m for m in list(_ztw_sys.modules)
            if m.split('.', 1)[0] not in _ZTW_PROTECTED
            and m.split('.', 1)[0] not in _ZTW_KEEP_PRIVATE]:

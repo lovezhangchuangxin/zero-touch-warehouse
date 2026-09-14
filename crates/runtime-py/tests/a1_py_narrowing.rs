@@ -87,6 +87,9 @@ fn narrowing_hardening_blocks_escape_chains() {
         "import _signal: DENIED",
         "import _thread: DENIED",
         "import __main__: DENIED",
+        // _imp 若保留在 sys.modules，玩家可达无审计的原生库加载原语
+        //（create_dynamic）——收敛决策的锚点。
+        "import _imp: DENIED",
         // _io 是 import 机器惰性依赖（get_data 读源码），保留但文件面封死：
         "import _io: KEPT",
         "_io.read_outside: RuntimeError",
