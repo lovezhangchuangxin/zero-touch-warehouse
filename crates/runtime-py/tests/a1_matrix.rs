@@ -53,6 +53,8 @@ fn memory_value_model_matrix_same_outcome_both_languages() {
     // 关键语义锚点抽查（完整对账见上）。
     for anchor in [
         "err:stale:STALE_MEMORY_REFERENCE",
+        "err:held_stale:STALE_MEMORY_REFERENCE",
+        "held_now 0",
         "err:big_over:INVALID_VALUE",
         "err:nonfinite:INVALID_VALUE",
         "err:cycle:INVALID_VALUE",

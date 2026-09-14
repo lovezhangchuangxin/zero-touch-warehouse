@@ -67,6 +67,11 @@ step("cycle", _cycle)
 Game.memory["pos"] = Game.NORTH
 Game.memory["pos2"] = [3, 4]
 
+# 跨执行句柄：init 顶层持有句柄，提交使代次 +1，loop 中使用必须按
+# STALE_MEMORY_REFERENCE 拒绝（docs 06「提交即重建句柄」——两语言同结果）。
+Game.memory["held"] = {"x": 0}
+held = Game.memory["held"]
+
 import json as _json
 
 
@@ -80,7 +85,13 @@ def _plain(x):
     return x
 
 
+def _held_stale():
+    held["x"] = 1
+
+
 def loop():
+    step("held_stale", _held_stale)
+    Game.log("held_now " + str(_plain(Game.memory["held"]["x"])))
     p = Game.memory["pos"]
     Game.log("pos " + str(_plain(p[0])) + "," + str(_plain(p[1])))
     Game.log("kkeys " + ",".join(Game.memory["k"].keys()))

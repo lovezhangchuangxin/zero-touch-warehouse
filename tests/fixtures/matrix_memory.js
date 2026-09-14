@@ -58,7 +58,16 @@ step("cycle", function () {
 Game.memory["pos"] = Game.NORTH;
 Game.memory["pos2"] = [3, 4];
 
+// 跨执行句柄：init 顶层持有句柄，提交使代次 +1，loop 中使用必须按
+// STALE_MEMORY_REFERENCE 拒绝（docs 06「提交即重建句柄」——两语言同结果）。
+Game.memory["held"] = { x: 0 };
+const held = Game.memory["held"];
+
 function loop() {
+  step("held_stale", function () {
+    held["x"] = 1;
+  });
+  Game.log("held_now " + Game.memory["held"]["x"]);
   Game.log("pos " + Game.memory["pos"][0] + "," + Game.memory["pos"][1]);
   Game.log("kkeys " + Game.memory["k"].keys().join(","));
   Game.log("alias " + Game.memory["alias"].length);

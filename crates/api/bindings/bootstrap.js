@@ -372,8 +372,12 @@
     const key = GEN + ":" + node;
     const hit = handleCache.get(key);
     if (hit !== undefined) return hit;
+    // 句柄钉死创建时的代次：提交后代次 +1，旧句柄按 STALE_MEMORY_REFERENCE
+    // 拒绝（docs 06「提交即重建句柄」，与服务端 check_gen 对齐、Python 侧
+    // 同语义）。handler 若读实时 GEN，服务端代次校验将形同虚设。
+    const gen = GEN;
     const proxy =
-      kind === "map" ? new Proxy({}, mapHandler(node)) : new Proxy({}, listHandler(node));
+      kind === "map" ? new Proxy({}, mapHandler(node, gen)) : new Proxy({}, listHandler(node, gen));
     handleCache.set(key, proxy);
     return proxy;
   }
@@ -382,77 +386,77 @@
   // 否则返回绑定方法——名为 keys/size/to_dict 的数据不会被方法遮蔽。
   const MAP_METHOD_KEYS = new Set(["keys", "size", "to_dict"]);
 
-  function mapHandler(node) {
+  function mapHandler(node, gen) {
     return {
       get(_t, k) {
         if (typeof k === "symbol") return undefined;
         if (MAP_METHOD_KEYS.has(k)) {
-          const probe = rt("mem.map_get", { gen: GEN, node, key: k });
+          const probe = rt("mem.map_get", { gen, node, key: k });
           if (probe.t !== "missing") return readResult(probe);
           if (k === "keys") {
-            return function () { return rt("mem.map_keys", { gen: GEN, node }).keys; };
+            return function () { return rt("mem.map_keys", { gen, node }).keys; };
           }
           if (k === "to_dict") {
-            return function () { return wireToPlain(rt("mem.to_value", { gen: GEN, node }).value); };
+            return function () { return wireToPlain(rt("mem.to_value", { gen, node }).value); };
           }
-          return rt("mem.map_size", { gen: GEN, node }).value;
+          return rt("mem.map_size", { gen, node }).value;
         }
-        const r = rt("mem.map_get", { gen: GEN, node, key: String(k) });
+        const r = rt("mem.map_get", { gen, node, key: String(k) });
         return readResult(r);
       },
       set(_t, k, v) {
         if (typeof k === "symbol") throw ipcError("INVALID_VALUE", "memory 不支持 symbol 键");
-        rtVoid("mem.map_set", { gen: GEN, node, key: String(k), value: toWire(v) });
+        rtVoid("mem.map_set", { gen, node, key: String(k), value: toWire(v) });
         return true;
       },
       deleteProperty(_t, k) {
         if (typeof k === "symbol") return false;
-        rtVoid("mem.map_delete", { gen: GEN, node, key: String(k) });
+        rtVoid("mem.map_delete", { gen, node, key: String(k) });
         return true;
       },
       has(_t, k) {
         if (typeof k === "symbol") return false;
-        return rt("mem.map_has", { gen: GEN, node, key: String(k) }).value === true;
+        return rt("mem.map_has", { gen, node, key: String(k) }).value === true;
       },
       ownKeys() {
-        return rt("mem.map_keys", { gen: GEN, node }).keys;
+        return rt("mem.map_keys", { gen, node }).keys;
       },
       getOwnPropertyDescriptor(_t, k) {
         if (typeof k === "symbol") return undefined;
-        const r = rt("mem.map_get", { gen: GEN, node, key: String(k) });
+        const r = rt("mem.map_get", { gen, node, key: String(k) });
         if (r.t === "missing") return undefined;
         return { value: readResult(r), enumerable: true, writable: true, configurable: true };
       },
     };
   }
 
-  function listHandler(node) {
+  function listHandler(node, gen) {
     return {
       get(_t, k) {
         if (typeof k === "symbol") {
-          if (k === Symbol.iterator) return listIterator(node);
+          if (k === Symbol.iterator) return listIterator(node, gen);
           return undefined;
         }
-        if (k === "length") return rt("mem.list_size", { gen: GEN, node }).value;
+        if (k === "length") return rt("mem.list_size", { gen, node }).value;
         if (k === "push") {
           return function (...items) {
-            for (const it of items) rtVoid("mem.list_append", { gen: GEN, node, value: toWire(it) });
-            return rt("mem.list_size", { gen: GEN, node }).value;
+            for (const it of items) rtVoid("mem.list_append", { gen, node, value: toWire(it) });
+            return rt("mem.list_size", { gen, node }).value;
           };
         }
         if (k === "to_list") {
-          return function () { return wireToPlain(rt("mem.to_value", { gen: GEN, node }).value); };
+          return function () { return wireToPlain(rt("mem.to_value", { gen, node }).value); };
         }
         if (k === "remove") {
           return function (i) {
             if (!Number.isInteger(i) || i < 0) {
               throw ipcError("INVALID_ARGUMENT", "remove 需要非负整数下标");
             }
-            rtVoid("mem.list_remove", { gen: GEN, node, index: i });
+            rtVoid("mem.list_remove", { gen, node, index: i });
           };
         }
         if (/^(0|[1-9][0-9]*)$/.test(k)) {
-          return readResult(rt("mem.list_get", { gen: GEN, node, index: parseInt(k, 10) }));
+          return readResult(rt("mem.list_get", { gen, node, index: parseInt(k, 10) }));
         }
         return undefined;
       },
@@ -460,12 +464,12 @@
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) {
           throw ipcError("INVALID_VALUE", "受控列表只支持数字下标写入");
         }
-        rtVoid("mem.list_set", { gen: GEN, node, index: parseInt(k, 10), value: toWire(v) });
+        rtVoid("mem.list_set", { gen, node, index: parseInt(k, 10), value: toWire(v) });
         return true;
       },
       has(_t, k) {
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) return false;
-        return rt("mem.list_get", { gen: GEN, node, index: parseInt(k, 10) }).t !== "missing";
+        return rt("mem.list_get", { gen, node, index: parseInt(k, 10) }).t !== "missing";
       },
       deleteProperty(_t, k) {
         // 删除列表元素请用 remove(i)；下标删除不静默成功。
@@ -475,23 +479,23 @@
         return false;
       },
       ownKeys() {
-        const n = rt("mem.list_size", { gen: GEN, node }).value;
+        const n = rt("mem.list_size", { gen, node }).value;
         const keys = [];
         for (let i = 0; i < n; i++) keys.push(String(i));
         return keys;
       },
       getOwnPropertyDescriptor(_t, k) {
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) return undefined;
-        const r = rt("mem.list_get", { gen: GEN, node, index: parseInt(k, 10) });
+        const r = rt("mem.list_get", { gen, node, index: parseInt(k, 10) });
         if (r.t === "missing") return undefined;
         return { value: readResult(r), enumerable: true, writable: true, configurable: true };
       },
     };
   }
 
-  function listIterator(node) {
+  function listIterator(node, gen) {
     return function () {
-      const entries = rt("mem.list_entries", { gen: GEN, node }).entries;
+      const entries = rt("mem.list_entries", { gen, node }).entries;
       const arr = entries.map(readResult);
       let i = 0;
       return {
