@@ -9,6 +9,7 @@ use ztw_model::{
     VehicleKind, codes,
 };
 
+use crate::MarketState;
 use crate::intent::{Intent, LastResult, TargetRef};
 use crate::rng::Xoshiro256;
 
@@ -39,10 +40,12 @@ pub struct World {
     pub docks: BTreeMap<Id, Dock>,
     pub vehicles: BTreeMap<Id, Vehicle>,
     pub ground_boxes: BTreeMap<Id, GroundBox>,
-    /// 市场挂单（固定挂单；刷新与价格波动属里程碑 3）。
+    /// 市场挂单（固定挂单场景由构造器放入；市场启用后由生成器刷新维护）。
     pub listings: BTreeMap<Id, Order>,
     /// 已接未完成订单。
     pub my_orders: BTreeMap<Id, Order>,
+    /// 市场生成器状态（None = 固定挂单场景，B2 验收锚；启用见 with_market）。
+    pub market: Option<MarketState>,
     pub(crate) arrivals: Vec<PendingArrival>,
     /// 本 tick 已受理意图。
     pub(crate) intents: Vec<Intent>,
@@ -70,6 +73,7 @@ impl World {
             ground_boxes: BTreeMap::new(),
             listings: BTreeMap::new(),
             my_orders: BTreeMap::new(),
+            market: None,
             arrivals: Vec::new(),
             intents: Vec::new(),
             last_results: BTreeMap::new(),
@@ -328,7 +332,7 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
-    // 阶段 1：tick 边界事件（车辆到场；市场刷新属里程碑 3）
+    // 阶段 1：tick 边界事件（车辆到场、市场刷新；docs/architecture/02）
     // -----------------------------------------------------------------------
 
     pub fn boundary_events(&mut self) {
@@ -345,6 +349,9 @@ impl World {
         for order_id in due {
             self.spawn_vehicle(order_id);
         }
+        // 市场刷新（每 tick 边界调用一次的契约由 Session.tick / 测试循环维护；
+        // 价格演化与板面刷新见 gen.rs）。
+        self.market_tick();
     }
 
     fn spawn_vehicle(&mut self, order_id: Id) {
@@ -434,6 +441,20 @@ impl World {
         mix(self.map_h as u64, &mut h);
         for w in self.rng_dock.state_words() {
             mix(w, &mut h);
+        }
+        // 市场生成器状态（None 记 0）：基准价与 "market" 流都影响后续行为。
+        match &self.market {
+            Some(m) => {
+                mix(1, &mut h);
+                for w in m.rng.state_words() {
+                    mix(w, &mut h);
+                }
+                for (name, price) in &m.prices {
+                    mix_bytes(name, &mut h);
+                    mix(*price as u64, &mut h);
+                }
+            }
+            None => mix(0, &mut h),
         }
         for p in &self.walls {
             mix(p.x as u64, &mut h);

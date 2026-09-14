@@ -32,6 +32,9 @@ pub struct ScenarioSpec {
     pub docks: &'static [DockSpec],
     /// (side, goods, qty, unit_price_milli)。
     pub listings: &'static [(OrderSide, &'static str, u32, i64)],
+    /// 启用市场生成器（docs/game-design/09）：基准价随机游走 + 板面刷新；
+    /// false = 固定挂单（B2 验收锚，挂单吃光不补）。
+    pub market: bool,
 }
 
 /// 北墙缺口（装卸位锚点格不铺墙瓦；第二格在库内，本来就不是墙）。
@@ -81,6 +84,7 @@ pub static B2_ONE: ScenarioSpec = ScenarioSpec {
         (OrderSide::Sell, "battery", 1, 12_000),
         (OrderSide::Buy, "battery", 1, 18_000),
     ],
+    market: false,
 };
 
 /// 五台机器人：任务分配与交通规划改变吞吐的对比配置（同一地图）。
@@ -106,6 +110,7 @@ pub static B2_FIVE: ScenarioSpec = ScenarioSpec {
         (OrderSide::Sell, "battery", 1, 12_000),
         (OrderSide::Buy, "battery", 1, 18_000),
     ],
+    market: false,
 };
 
 pub static SCENARIOS: [&ScenarioSpec; 2] = [&B2_ONE, &B2_FIVE];
@@ -135,6 +140,9 @@ pub fn build(spec: &ScenarioSpec) -> World {
     }
     for &(side, goods, qty, price) in spec.listings {
         w.add_listing(side, goods, qty, price);
+    }
+    if spec.market {
+        w = w.with_market();
     }
     w
 }
@@ -246,6 +254,26 @@ mod tests {
             let b = build(spec);
             assert_eq!(a.state_hash(), b.state_hash());
         }
+    }
+
+    /// B2 场景冻结锚：市场生成器合入后，固定挂单场景的初始哈希不得漂移
+    /// （five_contrast 的验收基线——tick 81 / 六单完成——依赖板面不变）。
+    /// 哈希值随 state_hash 覆盖面演进时须有意更新并复核 B2 验收记录。
+    #[test]
+    fn b2_initial_hashes_are_frozen() {
+        assert_eq!(build(&B2_ONE).state_hash(), 0x1715_4103_b28b_08e9);
+        assert_eq!(build(&B2_FIVE).state_hash(), 0x3803_4631_d84b_1230);
+    }
+
+    /// B2 场景不启用市场：固定挂单长期不变（吃光不补、无价格演化）。
+    #[test]
+    fn b2_fixed_listings_do_not_refresh() {
+        let mut w = build(&B2_ONE);
+        for _ in 0..100 {
+            w.boundary_events();
+            w.end_tick();
+        }
+        assert_eq!(w.listings.len(), 6, "固定挂单不增不减");
     }
 
     #[test]
