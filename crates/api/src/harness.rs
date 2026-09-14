@@ -1091,8 +1091,9 @@ impl Session {
                             // 新请求。达到每执行请求数上限即暂停报错
                             // （docs 03），此后应答错误而不执行，直到
                             // 宿主自行走到终态帧。拒绝结果同样入缓存
-                            // （条目与字节双上界，见 dedup_put）：重发
-                            // 被拒请求得到同一拒绝（幂等）。
+                            // （条目与字节双上界，见 dedup_put）：预算
+                            // 内重发被拒请求得到同一拒绝（幂等）；预算
+                            // 耗尽后未缓存的拒绝号按协议故障降级。
                             if self.exec_new_requests >= self.cfg.request_limit_per_exec {
                                 self.exec_limit_hit = true;
                                 let reply = err_result(
@@ -1102,7 +1103,7 @@ impl Session {
                                         self.cfg.request_limit_per_exec
                                     ),
                                 );
-                                self.dedup_put(request_id, fingerprint, reply.clone());
+                                self.dedup_put(request_id, &fingerprint, &reply);
                                 send_reply!(request_id, reply);
                                 continue;
                             }
@@ -1115,7 +1116,7 @@ impl Session {
                                 .push(t0.elapsed().as_micros().max(1) as u64);
                             requests_served += 1;
                             self.exec_new_requests += 1;
-                            self.dedup_put(request_id, fingerprint, reply.clone());
+                            self.dedup_put(request_id, &fingerprint, &reply);
                             send_reply!(request_id, reply);
                         } else if request_id <= self.exec_seen_request_id {
                             // 重复请求号：同负载返回原结果、不重复执行；
@@ -1415,16 +1416,22 @@ impl Session {
     /// （dedup_cache_bytes）双上界。字节预算耗尽后跳过缓存——请求本身
     /// 照常执行并应答，此后该号重发无缓存可回放，按既有
     /// DUP_REQUEST_MISMATCH 协议故障降级（docs 03 已文档化的可接受
-    /// 角落），主进程不随请求风暴无界堆积镜像级结果。
-    fn dedup_put(&mut self, request_id: u64, fingerprint: String, reply: String) {
+    /// 角落），主进程不随请求风暴无界堆积镜像级结果。收 &str、命中
+    /// 才克隆：跳过路径恰是 MB 级镜像回复的风暴场景，不做无谓拷贝。
+    fn dedup_put(&mut self, request_id: u64, fingerprint: &str, reply: &str) {
         if self.exec_dedup.len() >= self.cfg.request_limit_per_exec as usize + 1024 {
             return;
         }
-        if self.exec_dedup_bytes + fingerprint.len() + reply.len() > self.cfg.dedup_cache_bytes {
+        let bytes = self
+            .exec_dedup_bytes
+            .saturating_add(fingerprint.len())
+            .saturating_add(reply.len());
+        if bytes > self.cfg.dedup_cache_bytes {
             return;
         }
-        self.exec_dedup_bytes += fingerprint.len() + reply.len();
-        self.exec_dedup.insert(request_id, (fingerprint, reply));
+        self.exec_dedup_bytes = bytes;
+        self.exec_dedup
+            .insert(request_id, (fingerprint.to_string(), reply.to_string()));
     }
 
     fn memory_generation(&self) -> u64 {

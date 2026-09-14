@@ -16,11 +16,11 @@
 //!   变更型调用与 memory 读写走同步 IPC。
 //! - 能力收窄见 narrow.rs（__builtins__ / meta_path 白名单 + audit hook）。
 //!
-//! 故障注入（ZTW_FAULT，与 ztw-host-js 同一套）：abort_init_after_mem、
+//! 故障注入（ZTW_FAULT，除注明外与 ztw-host-js 同一套）：abort_init_after_mem、
 //! abort_after_reply:<op>、abort_before_send:<op>、abort_after_send、
 //! dup_request:<n>、dup_request_corrupt:<n>、dup_complete、
 //! old_exec_request、stale_epoch、hang_exec、skip_delta_replay、
-//! oversize_frame。
+//! oversize_frame（old_exec_request_first 仅 JS 侧）。
 
 mod narrow;
 mod py_alloc;

@@ -104,10 +104,20 @@ fn exec_closed_rejected_request_keeps_reconciliation() {
         "{:?}",
         s.logs
     );
-    // 宿主存活，下一 tick 同款路径继续正常（注入按执行重置）。
+    // 宿主存活，下一 tick 同款路径继续正常（注入按执行重置：闸门随
+    // 新 Exec 帧复位，首请求再次被改写为旧执行号拒绝）。
     assert!(s.host_alive());
     let out = s.tick();
     assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    // 两 tick 各拒一条首请求、各落两条后续日志：恰好 4 条，被拒的
+    // "first-rejected" 从不落地。闸门复位失守（改为一次性全局）则
+    // tick2 首请求正常执行，条数变 5——此断言钉死复位语义。
+    assert_eq!(s.logs.len(), 4, "每 tick 恰两条后续日志：{:?}", s.logs);
+    assert!(
+        !s.logs.iter().any(|(_, l)| l == "first-rejected"),
+        "被拒请求永不落地：{:?}",
+        s.logs
+    );
 }
 
 #[test]
