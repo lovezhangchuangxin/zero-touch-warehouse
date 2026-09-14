@@ -49,6 +49,11 @@ pub struct SessionConfig {
     /// 每执行请求数上限：结果去重缓存的容量边界；达到上限暂停报错
     /// （docs/architecture/03 IPC 提交协议）。
     pub request_limit_per_exec: u64,
+    /// 每执行去重缓存的字节上界（指纹 + 原结果累计，默认 64MB）。
+    /// 耗尽后跳过缓存新条目——请求照常执行并应答，该号重发因无缓存
+    /// 可回放按既有 DUP_REQUEST_MISMATCH 协议故障处理（docs 03：主
+    /// 进程结果构造受字节数上界约束，不得在请求风暴下无界堆积）。
+    pub dedup_cache_bytes: usize,
     /// 追加环境变量（故障注入经 ZTW_FAULT 传递给宿主）。
     pub env: Vec<(String, String)>,
 }
@@ -69,6 +74,7 @@ impl SessionConfig {
             heap_limit: 256 * 1024 * 1024,
             stack_limit: 1024 * 1024,
             request_limit_per_exec: 50_000,
+            dedup_cache_bytes: 64 * 1024 * 1024,
             env: Vec::new(),
         }
     }
@@ -403,8 +409,14 @@ pub struct Session {
     execution_id: u64,
     last_request_id: u64,
     /// 当前执行的去重缓存：request_id →（op+payload 指纹, 原结果）。
-    /// 重复请求号同负载返回原结果、异负载协议故障；缓存随执行清空。
+    /// 重复请求号同负载返回原结果、异负载协议故障；缓存随执行清空，
+    /// 容量受条目数与字节（exec_dedup_bytes ↔ cfg.dedup_cache_bytes）
+    /// 双上界约束。
     exec_dedup: std::collections::HashMap<u64, (String, String)>,
+    /// 本执行去重缓存累计字节（指纹 + 结果），随 exec_dedup 在执行
+    /// 入口归零；达到 cfg.dedup_cache_bytes 后跳过缓存新条目——该号
+    /// 重发走既有 DUP_REQUEST_MISMATCH 协议故障（降级语义见 dedup_put）。
+    exec_dedup_bytes: usize,
     /// 本执行已受理的新请求数（去重重发不计数）。
     exec_new_requests: u64,
     /// 本执行是否已触及请求上限（结局改判 REQUEST_LIMIT，见 run_exec）。
@@ -444,6 +456,7 @@ impl Session {
             execution_id: 0,
             last_request_id: 0,
             exec_dedup: std::collections::HashMap::new(),
+            exec_dedup_bytes: 0,
             exec_new_requests: 0,
             exec_limit_hit: false,
             exec_seen_request_id: 0,
@@ -872,6 +885,7 @@ impl Session {
         // 保存在当前执行内，不跨执行）。已见号不重置：请求号跨执行
         // 单调，完成帧引用的是进程内绝对号。
         self.exec_dedup.clear();
+        self.exec_dedup_bytes = 0;
         self.exec_new_requests = 0;
         self.exec_limit_hit = false;
         // 看门狗：预算 + 宽限期后直接终止宿主（独立线程，不经 Game 队列）。
@@ -1074,10 +1088,11 @@ impl Session {
                         if request_id == self.exec_seen_request_id + 1 {
                             // 新请求（无论受理还是拒绝，都已“见到”）。
                             self.exec_seen_request_id = request_id;
-                            // 新请求。结果缓存受每执行请求数上限约束，
-                            // 达到上限暂停报错（docs 03）；此后应答错误而
-                            // 不执行，直到宿主自行走到终态帧。拒绝结果同样
-                            // 入缓存：重发被拒请求得到同一拒绝（幂等）。
+                            // 新请求。达到每执行请求数上限即暂停报错
+                            // （docs 03），此后应答错误而不执行，直到
+                            // 宿主自行走到终态帧。拒绝结果同样入缓存
+                            // （条目与字节双上界，见 dedup_put）：重发
+                            // 被拒请求得到同一拒绝（幂等）。
                             if self.exec_new_requests >= self.cfg.request_limit_per_exec {
                                 self.exec_limit_hit = true;
                                 let reply = err_result(
@@ -1087,12 +1102,7 @@ impl Session {
                                         self.cfg.request_limit_per_exec
                                     ),
                                 );
-                                if self.exec_dedup.len()
-                                    < self.cfg.request_limit_per_exec as usize + 1024
-                                {
-                                    self.exec_dedup
-                                        .insert(request_id, (fingerprint, reply.clone()));
-                                }
+                                self.dedup_put(request_id, fingerprint, reply.clone());
                                 send_reply!(request_id, reply);
                                 continue;
                             }
@@ -1105,8 +1115,7 @@ impl Session {
                                 .push(t0.elapsed().as_micros().max(1) as u64);
                             requests_served += 1;
                             self.exec_new_requests += 1;
-                            self.exec_dedup
-                                .insert(request_id, (fingerprint, reply.clone()));
+                            self.dedup_put(request_id, fingerprint, reply.clone());
                             send_reply!(request_id, reply);
                         } else if request_id <= self.exec_seen_request_id {
                             // 重复请求号：同负载返回原结果、不重复执行；
@@ -1400,6 +1409,22 @@ impl Session {
             self.host_rx = Some(rx);
         }
         result
+    }
+
+    /// 去重缓存写入：条目（request_limit_per_exec + 1024）与字节
+    /// （dedup_cache_bytes）双上界。字节预算耗尽后跳过缓存——请求本身
+    /// 照常执行并应答，此后该号重发无缓存可回放，按既有
+    /// DUP_REQUEST_MISMATCH 协议故障降级（docs 03 已文档化的可接受
+    /// 角落），主进程不随请求风暴无界堆积镜像级结果。
+    fn dedup_put(&mut self, request_id: u64, fingerprint: String, reply: String) {
+        if self.exec_dedup.len() >= self.cfg.request_limit_per_exec as usize + 1024 {
+            return;
+        }
+        if self.exec_dedup_bytes + fingerprint.len() + reply.len() > self.cfg.dedup_cache_bytes {
+            return;
+        }
+        self.exec_dedup_bytes += fingerprint.len() + reply.len();
+        self.exec_dedup.insert(request_id, (fingerprint, reply));
     }
 
     fn memory_generation(&self) -> u64 {

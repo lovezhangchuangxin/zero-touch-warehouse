@@ -307,6 +307,55 @@ fn request_limit_fault_path_reports_limit_code() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 去重缓存字节上界：预算内透明回放；耗尽后降级为 DUP_REQUEST_MISMATCH
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dedup_cache_within_byte_budget_still_replays() {
+    // 显式小预算（足以容纳本执行全部条目）：重放行为与默认配置一致，
+    // 字节上界对预算内的去重透明。
+    let mut cfg = SessionConfig::new(host_bin());
+    cfg.dedup_cache_bytes = 4096;
+    let mut s = Session::new(cfg.with_fault("dup_request:1"), demo_world());
+    assert!(s.load_code(&fixture("dup_log.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Ok,
+        "预算内重发透明回放：{:?}",
+        s.fault
+    );
+    assert_eq!(s.logs.len(), 1, "不重复执行：{:?}", s.logs);
+}
+
+#[test]
+fn dedup_cache_byte_exhaustion_degrades_to_dup_mismatch() {
+    // 字节预算远小于单条超长日志的指纹+结果：不入缓存，请求本身照常
+    // 执行并应答；注入的重发无缓存可回放 → DUP_REQUEST_MISMATCH 终止
+    // 宿主。主进程持有世界与已提交 memory，须以协议故障优雅降级，
+    // 而非随请求风暴无界堆积镜像级结果（docs 03：结果构造受字节上界）。
+    let mut cfg = SessionConfig::new(host_bin());
+    cfg.dedup_cache_bytes = 512;
+    let mut s = Session::new(cfg.with_fault("dup_request:1"), demo_world());
+    assert!(s.load_code(&fixture("dup_big_log.js")).ok);
+    let out = s.tick();
+    assert_eq!(
+        out.kind,
+        OutcomeKind::Fault(FaultClass::HostTerminated("protocol"))
+    );
+    let rec = s.fault.as_ref().unwrap();
+    assert_eq!(rec.code, "DUP_REQUEST_MISMATCH", "{rec:?}");
+    assert!(
+        rec.message.contains("不在本执行结果缓存内"),
+        "缓存缺失路径：{rec:?}"
+    );
+    assert!(!s.host_alive());
+    // 未缓存 ≠ 未执行：原请求恰好落地一次（超长日志本身被受理）。
+    assert_eq!(s.logs.len(), 1, "{:?}", s.logs);
+    assert_eq!(s.logs[0].1.len(), 1600);
+}
+
 #[test]
 fn market_accepts_objects_per_docs() {
     // docs 04：凡接受 id 的参数同样接受对象本身。JS 侧曾用 Number() 把
