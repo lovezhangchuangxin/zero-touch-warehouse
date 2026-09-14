@@ -12,3 +12,7 @@ pub mod protocol;
 /// 宿主侧 Game 绑定（bootstrap.js）。以源码文本内嵌，由 runtime crate
 /// 在执行环境重建后求值；它属于绑定层，因此以本 crate 为唯一出处。
 pub const BOOTSTRAP_JS: &str = include_str!("../bindings/bootstrap.js");
+
+/// 宿主侧 Game 绑定（bootstrap.py，Python 版）。语义逐项对照
+/// bootstrap.js；人工同步点由双语言矩阵测试锚定（A1）。
+pub const BOOTSTRAP_PY: &str = include_str!("../bindings/bootstrap.py");
