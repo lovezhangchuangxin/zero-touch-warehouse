@@ -128,3 +128,37 @@ fn forged_interrupt_and_memory_error_classification() {
     );
     assert!(!rec.message.contains("配额分配器"), "{rec:?}");
 }
+
+#[test]
+fn delta_replay_failure_rebuilds_mirror() {
+    // skip_delta_replay 注入经绑定层 setter 置位（命名空间隔离后玩家 ns
+    // 的同名变量不再生效）：take 增量被丢弃 → 下一次查询经 mirror.fetch
+    // 整体重建，结果与主进程一致。与 JS 侧 a0_boundary 同款断言锚点。
+    let cfg = SessionConfig::new(host_bin()).with_fault("skip_delta_replay");
+    let mut s = Session::new(cfg, demo_world());
+    let code = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/take_first_query.py"
+    ))
+    .expect("fixture 存在");
+    assert!(s.load_code(&code).ok, "{:?}", s.fault);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    let line = s
+        .logs
+        .iter()
+        .rev()
+        .find(|(_, l)| l.starts_with("take "))
+        .map(|(_, l)| l.clone())
+        .expect("有 take 日志");
+    assert!(line.contains("after 1"), "重建后查询应正确：{line}");
+    assert!(line.contains("listings 1"), "挂单消失应一致：{line}");
+    // 重建确实发生：mirror.fetch 计数 ≥ 1。
+    assert!(
+        s.stats.last_exec.mirror_rebuilds >= 1,
+        "应经 mirror.fetch 重建：{:?}",
+        s.stats.last_exec
+    );
+    assert_eq!(s.world.gold_milli, 190_000);
+    assert_eq!(s.world.my_orders.len(), 1);
+}

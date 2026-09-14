@@ -140,6 +140,16 @@ def _ztw_stats():
     return _stats
 
 
+def _ztw_set_drop_deltas(flag):
+    """故障注入钩子（宿主调用）：置位后所有镜像增量被丢弃。
+
+    命名空间隔离后玩家 ns 里的同名变量不影响本模块全局，注入须经此
+    setter（与 _ztw_set_mirror/_ztw_stats 同款导出方式）。
+    """
+    global _DROP_DELTAS
+    _DROP_DELTAS = bool(flag)
+
+
 def _ensure_mirror():
     global M, stale
     if M is not None and not stale:
@@ -547,6 +557,12 @@ class MemoryList(MutableSequence):
 
     def extend(self, *_args):
         raise GameError("INVALID_OPERATION", "受控列表不支持 extend（追加请逐个 append）")
+
+    def clear(self):
+        # 显式覆写：MutableSequence.clear 的混入实现是 while True: self.pop()
+        # ——不覆写则靠 pop 的拒绝间接拦截，报错文案指向 pop（指鹿为马），
+        # 且 pop 覆写一旦调整 clear 会静默变可用。
+        raise GameError("INVALID_OPERATION", "受控列表不支持 clear（删除请用 remove(index)）")
 
     def to_list(self):
         return _wire_to_plain(_ipc("mem.to_value", {"gen": self._gen, "node": self._node})["value"])

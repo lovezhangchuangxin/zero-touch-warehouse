@@ -402,6 +402,8 @@ struct ExecCtx {
     ns: Option<Py<PyDict>>,
     set_mirror: Option<Py<PyAny>>,
     stats_fn: Option<Py<PyAny>>,
+    /// 故障注入钩子：置位 _DROP_DELTAS（经绑定层 setter，跨命名空间）。
+    drop_deltas_fn: Option<Py<PyAny>>,
     /// 首次 loop 前的注入只做一次（hang/oversize/skip_delta 语义）。
     first_loop_injected: bool,
 }
@@ -467,6 +469,7 @@ fn main() {
         ns: None,
         set_mirror: None,
         stats_fn: None,
+        drop_deltas_fn: None,
         first_loop_injected: false,
     };
 
@@ -653,6 +656,7 @@ fn run_exec(
         ctx.ns = None;
         ctx.set_mirror = None;
         ctx.stats_fn = None;
+        ctx.drop_deltas_fn = None;
         unsafe { pyo3::ffi::PyGC_Collect() };
         let Some(new_builtins) = NEW_BUILTINS.get() else {
             return Err(FaultOut {
@@ -708,6 +712,14 @@ fn run_exec(
                 .ok()
                 .flatten()
                 .ok_or_else(|| boot_missing("_ztw_stats"))?
+                .unbind(),
+        );
+        ctx.drop_deltas_fn = Some(
+            boot_ns
+                .get_item("_ztw_set_drop_deltas")
+                .ok()
+                .flatten()
+                .ok_or_else(|| boot_missing("_ztw_set_drop_deltas"))?
                 .unbind(),
         );
         let publish = |key: &str| {
@@ -818,9 +830,11 @@ fn inject_loop_faults(py: Python<'_>, ctx: &ExecCtx) {
     });
     if skip_delta {
         // 注入语义：take 的镜像增量被丢弃（回放失败路径），下一次查询经
-        // mirror.fetch 整体重建。
-        if let Some(ns) = ctx.ns.as_ref() {
-            let _ = ns.bind(py).set_item("_DROP_DELTAS", true);
+        // mirror.fetch 整体重建。须经绑定层导出的 setter 置位——命名空间
+        // 隔离后 _DROP_DELTAS 是 boot_ns 的模块全局，往玩家 ns 写同名
+        // 变量不会被 _apply_delta 看到（评审发现的静默失效）。
+        if let Some(f) = ctx.drop_deltas_fn.as_ref() {
+            let _ = f.bind(py).call1((true,));
         }
     }
     if oversize {

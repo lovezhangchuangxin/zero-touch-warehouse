@@ -127,16 +127,16 @@ fn memory_mutating_mixins_rejected() {
     //（JS 侧本就无这些方法——两侧操作面一致）；只读协议方法不受影响。
     let mut s = common::session(demo_world());
     let init = s.load_code(
-        "Game.memory['m'] = {'a': 1}\nGame.memory['l'] = [1]\n\n\ndef loop():\n    probes = (\n        lambda: Game.memory['m'].pop('a'),\n        lambda: Game.memory['m'].popitem(),\n        lambda: Game.memory['m'].clear(),\n        lambda: Game.memory['m'].update({'b': 2}),\n        lambda: Game.memory['m'].setdefault('b'),\n        lambda: Game.memory['l'].extend([2]),\n        lambda: Game.memory['l'].pop(),\n        lambda: Game.memory['l'].insert(0, 9),\n    )\n    for op in probes:\n        try:\n            op()\n            Game.log('ALLOWED')\n        except Exception as e:\n            Game.log(getattr(e, 'code', type(e).__name__))\n    Game.log('m_keys ' + ','.join(Game.memory['m'].keys()))\n    Game.log('l_len ' + str(len(Game.memory['l'])))\n",
+        "Game.memory['m'] = {'a': 1}\nGame.memory['l'] = [1]\n\n\ndef loop():\n    probes = (\n        lambda: Game.memory['m'].pop('a'),\n        lambda: Game.memory['m'].popitem(),\n        lambda: Game.memory['m'].clear(),\n        lambda: Game.memory['m'].update({'b': 2}),\n        lambda: Game.memory['m'].setdefault('b'),\n        lambda: Game.memory['l'].extend([2]),\n        lambda: Game.memory['l'].pop(),\n        lambda: Game.memory['l'].insert(0, 9),\n        lambda: Game.memory['l'].clear(),\n        lambda: Game.memory['l'].__iadd__([2]),\n    )\n    for op in probes:\n        try:\n            op()\n            Game.log('ALLOWED')\n        except Exception as e:\n            Game.log(getattr(e, 'code', type(e).__name__))\n    Game.log('m_keys ' + ','.join(Game.memory['m'].keys()))\n    Game.log('l_len ' + str(len(Game.memory['l'])))\n",
     );
     assert!(init.ok, "初始化失败：{:?}", init.fault);
     let out = s.tick();
     assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
     let logs: Vec<&str> = s.logs.iter().map(|(_, l)| l.as_str()).collect();
-    let rejected: Vec<&str> = logs.iter().copied().take(8).collect();
+    let rejected: Vec<&str> = logs.iter().copied().take(10).collect();
     assert_eq!(
         rejected,
-        vec!["INVALID_OPERATION"; 8],
+        vec!["INVALID_OPERATION"; 10],
         "变更型混入全部可读拒绝：{logs:?}"
     );
     assert!(logs.contains(&"m_keys a"), "map 未被混入方法改动：{logs:?}");
