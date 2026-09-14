@@ -81,41 +81,50 @@ const archive = path.join(distRoot, asset);
 
 fs.mkdirSync(distRoot, { recursive: true });
 
-// cargo 可能并行调用本脚本；用锁文件保证只下载/解压一次。
-// 锁内容 "PID ISO时间"：PID 探测在 PID 复用时会误判无关长驻进程为
-// 持锁者，等锁上限兜底；持锁进程退出后锁可被抢回。
+// 并发调用（如两个终端同时 just python-dist）用锁文件保证只下载/解压
+// 一次。锁内容 "PID ISO时间"：PID 探测在 PID 复用/内容异常（空文件、
+// 非数字）时须判死可抢，等锁上限兜底；持锁进程退出后锁可被抢回。
 const lock = path.join(distRoot, ".lock");
 const lockDeadline = Date.now() + LOCK_WAIT_MS;
+let lockAcquired = false;
+class LockTimeout extends Error {}
 try {
   while (true) {
     try {
       fs.writeFileSync(lock, `${process.pid} ${new Date().toISOString()}`, { flag: "wx" });
+      lockAcquired = true;
       break;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       let alive = false;
       try {
         const pid = Number(fs.readFileSync(lock, "utf8").split(" ")[0]);
-        process.kill(pid, 0);
-        alive = true;
+        // 非整数/非正 PID（空文件、垃圾内容）一律判死：process.kill(0, 0)
+        // 探测的是本进程组，恒"存活"。
+        if (Number.isInteger(pid) && pid > 0) {
+          process.kill(pid, 0);
+          alive = true;
+        }
       } catch {
-        /* 持有进程已退出或锁内容不可解析：直接抢 */
+        /* 持有进程已退出：直接抢 */
       }
       if (!alive) {
         fs.rmSync(lock, { force: true });
         continue;
       }
       if (Date.now() > lockDeadline) {
-        throw new Error(
-          `等锁超时（${LOCK_WAIT_MS / 60000} 分钟）——持锁进程可能卡死，确认后删除 ${lock} 重试`,
+        throw new LockTimeout(
+          `等锁超时（${LOCK_WAIT_MS / 60000} 分钟）——持锁进程可能卡死（合法持锁上限约 36 分钟：慢网下载重试），确认后删除 ${lock} 重试`,
         );
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
     }
   }
 } catch (e) {
-  if (e.message?.startsWith("等锁超时")) throw e;
-  /* 单进程场景不需要锁 */
+  if (e instanceof LockTimeout) throw e;
+  // 锁机制失效（如杀软瞬时占用锁文件）：退化为无锁执行并警示——
+  // 互斥可能被击穿，但 stamp 复查与 sha256 仍保证最终一致性。
+  console.error(`fetch-python: 锁不可用（${e.message}），退化为无锁执行`);
 }
 
 function main() {
@@ -206,5 +215,9 @@ function main() {
 try {
   main();
 } finally {
-  fs.rmSync(lock, { force: true });
+  // 只清自己的锁：无锁裸奔（锁机制失效）时删掉别人的锁会击穿互斥——
+  // 第三个进程即可与持锁者并发。
+  if (lockAcquired) {
+    fs.rmSync(lock, { force: true });
+  }
 }
