@@ -39,8 +39,13 @@ export function step(): Promise<void> {
   return invoke("step");
 }
 
-export function hotReload(code: string, language: string): Promise<void> {
-  return invoke("hot_reload", { code, language });
+/** 热重载：文件集整包提交 + 入口文件名（协议 v3，多文件）。 */
+export function hotReload(
+  files: Record<string, string>,
+  entry: string,
+  language: string,
+): Promise<void> {
+  return invoke("hot_reload", { files, entry, language });
 }
 
 export function resetScenario(scenario: string): Promise<void> {

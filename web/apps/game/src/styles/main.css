@@ -4,8 +4,8 @@
 @import "tailwindcss";
 
 @theme {
-  /* 游戏色板 */
-  --color-bg: #14161a;
+  /* 游戏色板：bg 最深 / panel 中层 / panel-2 浮起，拉开三层明度差 */
+  --color-bg: #121419;
   --color-panel: #1d2026;
   --color-panel-2: #242830;
   --color-line: #323743;
@@ -44,17 +44,14 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
   }
-  /* 细滚动条（Tauri 双端 WKWebView / WebView2 均支持） */
+  /* 滚动条整体隐藏：外层布局恒不滚动，滚动只发生在各面板内部，
+     面板内容溢出由 v-fade 渐隐遮罩提示（macOS WKWebView 与 Windows
+     WebView2 分别命中 webkit 前缀与 scrollbar-width 两套规则）。 */
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    display: none;
   }
-  ::-webkit-scrollbar-thumb {
-    background: var(--color-line);
-    border-radius: 4px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
+  * {
+    scrollbar-width: none;
   }
   /* 旧令牌桥：editor/theme.ts 以 JS 内联样式消费 --panel 等旧名，
      统一转发到 @theme 变量，CodeMirror 换皮不改名即继续生效。 */
@@ -86,5 +83,20 @@
   /* 下拉 / 输入框基底 */
   .field {
     @apply rounded-sm border border-line bg-panel-2 px-2 py-0.5;
+  }
+  /* 抽屉页签（真页签：激活态 accent 下划线，非按钮堆） */
+  .tab {
+    @apply -mb-px cursor-pointer border-b-2 border-transparent px-2 pb-1 pt-0.5 text-dim transition-colors hover:text-fg;
+  }
+  .tab-on {
+    @apply border-accent text-fg;
+  }
+  /* 顶栏分组竖分隔线 */
+  .v-sep {
+    @apply mx-1 h-4 w-px shrink-0 bg-line;
+  }
+  /* 面板统一头部：小型加宽字距标签 */
+  .panel-h {
+    @apply flex items-baseline gap-2 text-2xs font-semibold tracking-wider text-dim;
   }
 }

@@ -741,10 +741,10 @@ impl Session {
     }
 
     /// 语言切换 / 换宿主二进制专用：只杀宿主进程并清空待重载程序。
-    /// 与 restart_host 的区别：绝不拿旧代码在新宿主上重跑初始化——
-    /// 换语言后旧代码对新宿主是外语，重跑只产出一次注定失败且被吞的
-    /// init。切换后由调用方以新代码 load_code（docs 03：语言切换走宿主
-    /// 重启，已提交 memory 保留）。
+    /// 与 restart_host 的区别：绝不拿旧程序在新宿主上重跑初始化——
+    /// 换语言后旧程序对新宿主是外语，重跑只产出一次注定失败且被吞的
+    /// init。切换后由调用方以新程序 load_program（docs 03：语言切换走
+    /// 宿主重启，已提交 memory 保留）。
     pub fn drop_host_for_switch(&mut self) {
         self.drop_host();
         self.program = None;

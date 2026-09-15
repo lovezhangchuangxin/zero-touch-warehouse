@@ -48,6 +48,11 @@ export class Stage {
   private robotL = new Container(); // 机器人（持久 + 插值）
   private bank: SpriteBank;
   private info: StaticInfo | null = null;
+  /** 当前视图变换（世界 → 屏幕）。 */
+  private view = { scale: 1, x: 0, y: 0 };
+  /** 用户手动视图（滚轮 / 拖拽产生）；null = 自动适配窗口。 */
+  private userView: { scale: number; x: number; y: number } | null = null;
+  private panCtx: { cx: number; cy: number; vx: number; vy: number } | null = null;
   private robots = new Map<number, RobotAnim>();
   /** 世界层（worldW）当前渲染的场景 id。 */
   private scenario = "";
@@ -78,6 +83,7 @@ export class Stage {
     el.appendChild(app.canvas);
     const bank = await loadSprites();
     const stage = new Stage(app, bank);
+    stage.attachControls();
     stage.resizeOb = new ResizeObserver(() => stage.layout());
     stage.resizeOb.observe(el);
     return stage;
@@ -85,26 +91,141 @@ export class Stage {
 
   destroy(): void {
     this.resizeOb?.disconnect();
+    const canvas = this.app.canvas;
+    canvas.removeEventListener("wheel", this.onWheel);
+    canvas.removeEventListener("pointerdown", this.onPointerDown);
+    canvas.removeEventListener("pointermove", this.onPointerMove);
+    canvas.removeEventListener("pointerup", this.onPointerUp);
+    canvas.removeEventListener("pointercancel", this.onPointerUp);
+    canvas.removeEventListener("dblclick", this.onDblClick);
     this.app.destroy(true, { children: true });
   }
 
-  // -- 布局 --------------------------------------------------------------
+  // -- 布局与视图控制 ------------------------------------------------------
+
+  // userView 为 null 时自动适配（letterbox 居中），ResizeObserver 与场景
+  // 切换都会重新适配；用户滚轮缩放 / 拖拽平移后进入手动视图，自动适配
+  // 不再覆盖，双击画布回到适配。
+
+  private attachControls(): void {
+    const canvas = this.app.canvas;
+    canvas.style.cursor = "grab";
+    canvas.style.touchAction = "none";
+    canvas.addEventListener("wheel", this.onWheel, { passive: false });
+    canvas.addEventListener("pointerdown", this.onPointerDown);
+    canvas.addEventListener("pointermove", this.onPointerMove);
+    canvas.addEventListener("pointerup", this.onPointerUp);
+    canvas.addEventListener("pointercancel", this.onPointerUp);
+    canvas.addEventListener("dblclick", this.onDblClick);
+  }
+
+  private fitScale(): number | null {
+    const info = this.info;
+    const el = this.app.renderer.canvas.parentElement;
+    if (!info || !el || el.clientWidth === 0 || el.clientHeight === 0) {
+      return null;
+    }
+    return (
+      Math.min(el.clientWidth / (info.map_w * CELL), el.clientHeight / (info.map_h * CELL)) * 0.98
+    );
+  }
+
+  private fitView(): void {
+    const info = this.info;
+    const el = this.app.renderer.canvas.parentElement;
+    const s = this.fitScale();
+    if (!info || !el || s == null) {
+      return;
+    }
+    this.view.scale = s;
+    this.view.x = (el.clientWidth - info.map_w * CELL * s) / 2;
+    this.view.y = (el.clientHeight - info.map_h * CELL * s) / 2;
+  }
+
+  private applyView(): void {
+    this.root.scale.set(this.view.scale);
+    this.root.position.set(this.view.x, this.view.y);
+  }
 
   private layout(): void {
-    const info = this.info;
-    if (!info) {
-      return;
-    }
+    // 容器尺寸变化（分栏拖拽 / 窗口缩放）不经 window resize 触发
+    // ResizePlugin，backing store 需在此显式同步（容器隐藏时跳过）。
     const el = this.app.renderer.canvas.parentElement;
-    if (!el) {
+    if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+      this.app.resize();
+    }
+    if (!this.info) {
       return;
     }
-    const w = info.map_w * CELL;
-    const h = info.map_h * CELL;
-    const s = Math.min(el.clientWidth / w, el.clientHeight / h) * 0.98;
-    this.root.scale.set(s);
-    this.root.position.set((el.clientWidth - w * s) / 2, (el.clientHeight - h * s) / 2);
+    if (!this.userView) {
+      this.fitView();
+    }
+    this.applyView();
   }
+
+  private onWheel = (e: WheelEvent): void => {
+    const fit = this.fitScale();
+    if (fit == null) {
+      return;
+    }
+    e.preventDefault();
+    const rect = this.app.canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    // Firefox 行模式按 ~16px/行 归一；pinch（ctrl+wheel）事件 delta 小，提速。
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    const speed = e.ctrlKey ? 0.008 : 0.0015;
+    const next = Math.min(fit * 8, Math.max(fit * 0.25, this.view.scale * Math.exp(-dy * speed)));
+    // 以光标为锚点：缩放前后光标下的世界坐标保持不动。
+    const wx = (px - this.view.x) / this.view.scale;
+    const wy = (py - this.view.y) / this.view.scale;
+    this.view.scale = next;
+    this.view.x = px - wx * next;
+    this.view.y = py - wy * next;
+    // 拖拽进行中缩放：以缩放后的视图重定平移基座，后续 move 不撤销缩放。
+    if (this.panCtx) {
+      this.panCtx.vx = this.view.x - (e.clientX - this.panCtx.cx);
+      this.panCtx.vy = this.view.y - (e.clientY - this.panCtx.cy);
+    }
+    this.userView = { ...this.view };
+    this.applyView();
+  };
+
+  private onPointerDown = (e: PointerEvent): void => {
+    if (e.button !== 0 || !e.isPrimary) {
+      return;
+    }
+    this.panCtx = { cx: e.clientX, cy: e.clientY, vx: this.view.x, vy: this.view.y };
+    this.app.canvas.setPointerCapture(e.pointerId);
+    this.app.canvas.style.cursor = "grabbing";
+  };
+
+  private onPointerMove = (e: PointerEvent): void => {
+    if (!this.panCtx || !e.isPrimary) {
+      return;
+    }
+    this.view.x = this.panCtx.vx + (e.clientX - this.panCtx.cx);
+    this.view.y = this.panCtx.vy + (e.clientY - this.panCtx.cy);
+    this.userView = { ...this.view };
+    this.applyView();
+  };
+
+  private onPointerUp = (e: PointerEvent): void => {
+    if (!this.panCtx || !e.isPrimary) {
+      return;
+    }
+    this.panCtx = null;
+    if (this.app.canvas.hasPointerCapture(e.pointerId)) {
+      this.app.canvas.releasePointerCapture(e.pointerId);
+    }
+    this.app.canvas.style.cursor = "grab";
+  };
+
+  private onDblClick = (): void => {
+    this.userView = null;
+    this.fitView();
+    this.applyView();
+  };
 
   private cellCenter(x: number, y: number): [number, number] {
     return [(x + 0.5) * CELL, (y + 0.5) * CELL];
@@ -154,6 +275,8 @@ export class Stage {
     }
     if (info.id !== this.scenario) {
       this.scenario = info.id;
+      this.userView = null; // 新地图尺寸未知，视图回到自动适配
+      this.panCtx = null; // 拖拽中切场景：陈旧基座会撤销适配
       destroyChildren(this.worldW);
       const w = info.map_w * CELL;
       const h = info.map_h * CELL;

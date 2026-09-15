@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -89,11 +90,18 @@ async fn step(state: State<'_, App>) -> Result<(), String> {
 }
 
 /// 热重载：当前 tick 结束后暂停 → 保存即重建执行环境（docs/architecture/05）。
+/// 多文件程序整包提交：全部文件集 + 入口文件名 + 语言。
 #[tauri::command]
-async fn hot_reload(state: State<'_, App>, code: String, language: String) -> Result<(), String> {
+async fn hot_reload(
+    state: State<'_, App>,
+    files: BTreeMap<String, String>,
+    entry: String,
+    language: String,
+) -> Result<(), String> {
     let lang = ztw_desktop::hostbin::Language::parse(&language)?;
-    state.handle.ctrl(Ctrl::LoadCode {
-        code,
+    state.handle.ctrl(Ctrl::LoadProgram {
+        files,
+        entry,
         language: lang,
     })
 }

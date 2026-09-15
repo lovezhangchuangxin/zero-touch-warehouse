@@ -13,6 +13,20 @@ fn spawn(scenario: &str) -> WorldHandle {
     WorldHandle::spawn(scenario, ztw_desktop::hostbin::resolve_host_bins())
 }
 
+/// 单文件便捷形态：整个源码即入口（与 PlayerProgram::single_* 同构）。
+fn prog(code: impl Into<String>, language: Language) -> Ctrl {
+    let entry = if language == Language::Js {
+        "main.js"
+    } else {
+        "main.py"
+    };
+    Ctrl::LoadProgram {
+        files: [(entry.to_string(), code.into())].into_iter().collect(),
+        entry: entry.to_string(),
+        language,
+    }
+}
+
 fn status(h: &WorldHandle) -> StatusView {
     h.shared().status.lock().expect("status 锁").clone()
 }
@@ -128,11 +142,8 @@ fn load_step_pause_resume_flow() {
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(status(&h).tick, 0, "未加载代码不得推进");
 
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() {}".to_string(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
     assert!(!status(&h).running, "热重载后保持暂停");
 
@@ -178,11 +189,7 @@ fn load_step_pause_resume_flow() {
 #[test]
 fn full_loop_completes_orders_with_diag_events() {
     let h = spawn(B2_ONE.id);
-    h.ctrl(Ctrl::LoadCode {
-        code: SIMPLE_LOOP.to_string(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog(SIMPLE_LOOP, Language::Js)).expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
     h.ctrl(Ctrl::Resume { tps: 200 }).expect("cmd");
 
@@ -267,10 +274,10 @@ fn full_loop_completes_orders_with_diag_events() {
 #[test]
 fn script_fault_pauses_and_resume_recovers() {
     let h = spawn(B2_ONE.id);
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() { throw new Error('boom'); }".into(),
-        language: Language::Js,
-    })
+    h.ctrl(prog(
+        "export function loop() { throw new Error('boom'); }",
+        Language::Js,
+    ))
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
     h.ctrl(Ctrl::Step).expect("cmd");
@@ -298,11 +305,8 @@ fn script_fault_pauses_and_resume_recovers() {
     );
     assert!(!status(&h).running, "再次自动暂停");
     // 修码 → 热重载 → 恢复：干净代码持续运行。
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() {}".into(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
     wait_status(
         &h,
         |s| s.loaded && s.fault_class.is_none(),
@@ -320,11 +324,8 @@ fn script_fault_pauses_and_resume_recovers() {
 #[test]
 fn hot_reload_preserves_world_and_reset_rebuilds() {
     let h = spawn(B2_ONE.id);
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() {}".into(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
     h.ctrl(Ctrl::Resume { tps: 200 }).expect("cmd");
     wait_status(&h, |s| s.tick >= 4, "推进若干 tick");
@@ -333,11 +334,8 @@ fn hot_reload_preserves_world_and_reset_rebuilds() {
     let before = status(&h).tick;
 
     // 热重载：世界与 tick 保留（只重建执行环境），加载后仍暂停。
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() {}".into(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
     wait_status(&h, |s| s.loaded, "重载成功");
     assert_eq!(status(&h).tick, before, "热重载不推进世界");
     h.ctrl(Ctrl::Resume { tps: 200 }).expect("cmd");
@@ -367,11 +365,8 @@ fn snapshot_sink_gating_merges_when_slow() {
         let _ = v;
         *sink_frames.lock().expect("sink 锁") += 1;
     }));
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() {}".into(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
     h.ctrl(Ctrl::Resume { tps: 200 }).expect("cmd");
     wait_status(&h, |s| s.tick >= 30, "推进 30+ tick");
@@ -403,11 +398,8 @@ fn snapshot_pushes_control_plane_change_while_paused() {
     // 保证 ack 落在首帧在途之后（ack 早于首发会让热重载帧被 inflight 合并）。
     wait_status(&h, |s| s.scenario == B2_ONE.id, "首发快照已发布");
     h.shared().ack_snapshot(); // 确认初始帧，清在途标记
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() {}".into(),
-        language: Language::Js,
-    })
-    .expect("cmd");
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
     wait_status(&h, |s| s.loaded, "加载成功");
     let got = seen.lock().expect("seen 锁").clone();
     assert_eq!(
@@ -426,11 +418,10 @@ fn snapshot_pushes_control_plane_change_while_paused() {
 fn language_switch_restarts_host_and_preserves_memory() {
     let h = spawn(B2_ONE.id);
     // JS：写 memory 并推进。
-    h.ctrl(Ctrl::LoadCode {
-        code: "Game.memory['n'] = 41;\nexport function loop() { Game.memory['n'] += 1; }"
-            .to_string(),
-        language: Language::Js,
-    })
+    h.ctrl(prog(
+        "Game.memory['n'] = 41;\nexport function loop() { Game.memory['n'] += 1; }",
+        Language::Js,
+    ))
     .expect("cmd");
     wait_status(&h, |s| s.loaded, "JS 加载成功");
     h.ctrl(Ctrl::Step).expect("cmd");
@@ -439,10 +430,7 @@ fn language_switch_restarts_host_and_preserves_memory() {
 
     // 切换 Python：宿主重启（会话重建），memory 由主进程持有应保留；
     // 初始 tick 阶段即可读旧值。
-    h.ctrl(Ctrl::LoadCode {
-        code: "def loop():\n    Game.memory['n'] = Game.memory['n'] + 1\n    Game.log('py n', Game.memory['n'])\n".to_string(),
-        language: Language::Py,
-    })
+    h.ctrl(prog("def loop():\n    Game.memory['n'] = Game.memory['n'] + 1\n    Game.log('py n', Game.memory['n'])\n", Language::Py))
     .expect("cmd");
     wait_status(
         &h,
@@ -481,10 +469,10 @@ fn language_switch_restarts_host_and_preserves_memory() {
         "memory 跨语言保留：{found:?}"
     );
     // 回 JS：再次切换同样成立。
-    h.ctrl(Ctrl::LoadCode {
-        code: "export function loop() { Game.log('js n', Game.memory['n']); }".to_string(),
-        language: Language::Js,
-    })
+    h.ctrl(prog(
+        "export function loop() { Game.log('js n', Game.memory['n']); }",
+        Language::Js,
+    ))
     .expect("cmd");
     wait_status(&h, |s| s.loaded && s.language == "js", "切回 JS");
     h.join();
@@ -520,4 +508,79 @@ fn drop_host_for_switch_never_reruns_old_code() {
     // 上面的 restarts 断言才是“未重跑”的直接证据）。
     let lines: Vec<String> = s.logs.iter().map(|(_, l)| l.clone()).collect();
     assert!(lines.iter().any(|l| l == "n 1"), "memory 保留：{lines:?}");
+}
+
+/// 多文件文件集（评审补测）：文件集整体送达宿主（跨模块 import 可见）、
+/// st.program 以多文件形态跨 Reset 保留并自动重初始化、失败提交不污染
+/// 已保留程序。
+#[test]
+fn multi_file_program_survives_reset_and_failed_load() {
+    let h = spawn(B2_ONE.id);
+    h.ctrl(Ctrl::LoadProgram {
+        files: [
+            (
+                "main.js".to_string(),
+                "import { tag } from './lib.js';\nexport function loop() { Game.log('tag', tag); }"
+                    .to_string(),
+            ),
+            (
+                "lib.js".to_string(),
+                "export const tag = 'lib-ok';".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        entry: "main.js".to_string(),
+        language: Language::Js,
+    })
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded, "多文件加载成功");
+
+    // 单步一步：日志环出现 lib.js 的标记 = 文件集整体送达宿主。
+    h.ctrl(Ctrl::Step).expect("cmd");
+    wait_status(&h, |s| s.tick == 1, "单步推进");
+    let logs = h.shared().logs_pull(0, 50);
+    assert!(
+        logs.events
+            .iter()
+            .any(|e| e.payload["line"] == "tag lib-ok"),
+        "lib 模块日志缺失：{:?}",
+        logs.events
+    );
+
+    // 失败提交（缺 lib.js 的悬空 import）：世界与已保留程序不受污染。
+    h.ctrl(Ctrl::LoadProgram {
+        files: [(
+            "main.js".to_string(),
+            "import { tag } from './lib.js';\nexport function loop() {}".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        entry: "main.js".to_string(),
+        language: Language::Js,
+    })
+    .expect("cmd");
+    wait_status(
+        &h,
+        |s| !s.loaded && s.fault_class.is_some(),
+        "坏文件集以故障打回",
+    );
+
+    // Reset：世界重建后自动重载的仍是原两文件程序（tag 再现即证据）。
+    h.ctrl(Ctrl::Reset {
+        scenario: B2_ONE.id.to_string(),
+    })
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded && s.tick == 0, "Reset 后自动重载");
+    h.ctrl(Ctrl::Step).expect("cmd");
+    wait_status(&h, |s| s.tick == 1, "Reset 后单步推进");
+    let logs = h.shared().logs_pull(0, 50);
+    assert!(
+        logs.events
+            .iter()
+            .any(|e| e.payload["line"] == "tag lib-ok"),
+        "Reset 后未恢复原两文件程序：{:?}",
+        logs.events
+    );
+    h.join();
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { vFade } from "./fade";
 import { store } from "../store";
 
 // 日志面板：Game.log 输出 + 故障摘要置顶（快照内的 fault 不受刷屏影响，
@@ -20,7 +21,7 @@ const flood = computed(() => store.logBurst > 60);
       <input v-model="filter" placeholder="过滤…" class="field w-40" />
       <span v-if="flood" class="text-warn">日志刷屏中：仅显示最近条目</span>
     </div>
-    <div class="min-h-0 overflow-auto px-2 pb-2 pt-1 font-mono text-xs">
+    <div v-fade class="min-h-0 flex-1 overflow-auto px-2 pb-2 pt-1 font-mono text-xs">
       <div v-for="l in filtered" :key="l.seq" class="flex gap-2.5 whitespace-pre-wrap">
         <span class="min-w-9 text-right text-dim">{{ l.tick }}</span>
         <span>{{ l.line }}</span>

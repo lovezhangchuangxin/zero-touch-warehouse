@@ -2,39 +2,39 @@
 import type { EditorState } from "@codemirror/state";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import * as api from "../api";
-import { store } from "../store";
 import { DEMO_SCRIPTS } from "../scripts";
 import type { Language } from "../scripts";
 import { createCodeEditor, type CodeEditorHandle } from "../editor/setup";
-import { fileNameFor, makeMainFile, type EditorFile } from "../editor/files";
-import EditorTabs from "./EditorTabs.vue";
+import {
+  fileNameFor,
+  isMain,
+  isValidFileName,
+  makeFile,
+  makeMainFile,
+  nextFileName,
+  type EditorFile,
+} from "../editor/files";
+import FileTree from "./FileTree.vue";
 
-// 代码编辑器（CodeMirror 6，docs/architecture/05 §代码编辑器）。
-// 「保存并重载」= 热重载：当前 tick 结束后暂停 → 保存即重建执行环境。
-// 语言切换走宿主重启（docs 03：同一存档同一时间只运行一种语言），
-// 已提交 Game.memory 保留。行为与 B2 textarea 版一致：示例载入、
-// 语言下拉、失败提示、草稿保存时才提交 store。
+// 多文件代码编辑器（CodeMirror 6，docs/architecture/05 §代码编辑器）。
+// 「保存并重载」= 热重载：当前 tick 结束后暂停 → 文件集整包提交并重建
+// 执行环境。语言切换走宿主重启（docs 03），js / py 两套文件集草稿各自
+// 保留；已提交 Game.memory 跨语言保留。
 const host = ref<HTMLElement | null>(null);
 const demoSel = ref("");
 const busy = ref(false);
 const saveError = ref("");
 
-// 多文件预留：当前恒为 1 个主文件（宿主协议单字符串），tab 条仅在 >1 时渲染。
-const files = ref<EditorFile[]>([makeMainFile(store.code, store.language as Language)]);
-const activeId = ref(files.value[0]!.id);
+// 两套语言文件集（各自草稿），activeLang 指向当前编辑的那套。
+const sets = ref<Record<Language, EditorFile[]>>({
+  js: [makeMainFile("", "js")],
+  py: [makeMainFile("", "py")],
+});
+const activeLang = ref<Language>("js");
+const activeId = ref(sets.value.js[0]!.id);
 const stateCache = new Map<string, EditorState>();
 
-const activeFile = computed(() => files.value.find((f) => f.id === activeId.value));
-const langSel = computed<string>({
-  get: () => activeFile.value?.language ?? "js",
-  set: (v) => {
-    const file = activeFile.value;
-    if (!file) return;
-    file.language = v as Language;
-    file.name = fileNameFor(file.language);
-    ed?.setLanguage(file.language);
-  },
-});
+const files = computed(() => sets.value[activeLang.value]);
 
 let ed: CodeEditorHandle | null = null;
 
@@ -44,7 +44,7 @@ function placeholderFor(language: Language): string {
 
 onMounted(() => {
   if (!host.value) return;
-  const file = files.value[0]!;
+  const file = sets.value.js[0]!;
   ed = createCodeEditor(host.value, {
     doc: file.code,
     language: file.language,
@@ -57,8 +57,8 @@ onMounted(() => {
     (window as unknown as { __ztwEditor?: CodeEditorHandle }).__ztwEditor = ed;
   }
   // 全局 Cmd/Ctrl+S：焦点不在编辑器内（如按钮刚点过）也能保存。
-  // 编辑器内 keymap 先消费一次，这里会再触发一次——双触发由 save()
-  // 的 busy 排队去重（见 pendingSave），不会双发 hotReload。
+  // 编辑器内 keymap 消费时会 preventDefault，这里据此去重——同一次
+  // 按键只走一条路径，不会双发热重载。
   window.addEventListener("keydown", onGlobalKey);
 });
 
@@ -74,9 +74,18 @@ onBeforeUnmount(() => {
 
 function onGlobalKey(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "s") {
-    if (!e.defaultPrevented) e.preventDefault();
+    if (e.defaultPrevented) return; // 编辑器内 keymap 已处理
+    e.preventDefault();
     void save();
   }
+}
+
+/** 活动文件内容取自编辑器，其余文件取撤销缓存 / 文件模型的最新草稿。 */
+function docOf(f: EditorFile): string {
+  if (f.id === activeId.value) {
+    return ed?.getDoc() ?? f.code;
+  }
+  return stateCache.get(f.id)?.doc.toString() ?? f.code;
 }
 
 let pendingSave = false;
@@ -91,17 +100,20 @@ async function save() {
   busy.value = true;
   saveError.value = "";
   try {
-    const code = ed.getDoc();
-    const language = langSel.value;
-    const file = activeFile.value;
-    if (file) {
-      file.code = code;
-      file.language = language as Language;
-      file.name = fileNameFor(file.language);
+    const language = activeLang.value;
+    const set = sets.value[language];
+    const map: Record<string, string> = {};
+    for (const f of set) {
+      map[f.name] = docOf(f);
     }
-    store.code = code;
-    store.language = language;
-    await api.hotReload(code, language);
+    const main = set.find(isMain);
+    await api.hotReload(map, main?.name ?? fileNameFor(language), language);
+    // 成功才回写草稿模型：f.code 与宿主已提交内容保持一致，
+    // 消除「无缓存才准读 f.code」这一无保护的不变量。
+    for (const f of set) {
+      const code = map[f.name];
+      if (code !== undefined) f.code = code;
+    }
   } catch (e) {
     saveError.value = `重载失败：${String(e)}`;
   } finally {
@@ -113,53 +125,112 @@ async function save() {
   }
 }
 
+// 多文件切换：活动文件状态留在缓存（doc 与撤销历史都在 state 里），
+// 目标文件无缓存则按其内容新建。缓存态语言若与文件声明漂移则就地重配。
+function selectFile(id: string) {
+  if (!ed || id === activeId.value) return;
+  const target = files.value.find((f) => f.id === id);
+  if (!target) return;
+  stateCache.set(activeId.value, ed.view.state);
+  const cached = stateCache.get(id);
+  ed.switchState(cached ?? ed.newState(target.code, target.language));
+  if (ed.currentLanguage() !== target.language) ed.setLanguage(target.language);
+  activeId.value = id;
+}
+
+function createFile() {
+  if (!ed) return;
+  const file = makeFile(nextFileName(files.value, activeLang.value), activeLang.value);
+  files.value.push(file);
+  selectFile(file.id);
+}
+
+function deleteFile(id: string) {
+  if (!ed) return;
+  const set = files.value;
+  const file = set.find((f) => f.id === id);
+  if (!file || isMain(file)) return;
+  if (id === activeId.value) {
+    selectFile(set[0]!.id); // 入口文件恒在，回主文件
+  }
+  set.splice(set.indexOf(file), 1);
+  stateCache.delete(id);
+}
+
+function renameFile(id: string, name: string) {
+  const file = files.value.find((f) => f.id === id);
+  if (!file || isMain(file) || !isValidFileName(name, file.language)) return;
+  if (files.value.some((f) => f.name === name)) return;
+  file.name = name;
+}
+
+// 载入示例 = 目标语言整套文件替换为单文件示例（示例自包含）。
+// 跨语言载入时当前语言集是幸存方：先把 live state 写入缓存再切，
+// 否则未保存草稿随 switchState 静默丢失；同语言整集替换属预期内丢弃。
 function loadDemo() {
   const d = DEMO_SCRIPTS.find((s) => s.id === demoSel.value);
   if (!d || !ed) return;
-  const file = activeFile.value;
-  // 多文件预留：草稿同步进文件模型，切 tab 重建 state 时才有正确内容
-  if (file) file.code = d.code;
-  ed.setDoc(d.code);
-  langSel.value = d.language;
+  if (d.language !== activeLang.value) {
+    stateCache.set(activeId.value, ed.view.state);
+  }
+  const old = sets.value[d.language];
+  for (const f of old) {
+    stateCache.delete(f.id);
+  }
+  sets.value[d.language] = [makeMainFile(d.code, d.language)];
+  activeLang.value = d.language;
+  const main = sets.value[d.language][0]!;
+  ed.switchState(ed.newState(main.code, main.language));
+  activeId.value = main.id;
   demoSel.value = "";
 }
 
-// 多文件切换（预留路径）：活动文件状态留在缓存（doc 与撤销历史都在
-// state 里），目标文件无缓存则按其内容新建。语言隔间随 state 各自
-// 持有，缓存态语言若与文件声明漂移则就地重配。
-function selectTab(id: string) {
-  if (!ed || id === activeId.value) return;
-  stateCache.set(activeId.value, ed.view.state);
-  const file = files.value.find((f) => f.id === id);
-  if (!file) return;
-  const cached = stateCache.get(id);
-  ed.switchState(cached ?? ed.newState(file.code, file.language));
-  if (ed.currentLanguage() !== file.language) ed.setLanguage(file.language);
-  activeId.value = id;
-}
+// 语言切换 = 整体切换到另一套文件集（宿主重启在保存时发生，docs 03）。
+const langSel = computed<Language>({
+  get: () => activeLang.value,
+  set: (v) => {
+    if (!ed || v === activeLang.value) return;
+    stateCache.set(activeId.value, ed.view.state);
+    activeLang.value = v;
+    const main = sets.value[v][0]!;
+    const cached = stateCache.get(main.id);
+    ed.switchState(cached ?? ed.newState(main.code, v));
+    if (ed.currentLanguage() !== v) ed.setLanguage(v);
+    activeId.value = main.id;
+  },
+});
 </script>
 
 <template>
   <section class="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-panel">
-    <div class="flex flex-wrap items-center gap-2 px-2 py-1.5">
-      <select v-model="demoSel" class="field" @change="loadDemo">
+    <div
+      class="flex items-center gap-2 overflow-hidden whitespace-nowrap border-b border-line px-2 py-1.5"
+    >
+      <select v-model="demoSel" class="field min-w-0 max-w-[9.5rem]" @change="loadDemo">
         <option value="" disabled>载入示例…</option>
         <option v-for="d in DEMO_SCRIPTS" :key="d.id" :value="d.id">{{ d.name }}</option>
       </select>
-      <select v-model="langSel" class="field" aria-label="语言">
+      <select v-model="langSel" class="field min-w-0 max-w-[7rem]" aria-label="语言">
         <option value="js">JavaScript</option>
         <option value="py">Python</option>
       </select>
-      <button class="btn" :disabled="busy" @click="save">保存并重载</button>
-      <span class="text-2xs text-dim"
-        >⌘/Ctrl+S 保存并重载；重载会暂停世界并重建执行环境，Game.memory 保留，普通全局变量重置</span
-      >
-      <span v-if="saveError" class="text-warn">{{ saveError }}</span>
+      <button class="btn shrink-0" :disabled="busy" @click="save">保存并重载</button>
+      <span v-if="saveError" class="min-w-0 truncate text-warn">{{ saveError }}</span>
     </div>
-    <EditorTabs v-if="files.length > 1" :files="files" :active-id="activeId" @select="selectTab" />
-    <div
-      ref="host"
-      class="mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-sm border border-line bg-panel"
-    />
+    <div class="flex min-h-0 flex-1">
+      <FileTree
+        :files="files"
+        :active-id="activeId"
+        @select="selectFile"
+        @create="createFile"
+        @delete="deleteFile"
+        @rename="renameFile"
+      />
+      <div ref="host" class="min-h-0 flex-1 overflow-hidden bg-panel" />
+    </div>
+    <div class="truncate border-t border-line px-2 py-1 text-2xs text-dim">
+      ⌘/Ctrl+S 保存并重载（整包提交全部文件）；重载会暂停世界并重建执行环境，Game.memory
+      保留，普通全局变量重置
+    </div>
   </section>
 </template>

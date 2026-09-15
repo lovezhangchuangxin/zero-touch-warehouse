@@ -43,5 +43,11 @@ watch(
 <template>
   <div ref="el" class="relative min-h-0 overflow-hidden rounded-md border border-line bg-panel">
     <div v-if="!ready" class="absolute inset-0 grid place-items-center text-dim">加载精灵…</div>
+    <div
+      v-else
+      class="pointer-events-none absolute bottom-1.5 left-2 z-10 rounded-sm bg-bg/60 px-1.5 py-0.5 text-2xs text-dim"
+    >
+      拖拽平移 · 滚轮缩放 · 双击适配
+    </div>
   </div>
 </template>

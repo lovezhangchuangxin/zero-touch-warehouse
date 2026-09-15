@@ -12,6 +12,7 @@
 //! 慢前端合并丢旧、不反压模拟；诊断事件与日志走独立环形缓冲 + 游标
 //! 分页，不随快照丢弃。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -19,7 +20,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use ztw_api::harness::{DiagTapKind, FaultClass, OutcomeKind, Session, SessionConfig, TickOutcome};
+use ztw_api::harness::{
+    DiagTapKind, FaultClass, OutcomeKind, PlayerProgram, Session, SessionConfig, TickOutcome,
+};
 
 use crate::diag::{DiagPage, DiagRing};
 use crate::scenario::{self, ScenarioSpec};
@@ -48,11 +51,13 @@ pub enum Ctrl {
     /// 推进一个完整 tick 后回到暂停。
     Step,
     /// 热重载：编辑代码在当前 tick 结束后暂停，保存即重建执行环境
-    /// （docs/game-design/05 §执行生命周期）。同语言热重载不重启宿主
-    /// 进程；语言与当前不同时先丢弃宿主、换新语言二进制重启
-    /// （docs/architecture/03 执行模型），已提交 Game.memory 保留。
-    LoadCode {
-        code: String,
+    /// （docs/game-design/05 §执行生命周期）。玩家程序整包提交：每次
+    /// 保存携带全部文件集 + 入口。同语言热重载不重启宿主进程；语言与
+    /// 当前不同时先丢弃宿主、换新语言二进制重启（docs/architecture/03
+    /// 执行模型），已提交 Game.memory 保留。
+    LoadProgram {
+        files: BTreeMap<String, String>,
+        entry: String,
         language: crate::hostbin::Language,
     },
     /// 重开场景：世界 / memory 重建，玩家源码保留并自动重新初始化
@@ -250,8 +255,8 @@ impl WorldHandle {
 struct RunState {
     spec: &'static ScenarioSpec,
     session: Session,
-    /// 玩家源码（跨 reset 保留，docs/architecture/02）。
-    code: Option<String>,
+    /// 玩家程序（文件集 + 入口；跨 reset 保留，docs/architecture/02）。
+    program: Option<PlayerProgram>,
     running: bool,
     tps: u32,
     /// 单步请求：安全点执行一个 tick 后回暂停。
@@ -319,7 +324,7 @@ fn init_state(spec: &'static ScenarioSpec, bins: crate::hostbin::HostBins) -> Ru
     RunState {
         spec,
         session: fresh_session(spec, bins.js.clone()),
-        code: None,
+        program: None,
         running: false,
         tps: 0,
         stepping: false,
@@ -379,14 +384,18 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
             }
             st.stepping = true;
         }
-        Ctrl::LoadCode { code, language } => {
+        Ctrl::LoadProgram {
+            files,
+            entry,
+            language,
+        } => {
             // 编辑即暂停（docs/architecture/05：当前 tick 结束后暂停，保存即重载）。
             st.running = false;
             st.next_tick_at = None;
             // 语言切换 = 宿主进程重启（docs 03）。Session（世界与受控
             // memory 树）保留，只换宿主二进制：drop_host_for_switch 杀掉
-            // 旧宿主并清空待重载代码（不可用 restart_host——它会把旧语言
-            // 代码拿到新宿主上重跑一次 init），随后 load_code 以新 bin
+            // 旧宿主并清空待重载程序（不可用 restart_host——它会把旧语言
+            // 代码拿到新宿主上重跑一次 init），随后 load_program 以新 bin
             // spawn——已提交 Game.memory 跨语言保留。
             if language != st.language {
                 diag_push(
@@ -401,11 +410,11 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
                 );
                 st.language = language;
                 st.session.cfg.host_bin = bin_of(st);
-                st.code = None;
+                st.program = None;
                 st.session.drop_host_for_switch();
                 *shared.host_ctl.lock().expect("host_ctl 锁") = None;
             }
-            load_code(st, shared, code);
+            load_program(st, shared, &PlayerProgram::new(files, entry));
             publish(st, shared);
         }
         Ctrl::Reset { scenario: id } => {
@@ -434,8 +443,8 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
                 "control",
                 json!({ "op": "reset", "ok": true, "scenario": id }),
             );
-            if let Some(code) = st.code.clone() {
-                load_code(st, shared, code);
+            if let Some(program) = st.program.clone() {
+                load_program(st, shared, &program);
             }
             publish(st, shared);
         }
@@ -450,10 +459,12 @@ fn bin_of(st: &RunState) -> PathBuf {
     }
 }
 
-fn load_code(st: &mut RunState, shared: &Shared, code: String) {
-    let outcome = st.session.load_code(&code);
+/// 加载玩家程序（文件集 + 入口）。成功才更新跨 reset 保留的待重载程序；
+/// 诊断事件沿用 `load_code` 操作名——前端与测试按此对账。
+fn load_program(st: &mut RunState, shared: &Shared, program: &PlayerProgram) {
+    let outcome = st.session.load_program(program);
     if outcome.ok {
-        st.code = Some(code);
+        st.program = Some(program.clone());
     }
     *shared.host_ctl.lock().expect("host_ctl 锁") = Some(st.session.host_control());
     diag_push(

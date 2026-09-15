@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { codeLabel } from "../codes";
+import { vFade } from "./fade";
 import { store } from "../store";
 import type { DiagEvent } from "../types";
 
@@ -66,7 +67,7 @@ function kindClass(kind: string): string {
       部分历史已过期：事件 #{{ store.diagGap.from }}–{{ store.diagGap.to }} 已被覆盖
       （诊断环有界，docs/architecture/02）
     </div>
-    <div class="min-h-0 overflow-auto px-2 pb-2 pt-1">
+    <div v-fade class="min-h-0 flex-1 overflow-auto px-2 pb-2 pt-1">
       <div v-for="e in events" :key="e.seq" class="flex gap-2 py-px text-xs">
         <span class="min-w-10 text-right font-mono text-dim">{{ e.tick }}</span>
         <span class="min-w-14" :class="kindClass(e.kind)">{{ KIND_LABELS[e.kind] ?? e.kind }}</span>
