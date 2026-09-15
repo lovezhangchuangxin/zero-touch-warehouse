@@ -397,48 +397,81 @@
     return undefined;
   }
 
-  function memProxy(node, kind) {
+  // 包装器记录：proxy 本体 + dead 毒化标志 + 本节点的槽位表。父级
+  // 替换 / 删除子槽时递归毒化整棵缓存子树——旧包装器（含孙辈）的
+  // 后续访问在本地抛 STALE（与服务端 kill_subtree 的 live() 检查同一
+  // 错误码，docs 06「失效句柄访问报 STALE」由本地标记兜住，不依赖
+  // 读穿透）。
+  function memProxyRec(node, kind) {
     const key = GEN + ":" + node;
-    const hit = handleCache.get(key);
-    if (hit !== undefined) return hit;
-    // 句柄钉死创建时的代次：提交后代次 +1，旧句柄按 STALE_MEMORY_REFERENCE
-    // 拒绝（docs 06「提交即重建句柄」，与服务端 check_gen 对齐、Python 侧
-    // 同语义）。handler 若读实时 GEN，服务端代次校验将形同虚设。
-    const gen = GEN;
-    const proxy =
-      kind === "map" ? new Proxy({}, mapHandler(node, gen)) : new Proxy({}, listHandler(node, gen));
-    handleCache.set(key, proxy);
-    return proxy;
+    let rec = handleCache.get(key);
+    if (rec === undefined) {
+      // 句柄钉死创建时的代次：提交后代次 +1，旧句柄按 STALE_MEMORY_REFERENCE
+      // 拒绝（docs 06「提交即重建句柄」，与服务端 check_gen 对齐、Python 侧
+      // 同语义）。handler 若读实时 GEN，服务端代次校验将形同虚设。
+      const gen = GEN;
+      const dead = { b: false };
+      const slots = new Map();
+      const proxy =
+        kind === "map"
+          ? new Proxy({}, mapHandler(node, gen, dead, slots))
+          : new Proxy({}, listHandler(node, gen, dead, slots));
+      rec = { proxy, dead, slots };
+      handleCache.set(key, rec);
+    }
+    return rec;
+  }
+
+  // 递归毒化：标记 rec 死亡并连带其槽位缓存内的全部后代记录。
+  function poisonTree(rec) {
+    rec.dead.b = true;
+    for (const child of rec.slots.values()) poisonTree(child);
+    rec.slots.clear();
+  }
+
+  function memProxy(node, kind) {
+    return memProxyRec(node, kind).proxy;
   }
 
   // 映射保留方法名：数据键优先（先查实际数据，存在则返回数据），
   // 否则返回绑定方法——名为 keys/size/to_dict 的数据不会被方法遮蔽。
   const MAP_METHOD_KEYS = new Set(["keys", "size", "to_dict"]);
 
-  function mapHandler(node, gen) {
-    // 槽位缓存：key → handle 型子代理（只缓存容器查找，标量与 missing
-    // 不缓存）。嵌套访问 m.a.b 从两次往返降为一次（b 的读取仍走 IPC）。
-    // 失效协议：本代理的 set / delete 陷阱必经此处，写透即删槽——
-    // 「同执行先写后读」保持；句柄别名语义不变（旧包装器仍持旧 node，
-    // 服务端 kill_subtree 照常拒绝）。服务端对玩家树的结构性改动只
-    // 可能落在 robots/<id> 的保留标量（_move），不产生句柄槽，此处
-    // 无需为它失效（代次变化时 handleCache 连同本缓存一并重建）。
-    const slots = new Map();
+  function mapHandler(node, gen, dead, slots) {
+    // 槽位缓存：key → handle 型子包装器记录（只缓存容器查找，标量与
+    // missing 不缓存）。嵌套访问 m.a.b 从两次往返降为一次（b 的读取仍
+    // 走 IPC）。失效协议：本代理的 set / delete 陷阱是「替换 / 删除
+    // 槐 k」的唯一路径（服务端对玩家树无结构性写，见 memory.rs 不变量
+    // 注释），写透即删槽并毒化旧子包装器——别名句柄的后续访问在本地
+    // 抛 STALE，与旧版读穿透服务端 live() 检查同码；槽位命中还需
+    // gen === GEN（跨代一律走 IPC，由服务端 check_gen 拒绝）。代次变化
+    // 时 handleCache 连同本缓存一并重建。
     // 返回三态：undefined = missing；Proxy = 容器；其余 = 标量值。
     const lookup = (k) => {
-      const hit = slots.get(k);
-      if (hit !== undefined) return hit;
+      if (gen === GEN) {
+        const hit = slots.get(k);
+        if (hit !== undefined) return hit.proxy;
+      }
       const r = rt("mem.map_get", { gen, node, key: k });
       if (r.t === "handle") {
-        const w = memProxy(r.node, r.kind);
-        slots.set(k, w);
-        return w;
+        const rec = memProxyRec(r.node, r.kind);
+        slots.set(k, rec);
+        return rec.proxy;
       }
       if (r.t === "scalar") return r.v;
       return undefined;
     };
+    // 替换 / 删除槽位：旧子树已死，递归毒化后别名访问本地报 STALE。
+    const invalidate = (k) => {
+      const e = slots.get(k);
+      if (e !== undefined) {
+        poisonTree(e);
+        slots.delete(k);
+      }
+    };
     return {
       get(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol") return undefined;
         if (MAP_METHOD_KEYS.has(k)) {
           const v = lookup(k);
@@ -454,25 +487,30 @@
         return lookup(String(k));
       },
       set(_t, k, v) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol") throw ipcError("INVALID_VALUE", "memory 不支持 symbol 键");
         rtVoid("mem.map_set", { gen, node, key: String(k), value: toWire(v) });
-        slots.delete(String(k));
+        invalidate(String(k));
         return true;
       },
       deleteProperty(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol") return false;
         rtVoid("mem.map_delete", { gen, node, key: String(k) });
-        slots.delete(String(k));
+        invalidate(String(k));
         return true;
       },
       has(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol") return false;
         return rt("mem.map_has", { gen, node, key: String(k) }).value === true;
       },
       ownKeys() {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         return rt("mem.map_keys", { gen, node }).keys;
       },
       getOwnPropertyDescriptor(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol") return undefined;
         const v = lookup(String(k));
         if (v === undefined) return undefined;
@@ -482,24 +520,27 @@
   }
 
   // 列表槽位缓存：与 mapHandler 的 slots 同构，按下标缓存 handle 型
-  // 子代理；remove 使下标整体平移，全清。
+  // 子包装器记录。set(i) 替换槽位——毒化旧子包装器；remove 使下标整体
+  // 平移但节点存活，只全清不毒化。
   function listLookup(node, gen, i, slots) {
-    const hit = slots.get(i);
-    if (hit !== undefined) return hit;
+    if (gen === GEN) {
+      const hit = slots.get(i);
+      if (hit !== undefined) return hit.proxy;
+    }
     const r = rt("mem.list_get", { gen, node, index: i });
     if (r.t === "handle") {
-      const w = memProxy(r.node, r.kind);
-      slots.set(i, w);
-      return w;
+      const rec = memProxyRec(r.node, r.kind);
+      slots.set(i, rec);
+      return rec.proxy;
     }
     if (r.t === "scalar") return r.v;
     return undefined;
   }
 
-  function listHandler(node, gen) {
-    const listSlots = new Map();
+  function listHandler(node, gen, dead, listSlots) {
     return {
       get(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol") {
           if (k === Symbol.iterator) return listIterator(node, gen);
           return undefined;
@@ -520,6 +561,9 @@
               throw ipcError("INVALID_ARGUMENT", "remove 需要非负整数下标");
             }
             rtVoid("mem.list_remove", { gen, node, index: i });
+            // 被删下标的节点死亡（毒化）；其余节点平移存活，只清缓存。
+            const e = listSlots.get(i);
+            if (e !== undefined) poisonTree(e);
             listSlots.clear();
           };
         }
@@ -529,14 +573,21 @@
         return undefined;
       },
       set(_t, k, v) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) {
           throw ipcError("INVALID_VALUE", "受控列表只支持数字下标写入");
         }
-        rtVoid("mem.list_set", { gen, node, index: parseInt(k, 10), value: toWire(v) });
-        listSlots.delete(parseInt(k, 10));
+        const i = parseInt(k, 10);
+        rtVoid("mem.list_set", { gen, node, index: i, value: toWire(v) });
+        const e = listSlots.get(i);
+        if (e !== undefined) {
+          poisonTree(e);
+          listSlots.delete(i);
+        }
         return true;
       },
       has(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) return false;
         return rt("mem.list_get", { gen, node, index: parseInt(k, 10) }).t !== "missing";
       },
@@ -548,12 +599,14 @@
         return false;
       },
       ownKeys() {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         const n = rt("mem.list_size", { gen, node }).value;
         const keys = [];
         for (let i = 0; i < n; i++) keys.push(String(i));
         return keys;
       },
       getOwnPropertyDescriptor(_t, k) {
+        if (dead.b) throw ipcError("STALE_MEMORY_REFERENCE", "容器已失效");
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) return undefined;
         const v = listLookup(node, gen, parseInt(k, 10), listSlots);
         if (v === undefined) return undefined;

@@ -121,6 +121,49 @@ def loop():
 }
 
 #[test]
+fn py_stale_handle_cached_read_after_replacement() {
+    // 槽位缓存评审回归（与 JS 侧 a0_memory 同款锚点）：容器读命中缓存
+    // 不得绕过「失效句柄访问报 STALE」。
+    let mut s = common::session(demo_world());
+    let init = s.load_code(
+        "Game.memory['m'] = {'a': {'b': {'c': 1}}}\n\n\ndef loop():\n    h = Game.memory['m']['a']\n    deep = Game.memory['m']['a']['b']\n    Game.memory['m'] = 2\n    r1 = r2 = r3 = 'none'\n    try:\n        h['b']\n    except Exception as e:\n        r1 = getattr(e, 'code', type(e).__name__)\n    try:\n        deep['c']\n    except Exception as e:\n        r2 = getattr(e, 'code', type(e).__name__)\n    try:\n        deep['c'] = 9\n    except Exception as e:\n        r3 = getattr(e, 'code', type(e).__name__)\n    Game.log('stale-read', r1, r2, r3, 'new', str(Game.memory['m']))\n",
+    );
+    assert!(init.ok, "初始化失败：{:?}", init.fault);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    let line = s.logs.back().unwrap().1.clone();
+    assert!(
+        line.starts_with(
+            "stale-read STALE_MEMORY_REFERENCE STALE_MEMORY_REFERENCE STALE_MEMORY_REFERENCE"
+        ),
+        "各深度旧句柄读写均须报 STALE：{line}"
+    );
+    assert!(line.ends_with("new 2.0"), "新值不受旧句柄影响：{line}");
+}
+
+#[test]
+fn py_list_remove_survives_slot_cache() {
+    // 槽位缓存评审回归（P0 修复锚点）：MemoryList.remove 不得因槽位缓存
+    // 崩溃或读到平移前的旧值。
+    let mut s = common::session(demo_world());
+    let init = s.load_code(
+        "Game.memory['l'] = [10, 20, 30]\nGame.memory['nest'] = {'inner': [1]}\n\n\ndef loop():\n    l = Game.memory['l']\n    warm = l[1]\n    inner = Game.memory['nest']['inner']\n    l.remove(0)\n    Game.log('shift', str(l[0]), str(l[1]), str(len(l)), str(warm))\n    inner.append(2)\n    Game.log('inner', str(len(Game.memory['nest']['inner'])))\n",
+    );
+    assert!(init.ok, "初始化失败：{:?}", init.fault);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    let logs: Vec<&str> = s.logs.iter().map(|(_, l)| l.as_str()).collect();
+    assert!(
+        logs.contains(&"shift 20.0 30.0 2 20.0"),
+        "remove 后下标平移：{logs:?}"
+    );
+    assert!(
+        logs.contains(&"inner 2"),
+        "remove 不误伤其它容器句柄：{logs:?}"
+    );
+}
+
+#[test]
 fn memory_mutating_mixins_rejected() {
     // docs 06：受控容器操作面由文档明确列出，不承诺全部原生容器方法。
     // ABC 混入的变更型方法（pop/update/clear/extend 等）须可读拒绝

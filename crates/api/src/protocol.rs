@@ -447,7 +447,11 @@ pub fn err_result(code: &str, message: &str) -> Box<RawValue> {
 
 /// 把已序列化的 JSON 文本包为线格式原始值。正常路径（绑定层 / serde
 /// 产物）恒为合法 JSON；防御性兜底把非法文本退化为 JSON 字符串字面量，
-/// 保持「任意文本都能上线、解析失败发生在主进程 op 侧」的旧语义。
+/// 使其仍可上线（与 v3 线格式的「任意字符串负载」等价可达）。注意与
+/// v3 的差异：v3 中非法文本在主进程 parse 即报 BAD_PAYLOAD，v4 的退化
+/// 形态对带 key 要求的 op 同样落 BAD_PAYLOAD，但对 mem.map_size 等
+/// 无 key 要求的 op 会以 MAX gen 走到记忆侧错误码——错误码有漂移，
+/// 无状态影响。
 pub fn raw_or_quoted(s: String) -> Box<RawValue> {
     match RawValue::from_string(s.clone()) {
         Ok(v) => v,

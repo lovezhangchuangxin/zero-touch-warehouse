@@ -203,6 +203,70 @@ export function loop() {
 }
 
 #[test]
+fn stale_handle_cached_read_after_replacement() {
+    // 槽位缓存评审回归：容器读命中缓存（含孙辈）不得绕过「失效句柄
+    // 访问报 STALE」——先用嵌套读热缓存，再替换祖先，各深度旧句柄的
+    // 读与写都必须报错（本地毒化树兜住，不依赖读穿透服务端）。
+    let code = r#"
+export function loop() {
+  Game.memory["m"] = { a: { b: { c: 1 } } };
+  const h = Game.memory["m"]["a"];       // a 句柄(热缓存)
+  const deep = Game.memory["m"]["a"]["b"]; // b 句柄(缓存在 a 的槽位)
+  Game.memory["m"] = 2;                  // 替换祖先 → 整棵子树死亡
+  let r1 = "none", r2 = "none", r3 = "none";
+  try { h["b"]; } catch (e) { r1 = e.code; }
+  try { deep["c"]; } catch (e) { r2 = e.code; }
+  try { deep["c"] = 9; } catch (e) { r3 = e.code; }
+  Game.log("stale-read", r1, r2, r3, "new", Game.memory["m"]);
+}
+"#;
+    let mut s = session(demo_world());
+    assert!(s.load_code(code).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok);
+    let line = s.logs.back().unwrap().1.clone();
+    assert!(
+        line.starts_with(
+            "stale-read STALE_MEMORY_REFERENCE STALE_MEMORY_REFERENCE STALE_MEMORY_REFERENCE"
+        ),
+        "各深度旧句柄读写均须报 STALE：{line}"
+    );
+    assert!(line.ends_with("new 2"), "新值不受旧句柄影响：{line}");
+}
+
+#[test]
+fn list_remove_survives_slot_cache() {
+    // 槽位缓存评审回归（P0 同源路径）：remove 平移下标后，缓存下标必须
+    // 整体失效——读到的应是平移后的新值，而不是旧包装器。
+    let code = r#"
+export function loop() {
+  Game.memory["l"] = [10, 20, 30];
+  const l = Game.memory["l"];
+  const warm = l[1];                      // 热缓存下标 1(标量,不入槽)
+  Game.memory["nest"] = { inner: [1] };
+  const inner = Game.memory["nest"]["inner"]; // 容器句柄入槽
+  l.remove(0);
+  Game.log("shift", l[0], l[1], l.length, warm);
+  inner.push(2);
+  Game.log("inner", Game.memory["nest"]["inner"].length);
+}
+"#;
+    let mut s = session(demo_world());
+    assert!(s.load_code(code).ok);
+    let out = s.tick();
+    assert_eq!(out.kind, OutcomeKind::Ok, "{:?}", s.fault);
+    let logs: Vec<&str> = s.logs.iter().map(|(_, l)| l.as_str()).collect();
+    assert!(
+        logs.contains(&"shift 20 30 2 20"),
+        "remove 后下标平移：{logs:?}"
+    );
+    assert!(
+        logs.contains(&"inner 2"),
+        "remove 不误伤其它容器句柄：{logs:?}"
+    );
+}
+
+#[test]
 fn memory_survives_hot_reload_and_host_restart() {
     // memory 跨热重载保留；跨宿主重启保留（重新建立句柄后仍可访问）。
     let mut s = session(demo_world());

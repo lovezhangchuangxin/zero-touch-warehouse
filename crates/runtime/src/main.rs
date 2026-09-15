@@ -311,11 +311,13 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
             let mut dup = frame.clone();
             if let HostFrame::Request { payload, .. } = &mut dup {
                 // 指纹不同，负载仍可解析。v4 注意：RawValue 的捕获区间
-                // 会跳过前导空白，只能在值内部（`{` 之后）插空格才能
-                // 跨线存活。
+                // 会跳过值前后空白，只能在值内部（首字符之后）插空格
+                // 才能跨线存活；单字符标量无处可插，退化为空数组占位。
                 let mut text = payload.get().to_string();
-                if !text.is_empty() {
+                if text.chars().count() >= 2 {
                     text.insert(1, ' ');
+                } else {
+                    text = "[]".to_string();
                 }
                 *payload = ztw_api::protocol::raw_or_quoted(text);
             }

@@ -982,6 +982,11 @@ impl Session {
             let child = self.host.as_ref().expect("宿主在场").child.clone();
             let done = done.clone();
             let fired = fired.clone();
+            let dead = self
+                .host
+                .as_ref()
+                .map(|h| h.dead.clone())
+                .expect("宿主在场");
             let grace_total = budget_ms + self.cfg.grace_ms;
             let _ = std::thread::Builder::new()
                 .name("ztw-watchdog".into())
@@ -1007,6 +1012,10 @@ impl Session {
                     }
                     if !*g {
                         fired.store(true, Ordering::SeqCst);
+                        // 直读模式下无人再读管道，主动置 dead——宿主在
+                        // 「Complete 已读出、done 锁未取得」窗口被杀时
+                        // host_alive 不跨间隙撒谎。
+                        dead.store(true, Ordering::SeqCst);
                         kill_and_reap(&child);
                     }
                 });
@@ -1171,6 +1180,11 @@ impl Session {
                             send_reply!(request_id, reply);
                             continue;
                         }
+                        // 指纹 =（op, payload）零键 SipHash-1-3 哈希。信任
+                        // 假设：宿主生产路径从不重发请求号（FIFO 串行），
+                        // 同号异负载只能来自宿主自身 bug 或恶意构造——随机
+                        // 碰撞界 ~n²/2⁶⁵（n ≤ 请求上限 + 1024），可忽略；
+                        // 精确串比对的成本在此热路径不划算。
                         let mut fp_hash = std::collections::hash_map::DefaultHasher::new();
                         op.hash(&mut fp_hash);
                         payload.get().hash(&mut fp_hash);
@@ -1498,7 +1512,8 @@ impl Session {
                 cv.notify_all();
             }
         }
-        // 宿主仍活着才放回通道与管道（死亡则丢弃，drop_host 已处理）。
+        // 宿主句柄仍在才放回管道（判据是 host.is_some：死亡路径只置
+        // dead 标志，由调用方对 HostTerminated 的 drop_host 统一收尾）。
         if self.host.is_some() {
             self.host_stdin = Some(stdin);
             self.host_stdout = Some(stdout);
@@ -1537,6 +1552,12 @@ impl Session {
         }
     }
 
+    // 结构不变量（被两侧绑定层的记忆槽位缓存依赖）：主进程对玩家
+    // memory 树的结构性改动只有 init 的 fork/commit 路径（代次 +1，宿主
+    // 侧随代次重建缓存）；执行期服务端不替换 / 不删除玩家容器节点
+    //（robots/<id> 的保留标量 _move 为纯标量写）。若未来引入服务端侧
+    // 结构清理（如 destroy 清 robots 记录），必须同步提供宿主可观测的
+    // 失效信号（代次或专用 op），否则宿主缓存会跨 tick 返回死句柄。
     fn memory_target_mut(&mut self) -> &mut MemoryTree {
         match (&self.in_init, &mut self.init_branch) {
             (true, Some(branch)) => branch,

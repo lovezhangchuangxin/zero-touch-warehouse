@@ -487,7 +487,29 @@ class MemoryMap(MutableMapping):
     def __init__(self, gen, node):
         self._gen = gen
         self._node = node
+        # 槽位缓存：key → 子代理实例（只缓存 handle 型结果）。命中还需
+        # _gen == GEN（跨代一律走 IPC，由服务端 check_gen 拒绝）。
         self._slots = {}
+        # 毒化标志：父级替换 / 删除本槽位时置位，后续访问本地抛 STALE
+        # （与服务端 kill_subtree 的 live() 检查同码）。
+        self._dead = False
+
+    def _raise_if_dead(self):
+        if self._dead:
+            raise GameError("STALE_MEMORY_REFERENCE", "容器已失效")
+
+    @staticmethod
+    def _poison_tree(child):
+        """递归毒化缓存子树：标记死亡并连带其槽位内的全部后代代理。"""
+        child._dead = True
+        for grand in list(child._slots.values()):
+            MemoryMap._poison_tree(grand)
+        child._slots.clear()
+
+    def _invalidate(self, k):
+        child = self._slots.pop(k, None)
+        if child is not None:
+            self._poison_tree(child)
 
     def __eq__(self, other):
         return (
@@ -516,10 +538,12 @@ class MemoryMap(MutableMapping):
         raise GameError("INVALID_OPERATION", "受控映射不支持 setdefault（读取请用 m[key] 或 in）")
 
     def __getitem__(self, key):
+        self._raise_if_dead()
         k = str(key)
-        hit = self._slots.get(k)
-        if hit is not None:
-            return hit
+        if self._gen == GEN:
+            hit = self._slots.get(k)
+            if hit is not None:
+                return hit
         r = _ipc("mem.map_get", {"gen": self._gen, "node": self._node, "key": k})
         if r["t"] == "handle":
             w = _mem_proxy(r["node"], r["kind"])
@@ -530,24 +554,29 @@ class MemoryMap(MutableMapping):
         return r["v"]
 
     def __setitem__(self, key, value):
+        self._raise_if_dead()
         k = str(key)
         _ipc("mem.map_set", {
             "gen": self._gen, "node": self._node, "key": k, "value": _to_wire(value),
         })
-        self._slots.pop(k, None)
+        self._invalidate(k)
 
     def __delitem__(self, key):
+        self._raise_if_dead()
         k = str(key)
         _ipc("mem.map_delete", {"gen": self._gen, "node": self._node, "key": k})
-        self._slots.pop(k, None)
+        self._invalidate(k)
 
     def __iter__(self):
+        self._raise_if_dead()
         return iter(_ipc("mem.map_keys", {"gen": self._gen, "node": self._node})["keys"])
 
     def __len__(self):
+        self._raise_if_dead()
         return _ipc("mem.map_size", {"gen": self._gen, "node": self._node})["value"]
 
     def to_dict(self):
+        self._raise_if_dead()
         return _wire_to_plain(_ipc("mem.to_value", {"gen": self._gen, "node": self._node})["value"])
 
     def __repr__(self):
@@ -562,6 +591,10 @@ class MemoryList(MutableSequence):
     def __init__(self, gen, node):
         self._gen = gen
         self._node = node
+        # 与 MemoryMap._slots 同构：下标 → 子代理；set(i) 毒化旧子代理，
+        # remove 使下标整体平移但节点存活——只全清不毒化。
+        self._slots = {}
+        self._dead = False
 
     def __eq__(self, other):
         return (
@@ -570,42 +603,66 @@ class MemoryList(MutableSequence):
             and other._node == self._node
         )
 
+    def _raise_if_dead(self):
+        if self._dead:
+            raise GameError("STALE_MEMORY_REFERENCE", "容器已失效")
+
     def _check_index(self, i):
         if not isinstance(i, int) or isinstance(i, bool) or i < 0:
             raise GameError("INVALID_ARGUMENT", "下标需要非负整数")
 
     def __getitem__(self, index):
+        self._raise_if_dead()
         self._check_index(index)
+        if self._gen == GEN:
+            hit = self._slots.get(index)
+            if hit is not None:
+                return hit
         r = _ipc("mem.list_get", {"gen": self._gen, "node": self._node, "index": index})
+        if r["t"] == "handle":
+            w = _mem_proxy(r["node"], r["kind"])
+            self._slots[index] = w
+            return w
         if r["t"] == "missing":
             raise IndexError(index)
-        return _read_result(r)
+        return r["v"]
 
     def __setitem__(self, index, value):
+        self._raise_if_dead()
         self._check_index(index)
         _ipc("mem.list_set", {
             "gen": self._gen, "node": self._node, "index": index, "value": _to_wire(value),
         })
+        child = self._slots.pop(index, None)
+        if child is not None:
+            MemoryMap._poison_tree(child)
 
     def __delitem__(self, index):
         raise GameError("INVALID_OPERATION", "受控列表删除请使用 remove(index)")
 
     def __iter__(self):
+        self._raise_if_dead()
         entries = _ipc("mem.list_entries", {"gen": self._gen, "node": self._node})["entries"]
         for r in entries:
             yield _read_result(r)
 
     def __len__(self):
+        self._raise_if_dead()
         return _ipc("mem.list_size", {"gen": self._gen, "node": self._node})["value"]
 
     def append(self, value):
+        self._raise_if_dead()
         _ipc("mem.list_append", {"gen": self._gen, "node": self._node, "value": _to_wire(value)})
 
     def remove(self, index):
         """按下标删除（与 JS 版 remove(i) 一致）。"""
+        self._raise_if_dead()
         self._check_index(index)
         _ipc("mem.list_remove", {"gen": self._gen, "node": self._node, "index": index})
-        # 下标整体平移，槽位全清。
+        # 被删下标的节点死亡（毒化）；其余节点平移存活，只清缓存。
+        child = self._slots.pop(index, None)
+        if child is not None:
+            MemoryMap._poison_tree(child)
         self._slots.clear()
 
     def insert(self, index, value):
@@ -624,6 +681,7 @@ class MemoryList(MutableSequence):
         raise GameError("INVALID_OPERATION", "受控列表不支持 clear（删除请用 remove(index)）")
 
     def to_list(self):
+        self._raise_if_dead()
         return _wire_to_plain(_ipc("mem.to_value", {"gen": self._gen, "node": self._node})["value"])
 
     def __repr__(self):
