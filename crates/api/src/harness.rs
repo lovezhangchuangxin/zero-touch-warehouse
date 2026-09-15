@@ -1,6 +1,7 @@
-//! A0 headless 主进程替身。扮演 docs/architecture/01 中 `crates/desktop`
-//! 的宿主生命周期管理与世界线程角色，仅供 `cargo test` 与量测使用，
-//! 不属于正式发布的主进程。
+//! 会话层：世界线程消息循环、执行生命周期与恢复路径（docs/
+//! architecture/03）。desktop 生产世界线程（crates/desktop 的
+//! world_thread）与全部集成测试共用本层，经 [`Session`] 直驱；op 分发
+//! 在 [`crate::ops`]，宿主进程管理在 [`crate::host`]。
 //!
 //! 世界线程按消息循环实现（docs/architecture/03）：发出执行请求后在
 //! 本线程直读宿主管道，只处理四类事件——Game 请求应答、执行完成、
@@ -10,10 +11,9 @@
 
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -21,11 +21,14 @@ use serde_json::value::RawValue;
 use ztw_model::{MemValue, OrderSide};
 use ztw_sim::World;
 
-use crate::memory::{MemoryLimits, MemoryTree, NodeKind, ReadResult};
-use crate::mirror::{MirrorDelta, MirrorView, WorldRevision};
+use crate::host::{HostProc, kill_and_reap};
+use crate::memory::{MemoryLimits, MemoryTree};
+use crate::mirror::{MirrorView, WorldRevision};
 use crate::protocol::{
-    ExecStats, HostFrame, MainFrame, err_result, ok_result, raw_or_quoted, read_frame, write_frame,
+    ExecStats, HostFrame, MainFrame, err_result, raw_or_quoted, read_frame, write_frame,
 };
+
+pub use crate::host::HostControl;
 
 // ---------------------------------------------------------------------------
 // 配置
@@ -190,38 +193,6 @@ pub enum DiagTapKind {
 const DIAG_TAP_CAP: usize = 256;
 
 // ---------------------------------------------------------------------------
-// 终止按钮独立控制路径（docs/architecture/03：不排队在 Game 请求之后）
-// ---------------------------------------------------------------------------
-
-/// 宿主进程的外部控制柄：从任意线程直接终止宿主，不经过世界线程的
-/// Game 请求队列。置位 killed 后杀进程，世界线程在消息循环出口按
-/// `killed_by_us` 将故障分类为 `KILLED_BY_MAIN`。
-#[derive(Debug, Clone, Default)]
-pub struct HostControl {
-    child: Option<Arc<Mutex<Child>>>,
-    killed: Arc<AtomicBool>,
-}
-
-impl HostControl {
-    /// 标记为主进程主动终止并杀死宿主（幂等；宿主不在场则仅置位标记，
-    /// 下一次执行的写失败 / EOF 路径据此分类）。
-    pub fn kill(&self) {
-        // 无宿主在场（尚未加载代码 / 刚被回收）时不置标记：跨代次残留的
-        // 标记会把之后真实 crash 误分类为 KILLED_BY_MAIN。
-        let Some(child) = &self.child else {
-            return;
-        };
-        self.killed.store(true, Ordering::SeqCst);
-        kill_and_reap(child);
-    }
-
-    /// 是否已被标记为主进程主动终止。
-    pub fn is_marked(&self) -> bool {
-        self.killed.load(Ordering::SeqCst)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 量测累计
 // ---------------------------------------------------------------------------
 
@@ -245,110 +216,6 @@ pub struct SessionStats {
 impl SessionStats {
     pub fn take(&mut self) -> SessionStats {
         std::mem::take(self)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 宿主进程
-// ---------------------------------------------------------------------------
-
-struct HostProc {
-    child: Arc<Mutex<Child>>,
-    stderr_tail: Arc<Mutex<Vec<u8>>>,
-    /// 执行期读到 EOF / 坏帧，或被本进程终止（进程退出）。
-    dead: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    stderr_thread: JoinHandle<()>,
-}
-
-impl HostProc {
-    fn spawn(
-        cfg: &SessionConfig,
-    ) -> std::io::Result<(
-        HostProc,
-        ChildStdin,
-        std::io::BufReader<std::process::ChildStdout>,
-    )> {
-        let mut cmd = Command::new(&cfg.host_bin);
-        cmd.args([
-            "--heap-limit",
-            &cfg.heap_limit.to_string(),
-            "--stack-limit",
-            &cfg.stack_limit.to_string(),
-            "--frame-limit",
-            &cfg.frame_limit.to_string(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-        for (k, v) in &cfg.env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-        let dead = Arc::new(AtomicBool::new(false));
-        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
-        let tail = stderr_tail.clone();
-        let stderr_thread = std::thread::Builder::new()
-            .name("ztw-host-stderr".into())
-            .spawn(move || {
-                use std::io::Read;
-                let mut stderr = stderr;
-                let mut buf = [0u8; 1024];
-                loop {
-                    match stderr.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let mut t = tail.lock().unwrap();
-                            let keep = 16 * 1024;
-                            if t.len() + n > keep {
-                                let drop = (t.len() + n - keep).min(t.len());
-                                t.drain(0..drop);
-                            }
-                            t.extend_from_slice(&buf[..n]);
-                        }
-                    }
-                }
-            })
-            .expect("spawn stderr reader");
-        let proc = HostProc {
-            child: Arc::new(Mutex::new(child)),
-            stderr_tail,
-            dead,
-            stderr_thread,
-        };
-        // BufReader：宿主单次写整帧后，前缀 + 体的两次 read 命中同一缓冲，
-        // 每帧一次 syscall（跨帧残余也留在缓冲里）。
-        Ok((proc, stdin, std::io::BufReader::new(stdout)))
-    }
-}
-
-/// 终止宿主并异步回收：SIGKILL 后由独立线程 wait() 收尸，
-/// 避免长时间浸泡运行累积僵尸进程。
-fn kill_and_reap(child: &Arc<Mutex<Child>>) {
-    if let Ok(mut c) = child.lock() {
-        let _ = c.kill();
-    }
-    let child = child.clone();
-    let _ = std::thread::Builder::new()
-        .name("ztw-reaper".into())
-        .spawn(move || {
-            if let Ok(mut c) = child.lock() {
-                let _ = c.wait();
-            }
-        });
-}
-
-impl HostProc {
-    fn kill(&self) {
-        self.dead.store(true, Ordering::SeqCst);
-        kill_and_reap(&self.child);
-    }
-
-    fn stderr_text(&self) -> String {
-        String::from_utf8_lossy(&self.stderr_tail.lock().unwrap()).into_owned()
     }
 }
 
@@ -457,12 +324,12 @@ pub struct Session {
     /// 本执行已见到的最大请求号（含被 EXEC_CLOSED / REQUEST_LIMIT 拒绝的）。
     /// 完成帧引用宿主的最后发送号，须与“已见”对账而非“已执行”。
     exec_seen_request_id: u64,
-    revision: WorldRevision,
+    pub(crate) revision: WorldRevision,
     mirror_cache: Option<String>,
     pub stats: SessionStats,
     /// 初始化期间的临时 memory 分支。
     init_branch: Option<MemoryTree>,
-    in_init: bool,
+    pub(crate) in_init: bool,
     /// 主进程主动终止标记（“终止按钮”路径的结局分类）。
     killed_by_us: Arc<AtomicBool>,
     /// 最近一次已应答的 Game 操作名（诊断用）。
@@ -524,7 +391,7 @@ impl Session {
         }
     }
 
-    fn diag_push(
+    pub(crate) fn diag_push(
         &mut self,
         kind: DiagTapKind,
         op: &str,
@@ -941,7 +808,7 @@ impl Session {
         (us / 1000).min(self.cfg.tick_budget_cap_ms).max(1)
     }
 
-    fn produce_mirror(&mut self) -> String {
+    pub(crate) fn produce_mirror(&mut self) -> String {
         let t0 = Instant::now();
         let view = MirrorView::from_world(&self.world, self.revision.get());
         let json = view.to_json();
@@ -1558,7 +1425,7 @@ impl Session {
     //（robots/<id> 的保留标量 _move 为纯标量写）。若未来引入服务端侧
     // 结构清理（如 destroy 清 robots 记录），必须同步提供宿主可观测的
     // 失效信号（代次或专用 op），否则宿主缓存会跨 tick 返回死句柄。
-    fn memory_target_mut(&mut self) -> &mut MemoryTree {
+    pub(crate) fn memory_target_mut(&mut self) -> &mut MemoryTree {
         match (&self.in_init, &mut self.init_branch) {
             (true, Some(branch)) => branch,
             (true, None) => {
@@ -1570,499 +1437,6 @@ impl Session {
         }
     }
 
-    // -- Game 请求处理 -------------------------------------------------------
-
-    /// 初始化阶段禁用动作与管理操作（docs/architecture/03），统一记录诊断。
-    fn reject_init_phase(&mut self, op: &str, subject: Option<ztw_model::Id>) -> Box<RawValue> {
-        self.diag_push(
-            DiagTapKind::AcceptFail,
-            op,
-            ztw_model::codes::INIT_PHASE,
-            subject,
-            "初始化阶段禁止动作与管理操作".to_string(),
-        );
-        ok_result(serde_json::json!({"code": ztw_model::codes::INIT_PHASE}))
-    }
-
-    /// 动作受理结果记录：受理失败进诊断；成功受理的最终成败由结算事件
-    /// （last_results）承担，不重复记录。
-    fn diag_accept(&mut self, op: &str, code: &str, robot_id: ztw_model::Id, detail: String) {
-        if code != ztw_model::codes::OK {
-            self.diag_push(DiagTapKind::AcceptFail, op, code, Some(robot_id), detail);
-        }
-    }
-
-    fn handle_op(&mut self, op: &str, payload: &RawValue) -> Box<RawValue> {
-        macro_rules! parse {
-            () => {
-                match serde_json::from_str::<serde_json::Value>(payload.get()) {
-                    Ok(v) => v,
-                    Err(e) => return err_result("BAD_PAYLOAD", &e.to_string()),
-                }
-            };
-        }
-        match op {
-            "robot.move" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("robot.move", p["robot_id"].as_u64());
-                }
-                let (Some(robot_id), Some(dx), Some(dy)) =
-                    (p["robot_id"].as_u64(), p["dx"].as_i64(), p["dy"].as_i64())
-                else {
-                    return err_result("BAD_PAYLOAD", "robot.move 参数缺失");
-                };
-                let code = self.world.accept_move(robot_id, dx as i32, dy as i32);
-                self.diag_accept("robot.move", code, robot_id, format!("dx={dx},dy={dy}"));
-                ok_result(serde_json::json!({ "code": code }))
-            }
-            "robot.charge" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("robot.charge", p["robot_id"].as_u64());
-                }
-                let Some(robot_id) = p["robot_id"].as_u64() else {
-                    return err_result("BAD_PAYLOAD", "robot.charge 参数缺失");
-                };
-                let code = self.world.accept_charge(robot_id);
-                self.diag_accept("robot.charge", code, robot_id, String::new());
-                ok_result(serde_json::json!({ "code": code }))
-            }
-            "robot.take" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("robot.take", p["robot_id"].as_u64());
-                }
-                let (Some(robot_id), Some(target_id), Some(box_id)) = (
-                    p["robot_id"].as_u64(),
-                    p["target_id"].as_u64(),
-                    p["box_id"].as_u64(),
-                ) else {
-                    return err_result("BAD_PAYLOAD", "robot.take 参数缺失");
-                };
-                let code = self.world.accept_take(robot_id, target_id, box_id);
-                self.diag_accept("robot.take", code, robot_id, format!("box={box_id}"));
-                ok_result(serde_json::json!({ "code": code }))
-            }
-            "robot.give" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("robot.give", p["robot_id"].as_u64());
-                }
-                let (Some(robot_id), Some(target_id)) =
-                    (p["robot_id"].as_u64(), p["target_id"].as_u64())
-                else {
-                    return err_result("BAD_PAYLOAD", "robot.give 参数缺失");
-                };
-                let box_id = p["box_id"].as_u64(); // 缺省 = 当前携带物
-                let code = self.world.accept_give(robot_id, target_id, box_id);
-                self.diag_accept("robot.give", code, robot_id, format!("box={box_id:?}"));
-                ok_result(serde_json::json!({ "code": code }))
-            }
-            "robot.pick" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("robot.pick", p["robot_id"].as_u64());
-                }
-                let (Some(robot_id), Some(x), Some(y)) =
-                    (p["robot_id"].as_u64(), p["x"].as_i64(), p["y"].as_i64())
-                else {
-                    return err_result("BAD_PAYLOAD", "robot.pick 参数缺失");
-                };
-                let code = self.world.accept_pick(robot_id, x as i32, y as i32);
-                self.diag_accept("robot.pick", code, robot_id, format!("x={x},y={y}"));
-                ok_result(serde_json::json!({ "code": code }))
-            }
-            "robot.drop" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("robot.drop", p["robot_id"].as_u64());
-                }
-                let (Some(robot_id), Some(x), Some(y)) =
-                    (p["robot_id"].as_u64(), p["x"].as_i64(), p["y"].as_i64())
-                else {
-                    return err_result("BAD_PAYLOAD", "robot.drop 参数缺失");
-                };
-                let box_id = p["box_id"].as_u64(); // 缺省 = 当前携带物
-                let code = self.world.accept_drop(robot_id, x as i32, y as i32, box_id);
-                self.diag_accept("robot.drop", code, robot_id, format!("x={x},y={y}"));
-                ok_result(serde_json::json!({ "code": code }))
-            }
-            "market.take" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("market.take", p["order_id"].as_u64());
-                }
-                let Some(order_id) = p["order_id"].as_u64() else {
-                    return err_result("BAD_PAYLOAD", "market.take 参数缺失");
-                };
-                let (code, eff) = self.world.manage_take(order_id);
-                if code == ztw_model::codes::OK {
-                    let eff = eff.expect("OK 必带影响摘要");
-                    self.diag_push(
-                        DiagTapKind::Manage,
-                        "market.take",
-                        code,
-                        Some(order_id),
-                        format!(
-                            "接单 {} {}×{} @{} milli，装卸位 #{}，余额 {} milli",
-                            eff.order.side.as_str(),
-                            eff.order.goods_type,
-                            eff.order.qty,
-                            eff.order.unit_price_milli,
-                            eff.dock_id,
-                            self.world.gold_milli
-                        ),
-                    );
-                    let delta = MirrorDelta::from_take(&self.world, &eff);
-                    self.mgmt_ok(delta)
-                } else {
-                    self.diag_push(
-                        DiagTapKind::AcceptFail,
-                        "market.take",
-                        code,
-                        Some(order_id),
-                        String::new(),
-                    );
-                    ok_result(serde_json::json!({ "code": code }))
-                }
-            }
-            "market.cancel" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("market.cancel", p["order_id"].as_u64());
-                }
-                let Some(order_id) = p["order_id"].as_u64() else {
-                    return err_result("BAD_PAYLOAD", "market.cancel 参数缺失");
-                };
-                let (code, eff) = self.world.manage_cancel(order_id);
-                if code == ztw_model::codes::OK {
-                    let eff = eff.expect("OK 必带影响摘要");
-                    self.diag_push(
-                        DiagTapKind::Manage,
-                        "market.cancel",
-                        code,
-                        Some(order_id),
-                        format!(
-                            "取消订单，手续费 {} milli，退款 {} milli，移除车辆 {:?}，释放装卸位 {:?}",
-                            eff.fee_milli, eff.refund_milli, eff.vehicle_id, eff.dock_id
-                        ),
-                    );
-                    let delta = MirrorDelta::from_cancel(&self.world, &eff);
-                    self.mgmt_ok(delta)
-                } else {
-                    self.diag_push(
-                        DiagTapKind::AcceptFail,
-                        "market.cancel",
-                        code,
-                        Some(order_id),
-                        String::new(),
-                    );
-                    ok_result(serde_json::json!({ "code": code }))
-                }
-            }
-            "manage.destroy" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("manage.destroy", p["target_id"].as_u64());
-                }
-                let Some(target_id) = p["target_id"].as_u64() else {
-                    return err_result("BAD_PAYLOAD", "manage.destroy 参数缺失");
-                };
-                let (code, eff) = self.world.manage_destroy(target_id);
-                if code == ztw_model::codes::OK {
-                    let eff = eff.expect("OK 必带影响摘要");
-                    self.diag_push(
-                        DiagTapKind::Manage,
-                        "manage.destroy",
-                        code,
-                        Some(target_id),
-                        format!(
-                            "销毁 {:?} #{}，退款 {} milli，释放格 {:?}",
-                            eff.kind, eff.target_id, eff.refund_milli, eff.freed_cells
-                        ),
-                    );
-                    let delta = MirrorDelta::from_destroy(&self.world, &eff);
-                    self.mgmt_ok(delta)
-                } else {
-                    self.diag_push(
-                        DiagTapKind::AcceptFail,
-                        "manage.destroy",
-                        code,
-                        Some(target_id),
-                        String::new(),
-                    );
-                    ok_result(serde_json::json!({ "code": code }))
-                }
-            }
-            "manage.borrow" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("manage.borrow", None);
-                }
-                let Some(amount_milli) = p["amount_milli"].as_i64() else {
-                    return err_result("BAD_PAYLOAD", "manage.borrow 参数缺失");
-                };
-                let (code, eff) = self.world.manage_borrow(amount_milli);
-                if code == ztw_model::codes::OK {
-                    let eff = eff.expect("OK 必带影响摘要");
-                    self.diag_push(
-                        DiagTapKind::Manage,
-                        "manage.borrow",
-                        code,
-                        None,
-                        format!(
-                            "借款 {} milli，余额 {} milli，欠款 {} milli",
-                            eff.amount_milli, self.world.gold_milli, self.world.debt_milli
-                        ),
-                    );
-                    let delta = MirrorDelta::from_borrow(&self.world, &eff);
-                    self.mgmt_ok(delta)
-                } else {
-                    self.diag_push(
-                        DiagTapKind::AcceptFail,
-                        "manage.borrow",
-                        code,
-                        None,
-                        format!("amount={amount_milli}"),
-                    );
-                    ok_result(serde_json::json!({ "code": code }))
-                }
-            }
-            "manage.repay" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("manage.repay", None);
-                }
-                let Some(amount_milli) = p["amount_milli"].as_i64() else {
-                    return err_result("BAD_PAYLOAD", "manage.repay 参数缺失");
-                };
-                let (code, eff) = self.world.manage_repay(amount_milli);
-                if code == ztw_model::codes::OK {
-                    let eff = eff.expect("OK 必带影响摘要");
-                    self.diag_push(
-                        DiagTapKind::Manage,
-                        "manage.repay",
-                        code,
-                        None,
-                        format!(
-                            "归还 {} milli，余额 {} milli，欠款 {} milli",
-                            eff.amount_milli, self.world.gold_milli, self.world.debt_milli
-                        ),
-                    );
-                    let delta = MirrorDelta::from_repay(&self.world, &eff);
-                    self.mgmt_ok(delta)
-                } else {
-                    self.diag_push(
-                        DiagTapKind::AcceptFail,
-                        "manage.repay",
-                        code,
-                        None,
-                        format!("amount={amount_milli}"),
-                    );
-                    ok_result(serde_json::json!({ "code": code }))
-                }
-            }
-            "manage.buy" => {
-                let p = parse!();
-                if self.in_init {
-                    return self.reject_init_phase("manage.buy", None);
-                }
-                let (Some(kind), Some(x), Some(y)) =
-                    (p["kind"].as_str(), p["x"].as_i64(), p["y"].as_i64())
-                else {
-                    return err_result("BAD_PAYLOAD", "manage.buy 参数缺失");
-                };
-                let (code, eff) = self.world.manage_buy(kind, x as i32, y as i32);
-                if code == ztw_model::codes::OK {
-                    let eff = eff.expect("OK 必带影响摘要");
-                    self.diag_push(
-                        DiagTapKind::Manage,
-                        "manage.buy",
-                        code,
-                        Some(eff.id),
-                        format!(
-                            "购入 {:?} #{} @({},{})，支出 {} milli，余额 {} milli",
-                            eff.kind,
-                            eff.id,
-                            eff.pos.x,
-                            eff.pos.y,
-                            eff.price_milli,
-                            self.world.gold_milli
-                        ),
-                    );
-                    let delta = MirrorDelta::from_buy(&self.world, &eff);
-                    self.mgmt_ok(delta)
-                } else {
-                    self.diag_push(
-                        DiagTapKind::AcceptFail,
-                        "manage.buy",
-                        code,
-                        None,
-                        format!("kind={kind} at({x},{y})"),
-                    );
-                    ok_result(serde_json::json!({ "code": code }))
-                }
-            }
-            "log" => {
-                let p = parse!();
-                let Some(line) = p["line"].as_str() else {
-                    return err_result("BAD_PAYLOAD", "log 参数缺失");
-                };
-                if line.len() > self.cfg.log_entry_limit {
-                    return err_result(
-                        "LOG_LIMIT",
-                        &format!(
-                            "日志条目 {}B 超上限 {}B",
-                            line.len(),
-                            self.cfg.log_entry_limit
-                        ),
-                    );
-                }
-                self.logs.push_back((self.world.tick, line.to_string()));
-                while self.logs.len() > self.cfg.log_ring_cap {
-                    self.logs.pop_front();
-                }
-                ok_result(serde_json::json!({}))
-            }
-            "mirror.fetch" => {
-                // 回退重建必须反映当前世界（含本 tick 已生效管理操作），
-                // 不能复用 tick 开始的旧镜像——镜像是世界状态的纯函数
-                //（docs/architecture/03 宿主本地查询镜像）。v4 起镜像作为
-                // 原始 JSON 值内嵌（服务端 serde 产物，拼接安全），绑定层
-                // 免一层 stringify+parse。
-                let mirror = self.produce_mirror();
-                raw_or_quoted(format!("{{\"ok\":true,\"mirror\":{mirror}}}"))
-            }
-            _ if op.starts_with("mem.") => self.handle_mem_op(op, payload),
-            _ => err_result("UNKNOWN_OP", &format!("未知操作 {op}")),
-        }
-    }
-
-    /// 管理操作成功路径的统一回复：递增世界修订号并携带镜像同步增量
-    /// （docs/architecture/03 管理操作当 tick 可见）。
-    fn mgmt_ok(&mut self, delta: MirrorDelta) -> Box<RawValue> {
-        self.revision.mgmt_count += 1;
-        let delta_json = delta.to_json();
-        self.stats.delta_bytes.push(delta_json.len());
-        let delta_val: serde_json::Value =
-            serde_json::from_str(&delta_json).unwrap_or(serde_json::Value::Null);
-        ok_result(serde_json::json!({ "code": ztw_model::codes::OK, "delta": delta_val }))
-    }
-
-    fn handle_mem_op(&mut self, op: &str, payload: &RawValue) -> Box<RawValue> {
-        let p: serde_json::Value = match serde_json::from_str(payload.get()) {
-            Ok(v) => v,
-            Err(e) => return err_result("BAD_PAYLOAD", &e.to_string()),
-        };
-        let session_gen = p["gen"].as_u64().unwrap_or(u64::MAX);
-        let node = p["node"].as_u64().unwrap_or(u64::MAX);
-        let key = p["key"].as_str();
-        let index = p["index"].as_u64().map(|i| i as usize);
-        let needs_key = matches!(
-            op,
-            "mem.map_set" | "mem.map_delete" | "mem.map_has" | "mem.map_get"
-        );
-        let needs_index = matches!(op, "mem.list_get" | "mem.list_set" | "mem.list_remove");
-        let needs_robot = op == "mem.robot_memory";
-        if (needs_key && key.is_none())
-            || (needs_index && index.is_none())
-            || (needs_robot && !p.get("robot_id").map(|v| v.is_u64()).unwrap_or(false))
-        {
-            return err_result("BAD_PAYLOAD", &format!("{op} 缺少必需参数"));
-        }
-        let needs_value = matches!(op, "mem.map_set" | "mem.list_set" | "mem.list_append");
-        let value: Option<MemValue> = if needs_value {
-            match serde_json::from_value(p["value"].clone()) {
-                Ok(v) => Some(v),
-                Err(_) => return err_result("BAD_PAYLOAD", "memory 写入值非法（线值解码失败）"),
-            }
-        } else {
-            None
-        };
-        let robot_id = p["robot_id"].as_u64();
-        let tree = self.memory_target_mut();
-        let mut run = || -> Result<serde_json::Value, crate::memory::MemOpError> {
-            match op {
-                "mem.map_get" => Ok(read_result_json(tree.map_get(
-                    session_gen,
-                    node,
-                    key.unwrap_or(""),
-                )?)),
-                "mem.map_set" => {
-                    tree.map_set(
-                        session_gen,
-                        node,
-                        key.unwrap_or(""),
-                        value.as_ref().unwrap(),
-                    )?;
-                    Ok(serde_json::json!({}))
-                }
-                "mem.map_delete" => {
-                    let removed = tree.map_delete(session_gen, node, key.unwrap_or(""))?;
-                    Ok(serde_json::json!({ "value": removed }))
-                }
-                "mem.map_has" => Ok(
-                    serde_json::json!({ "value": tree.map_has(session_gen, node, key.unwrap_or(""))? }),
-                ),
-                "mem.map_size" => {
-                    Ok(serde_json::json!({ "value": tree.map_size(session_gen, node)? }))
-                }
-                "mem.map_keys" => {
-                    Ok(serde_json::json!({ "keys": tree.map_keys(session_gen, node)? }))
-                }
-                "mem.list_get" => Ok(read_result_json(tree.list_get(
-                    session_gen,
-                    node,
-                    index.unwrap_or(usize::MAX),
-                )?)),
-                "mem.list_set" => {
-                    tree.list_set(
-                        session_gen,
-                        node,
-                        index.unwrap_or(usize::MAX),
-                        value.as_ref().unwrap(),
-                    )?;
-                    Ok(serde_json::json!({}))
-                }
-                "mem.list_append" => {
-                    tree.list_append(session_gen, node, value.as_ref().unwrap())?;
-                    Ok(serde_json::json!({}))
-                }
-                "mem.list_remove" => {
-                    tree.list_remove(session_gen, node, index.unwrap_or(usize::MAX))?;
-                    Ok(serde_json::json!({}))
-                }
-                "mem.list_size" => {
-                    Ok(serde_json::json!({ "value": tree.list_size(session_gen, node)? }))
-                }
-                "mem.list_entries" => Ok(serde_json::json!({
-                    "entries": tree
-                        .list_entries(session_gen, node)?
-                        .into_iter()
-                        .map(read_result_json)
-                        .collect::<Vec<_>>()
-                })),
-                "mem.to_value" => Ok(serde_json::json!({
-                    "value": serde_json::to_value(tree.to_value(session_gen, node)?)
-                        .unwrap_or(serde_json::Value::Null)
-                })),
-                "mem.robot_memory" => {
-                    let n = tree.robot_memory(session_gen, robot_id.unwrap_or(0))?;
-                    Ok(serde_json::json!({ "node": n }))
-                }
-                _ => Err(crate::memory::MemOpError {
-                    code: "UNKNOWN_OP",
-                    message: format!("未知 memory 操作 {op}"),
-                }),
-            }
-        };
-        match run() {
-            Ok(fields) => ok_result(fields),
-            Err(e) => err_result(e.code, &e.message),
-        }
-    }
-
     /// memory 快照（根整树）。
     pub fn memory_snapshot(&mut self) -> MemValue {
         self.memory.snapshot()
@@ -2070,29 +1444,6 @@ impl Session {
 
     pub fn memory_bytes(&self) -> usize {
         self.memory.bytes()
-    }
-}
-
-/// 标量读取返回普通 JSON 值；容器读取返回句柄描述。
-fn read_result_json(r: ReadResult) -> serde_json::Value {
-    match r {
-        ReadResult::Scalar(v) => serde_json::json!({ "t": "scalar", "v": scalar_plain(&v) }),
-        ReadResult::Handle { node, kind } => serde_json::json!({
-            "t": "handle",
-            "node": node,
-            "kind": if kind == NodeKind::Map { "map" } else { "list" },
-        }),
-        ReadResult::Missing => serde_json::json!({ "t": "missing" }),
-    }
-}
-
-fn scalar_plain(v: &MemValue) -> serde_json::Value {
-    match v {
-        MemValue::Null => serde_json::Value::Null,
-        MemValue::Bool(b) => serde_json::Value::Bool(*b),
-        MemValue::Num(n) => serde_json::json!(n),
-        MemValue::Str(s) => serde_json::json!(s),
-        _ => serde_json::Value::Null,
     }
 }
 

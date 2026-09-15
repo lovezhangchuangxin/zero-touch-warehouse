@@ -22,7 +22,7 @@ A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D�
 | --- | --- |
 | `crates/model` | 实体、坐标、结果码、memory 线值（纯数据） |
 | `crates/sim` | tick 状态机、六动作受理与三段式结算、市场与车辆生命周期、PRNG |
-| `crates/api` | Game 门面、查询镜像、受控 memory、IPC 协议、绑定层（bootstrap.js / bootstrap.py）、headless 测试 harness |
+| `crates/api` | Game 门面、查询镜像、受控 memory、IPC 协议、绑定层（bootstrap.js / bootstrap.py）、会话层 harness（desktop 世界线程与测试共用） |
 | `crates/runtime` | JS 宿主进程二进制 `ztw-host-js`（rquickjs / quickjs-ng） |
 | `crates/runtime-py` | Python 宿主进程二进制 `ztw-host-py`（PyO3 + vendored CPython、配额分配器、能力收窄） |
 | `crates/desktop` | B2 桌面壳（Tauri 2 世界线程）+ 语言切换 |

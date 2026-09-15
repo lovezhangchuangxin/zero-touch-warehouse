@@ -1,12 +1,15 @@
 //! `crates/api`：Game 门面定义、快照视图（宿主查询镜像）、受控 memory
 //! 操作与 IPC 协议——绑定与协议的唯一来源（docs/architecture/01）。
 //!
-//! `harness` 是 A0 的 headless 主进程替身：扮演 docs 里 `crates/desktop`
-//! 的宿主生命周期管理与世界线程角色，仅供 `cargo test` 与量测使用。
+//! `harness` 是会话层（世界线程消息循环与执行生命周期），desktop 生产
+//! 世界线程与全部集成测试共用；op 分发在 `ops`（payload 字段契约的
+//! 单一事实源 `OP_FIELDS` 亦在此），宿主进程管理在 `host`。
 
 pub mod harness;
+pub(crate) mod host;
 pub mod memory;
 pub mod mirror;
+pub mod ops;
 pub mod protocol;
 
 /// 宿主侧 Game 绑定（bootstrap.js）。以源码文本内嵌，由 runtime crate
