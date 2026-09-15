@@ -82,3 +82,5 @@
 | 诊断文案 | “循环中捕获所有异常”不适用（中断不可捕获） | 恰好适用（可捕获）——a0-engine-findings 残余 3 落地 |
 | 写 Position 进 memory | A0 即有线值 bug（矩阵抓出，两语言同步修复） | — |
 | to_dict 的数字样键 | 原生对象重排（1,2,10,02） | dict 保插入序——有序枚举对账以 map_keys 为准 |
+| 绑定层错误异常类型 | ipcError → 普通 `Error`（宿主故障帧 code="Error"，带 code 属性；bootstrap.js 不发布 GameError） | `GameError(Exception)`（宿主故障帧 code="GameError"，发布进玩家命名空间）——a1_fault_parity 对账时按 Error≡GameError 归一化 |
+| Game.log 数字参数格式化 | 整值浮点省略小数：JSON.stringify(190)→"190" | json.dumps(190.0)→"190.0"——a1_fault_parity 对账按数值相等归一化 |

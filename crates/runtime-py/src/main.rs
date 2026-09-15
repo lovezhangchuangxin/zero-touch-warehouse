@@ -16,16 +16,14 @@
 //!   变更型调用与 memory 读写走同步 IPC。
 //! - 能力收窄见 narrow.rs（__builtins__ / meta_path 白名单 + audit hook）。
 //!
-//! 故障注入（ZTW_FAULT，除注明外与 ztw-host-js 同一套）：abort_init_after_mem、
-//! abort_after_reply:<op>、abort_before_send:<op>、abort_after_send、
-//! dup_request:<n>、dup_request_corrupt:<n>、dup_complete、
-//! old_exec_request、stale_epoch、hang_exec、skip_delta_replay、
-//! oversize_frame（old_exec_request_first 仅 JS 侧）。
+//! 故障注入（ZTW_FAULT）：框架、旋钮清单与 ipc 主体在 ztw_api::host_ipc
+//!（两宿主单源，旋钮清单见其模块文档）；本侧特有的只有 skip_delta_replay
+//! 的置位机制（经绑定层导出的 setter，见 inject_loop_faults）。行为
+//! 等价性对账：crates/runtime-py/tests/a1_fault_parity.rs。
 
 mod narrow;
 mod py_alloc;
 
-use std::cell::RefCell;
 use std::ffi::CString;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -35,14 +33,13 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::{PyCode, PyCodeInput, PyDict, PyDictMethods, PyModule, PyTraceback};
 use ztw_api::BOOTSTRAP_PY;
-use ztw_api::protocol::{
-    ExecStats, HostFrame, MainFrame, err_result, read_frame, resolve_program, write_frame,
+use ztw_api::host_ipc::{
+    HOST_READ_LIMIT, begin_exec, configure, inject_oversize_or_hang, now_ms, parse_faults,
+    with_host,
 };
+use ztw_api::protocol::{HostFrame, MainFrame, read_frame, resolve_program, write_frame};
 
 use py_alloc::SIGINT;
-
-/// 宿主读取主进程帧的上限（与 ztw-host-js 一致）。
-const HOST_READ_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// 玩家源码的编译名：堆栈定位用，不落盘。
 const PLAYER_FILENAME: &str = "<player>";
@@ -51,251 +48,16 @@ const BOOTSTRAP_FILENAME: &str = "<bootstrap>";
 /// Python 程序的默认入口文件名（协议 entry 字段可覆盖）。
 const DEFAULT_ENTRY: &str = "main.py";
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
-// ---------------------------------------------------------------------------
-// 宿主状态（单线程，thread_local——与 ztw-host-js 同构）
-// ---------------------------------------------------------------------------
-
-struct HostState {
-    stdout: std::io::Stdout,
-    request_id: u64,
-    stats: ExecStats,
-    faults: Faults,
-    in_init: bool,
-    frame_limit: usize,
-    host_epoch: u64,
-    execution_id: u64,
-}
-
-thread_local! {
-    static HOST: RefCell<HostState> = RefCell::new(HostState {
-        stdout: std::io::stdout(),
-        request_id: 0,
-        stats: ExecStats::default(),
-        faults: Faults::default(),
-        in_init: false,
-        frame_limit: 1024 * 1024,
-        host_epoch: 0,
-        execution_id: 0,
-    });
-}
-
-#[derive(Debug, Default, Clone)]
-struct Faults {
-    abort_init_after_mem: bool,
-    abort_after_reply_op: Option<String>,
-    abort_before_send_op: Option<String>,
-    abort_after_send: bool,
-    dup_request_id: Option<u64>,
-    dup_request_corrupt_id: Option<u64>,
-    dup_complete: bool,
-    old_exec_request: bool,
-    stale_epoch: bool,
-    oversize_frame: bool,
-    hang_exec: bool,
-    skip_delta_replay: bool,
-}
-
-fn parse_faults(raw: Option<String>) -> Faults {
-    let mut f = Faults::default();
-    let Some(raw) = raw else { return f };
-    for part in raw.split(',') {
-        let part = part.trim();
-        if part == "abort_init_after_mem" {
-            f.abort_init_after_mem = true;
-        } else if let Some(op) = part.strip_prefix("abort_after_reply:") {
-            f.abort_after_reply_op = Some(op.to_string());
-        } else if let Some(op) = part.strip_prefix("abort_before_send:") {
-            f.abort_before_send_op = Some(op.to_string());
-        } else if part == "abort_after_send" {
-            f.abort_after_send = true;
-        } else if let Some(n) = part.strip_prefix("dup_request:") {
-            f.dup_request_id = n.parse().ok();
-        } else if let Some(n) = part.strip_prefix("dup_request_corrupt:") {
-            f.dup_request_corrupt_id = n.parse().ok();
-        } else if part == "dup_complete" {
-            f.dup_complete = true;
-        } else if part == "old_exec_request" {
-            f.old_exec_request = true;
-        } else if part == "stale_epoch" {
-            f.stale_epoch = true;
-        } else if part == "oversize_frame" {
-            f.oversize_frame = true;
-        } else if part == "hang_exec" {
-            f.hang_exec = true;
-        } else if part == "skip_delta_replay" {
-            f.skip_delta_replay = true;
-        }
-    }
-    f
-}
-
 // ---------------------------------------------------------------------------
 // 原生桥 __ztw（__ipc / __now_us）
 // ---------------------------------------------------------------------------
 
 /// Python 侧同步 IPC 入口：发请求、阻塞等回复。协议破坏一律退出（exit 3）。
+/// 主体在 [`ztw_api::host_ipc::ipc_roundtrip`]（两宿主单源）；包装层只做
+/// pyfunction 签名适配。
 #[pyfunction]
 fn __ipc(op: String, payload: String) -> String {
-    HOST.with(|h| {
-        let mut h = h.borrow_mut();
-        let t0 = std::time::Instant::now();
-        // 故障注入：提交前断连（主进程未见过该请求）。
-        if let Some(target) = &h.faults.abort_before_send_op
-            && op == *target
-        {
-            eprintln!("ztw-host-py: 故障注入 abort_before_send:{target}");
-            std::process::abort();
-        }
-        h.request_id += 1;
-        let rid = h.request_id;
-        let (epoch, exec_id) = (h.host_epoch, h.execution_id);
-        // 注入改写：旧执行号 / 旧代次（主进程侧拒绝路径的触发器）。
-        let frame_epoch = if h.faults.stale_epoch && epoch > 0 {
-            epoch - 1
-        } else {
-            epoch
-        };
-        let frame_exec = if h.faults.old_exec_request && exec_id > 0 {
-            exec_id - 1
-        } else {
-            exec_id
-        };
-        let frame = HostFrame::Request {
-            v: ztw_api::protocol::PROTOCOL_VERSION,
-            host_epoch: frame_epoch,
-            execution_id: frame_exec,
-            request_id: rid,
-            op: op.clone(),
-            payload: ztw_api::protocol::raw_or_quoted(payload.clone()),
-        };
-        // 解码前的限长检查（拒绝时不消耗请求号，帧未发出主进程不会见到）。
-        let body = serde_json::to_vec(&frame).unwrap_or_default();
-        if body.len() + 4 > h.frame_limit {
-            h.request_id -= 1;
-            return err_result(
-                "FRAME_LIMIT",
-                &format!("请求帧 {}B 超上限 {}B", body.len() + 4, h.frame_limit),
-            )
-            .get()
-            .to_string();
-        }
-        if write_frame(&mut h.stdout, &frame).is_err() {
-            eprintln!("ztw-host-py: 写 Game 请求失败");
-            std::process::exit(3);
-        }
-        // 故障注入：提交后、回复前断连（仅第一代次，重启后跑“不重放”流程）。
-        if h.faults.abort_after_send && rid == 1 && epoch == 1 {
-            eprintln!("ztw-host-py: 故障注入 abort_after_send");
-            std::process::abort();
-        }
-        let reply: MainFrame = match read_frame(&mut std::io::stdin(), HOST_READ_LIMIT) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("ztw-host-py: 读回复失败：{e}");
-                std::process::exit(3);
-            }
-        };
-        let MainFrame::Reply {
-            host_epoch: reply_epoch,
-            execution_id: reply_exec,
-            request_id,
-            result,
-            ..
-        } = reply
-        else {
-            eprintln!("ztw-host-py: 期望 Reply 帧");
-            std::process::exit(3);
-        };
-        // 对称校验：回复必须属于当前代次与执行，且回复号等于请求号。
-        if request_id != rid || reply_epoch != epoch || reply_exec != exec_id {
-            eprintln!(
-                "ztw-host-py: 回复错位 rid {request_id}!={rid} / epoch {reply_epoch}!={epoch} / exec {reply_exec}!={exec_id}"
-            );
-            std::process::exit(3);
-        }
-        let dt = t0.elapsed().as_micros() as u64;
-        h.stats.ipc_count += 1;
-        h.stats.ipc_total_us += dt;
-        h.stats.ipc_max_us = h.stats.ipc_max_us.max(dt);
-        if op == "mirror.fetch" {
-            h.stats.mirror_rebuilds += 1;
-        }
-        // 故障注入（一次性判断由调用方保证场景唯一）。
-        if h.in_init && h.faults.abort_init_after_mem && op.starts_with("mem.") {
-            eprintln!("ztw-host-py: 故障注入 abort_init_after_mem");
-            std::process::abort();
-        }
-        if let Some(target) = &h.faults.abort_after_reply_op
-            && op == *target
-        {
-            eprintln!("ztw-host-py: 故障注入 abort_after_reply:{target}");
-            std::process::abort();
-        }
-        // 故障注入：同号同负载重发一次（触发主进程去重缓存路径）。
-        if h.faults.dup_request_id == Some(rid) {
-            eprintln!("ztw-host-py: 故障注入 dup_request:{rid}");
-            if write_frame(&mut h.stdout, &frame).is_err() {
-                eprintln!("ztw-host-py: 重发 Game 请求失败");
-                std::process::exit(3);
-            }
-            let second: MainFrame = match read_frame(&mut std::io::stdin(), HOST_READ_LIMIT) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("ztw-host-py: 读重发回复失败：{e}");
-                    std::process::exit(3);
-                }
-            };
-            let MainFrame::Reply {
-                request_id: rid2,
-                result: result2,
-                ..
-            } = second
-            else {
-                eprintln!("ztw-host-py: 期望重发的 Reply 帧");
-                std::process::exit(3);
-            };
-            if rid2 != rid || result2.get() != result.get() {
-                eprintln!("ztw-host-py: 重发回复错位或不一致");
-                std::process::exit(3);
-            }
-        }
-        // 故障注入：同号异负载重发（预期主进程终止宿主；读到 EOF 走退出路径）。
-        if h.faults.dup_request_corrupt_id == Some(rid) {
-            eprintln!("ztw-host-py: 故障注入 dup_request_corrupt:{rid}");
-            let mut dup = frame.clone();
-            if let HostFrame::Request { payload, .. } = &mut dup {
-                // 指纹不同，负载仍可解析。v4 注意：RawValue 的捕获区间
-                // 会跳过值前后空白，只能在值内部（首字符之后）插空格
-                // 才能跨线存活；单字符标量无处可插，退化为空数组占位。
-                let mut text = payload.get().to_string();
-                if text.chars().count() >= 2 {
-                    text.insert(1, ' ');
-                } else {
-                    text = "[]".to_string();
-                }
-                *payload = ztw_api::protocol::raw_or_quoted(text);
-            }
-            if write_frame(&mut h.stdout, &dup).is_err() {
-                std::process::exit(3);
-            }
-            match read_frame::<_, MainFrame>(&mut std::io::stdin(), HOST_READ_LIMIT) {
-                Ok(_) => {
-                    // 主进程未拒绝 = 协议语义破坏；退出让测试失败得显式。
-                    eprintln!("ztw-host-py: 同号异负载未被主进程拒绝");
-                    std::process::exit(3);
-                }
-                Err(_) => std::process::exit(3),
-            }
-        }
-        result.get().to_string()
-    })
+    ztw_api::host_ipc::ipc_roundtrip(op, payload)
 }
 
 /// 微秒时钟：仅供绑定层量测计时，不构成游戏语义。
@@ -459,12 +221,11 @@ fn main() {
 
     // 配额分配器必须在解释器初始化前安装（首次 attach 触发初始化）。
     py_alloc::install(heap_limit as u64);
-    let faults = parse_faults(std::env::var("ZTW_FAULT").ok());
-    HOST.with(|h| {
-        let mut h = h.borrow_mut();
-        h.faults = faults;
-        h.frame_limit = frame_limit;
-    });
+    configure(
+        parse_faults(std::env::var("ZTW_FAULT").ok()),
+        frame_limit,
+        "ztw-host-py",
+    );
 
     // 解释器就绪 + 引导（信号处理器 / 原生桥 / 能力收窄）。
     Python::attach(|py| {
@@ -531,13 +292,7 @@ fn main() {
             std::process::exit(3);
         }
         let is_init = kind == "init";
-        HOST.with(|h| {
-            let mut h = h.borrow_mut();
-            h.in_init = is_init;
-            h.stats = ExecStats::default();
-            h.host_epoch = host_epoch;
-            h.execution_id = execution_id;
-        });
+        begin_exec(is_init, host_epoch, execution_id);
         // 旧命名空间的释放只走 run_exec 内、GIL 持有下的 drop + GC——
         // 主循环这里不得预先置 None（GIL 外 drop 走 pyo3 延迟 decref 队列，
         // 释放时机依赖 attach 入口冲刷的实现细节，不可依赖）。
@@ -604,11 +359,11 @@ fn main() {
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(0)
             });
-            HOST.with(|h| h.borrow_mut().stats.mirror_apply_us = delta_us);
+            with_host(|h| h.stats.mirror_apply_us = delta_us);
         }
 
-        let last_request_id = HOST.with(|h| h.borrow().request_id);
-        let stats = HOST.with(|h| h.borrow().stats.clone());
+        let last_request_id = with_host(|h| h.request_id);
+        let stats = with_host(|h| h.stats.clone());
         match outcome {
             Ok(has_loop) => {
                 let frame = HostFrame::Complete {
@@ -621,8 +376,11 @@ fn main() {
                 };
                 let sent = write_frame(&mut std::io::stdout(), &frame).is_ok();
                 // 故障注入：完成帧连发（第二次应被主进程按旧执行丢弃）。
-                let dup = HOST.with(|h| h.borrow().faults.dup_complete);
+                // stderr 标记是 a1_fault_parity 探针的注入生效证据——
+                // 连发被静默丢失时主进程无副作用可观测。
+                let (dup, tag) = with_host(|h| (h.faults.dup_complete, h.host_tag));
                 if dup && sent {
+                    eprintln!("{tag}: 故障注入 dup_complete");
                     let _ = write_frame(&mut std::io::stdout(), &frame);
                 }
                 if !sent {
@@ -817,7 +575,7 @@ fn run_exec(
         .call1((mirror.unwrap_or("{}"), memory_gen))
         .map_err(|e| classify(py, &e, interrupt_fired))?;
     let mirror_us = t0.elapsed().as_micros() as u64;
-    HOST.with(|h| h.borrow_mut().stats.mirror_parse_us = mirror_us);
+    with_host(|h| h.stats.mirror_parse_us = mirror_us);
 
     if is_init {
         // 玩家模块注册表更新：文件名校验折算模块名（lib.py → lib）、
@@ -1051,12 +809,12 @@ fn entry_is_async(py: Python<'_>, entry: &pyo3::Bound<'_, pyo3::PyAny>) -> Resul
         .unwrap_or(false))
 }
 
-/// 首次 loop 执行前的故障注入（oversize_frame / hang_exec /
-/// skip_delta_replay——时机与 JS 宿主一致）。
+/// 首次 loop 执行前的故障注入：skip_delta_replay 的置位机制是本侧特有
+/// （经绑定层导出的 setter——命名空间隔离后 _DROP_DELTAS 是 boot_ns 的
+/// 模块全局，往玩家 ns 写同名变量不会被 _apply_delta 看到，评审发现的
+/// 静默失效）；oversize_frame / hang_exec 的传输层注入在 host_ipc 单源。
 fn inject_loop_faults(py: Python<'_>, ctx: &ExecCtx) {
-    use std::io::Write;
-    let (oversize, hang, skip_delta) = HOST.with(|h| {
-        let h = h.borrow();
+    let (oversize, hang, skip_delta) = with_host(|h| {
         (
             h.faults.oversize_frame,
             h.faults.hang_exec,
@@ -1065,23 +823,10 @@ fn inject_loop_faults(py: Python<'_>, ctx: &ExecCtx) {
     });
     if skip_delta {
         // 注入语义：take 的镜像增量被丢弃（回放失败路径），下一次查询经
-        // mirror.fetch 整体重建。须经绑定层导出的 setter 置位——命名空间
-        // 隔离后 _DROP_DELTAS 是 boot_ns 的模块全局，往玩家 ns 写同名
-        // 变量不会被 _apply_delta 看到（评审发现的静默失效）。
+        // mirror.fetch 整体重建。
         if let Some(f) = ctx.drop_deltas_fn.as_ref() {
             let _ = f.bind(py).call1((true,));
         }
     }
-    if oversize {
-        eprintln!("ztw-host-py: 故障注入 oversize_frame");
-        let mut out = std::io::stdout();
-        let _ = out.write_all(&0x7FFF_F000u32.to_be_bytes());
-        let _ = out.write_all(&[b'x'; 4096]);
-        let _ = out.flush();
-        std::thread::sleep(Duration::from_secs(3600));
-    }
-    if hang {
-        eprintln!("ztw-host-py: 故障注入 hang_exec");
-        std::thread::sleep(Duration::from_secs(3600));
-    }
+    inject_oversize_or_hang(oversize, hang);
 }

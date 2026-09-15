@@ -3,10 +3,13 @@
 //!
 //! `harness` 是会话层（世界线程消息循环与执行生命周期），desktop 生产
 //! 世界线程与全部集成测试共用；op 分发在 `ops`（payload 字段契约的
-//! 单一事实源 `OP_FIELDS` 亦在此），宿主进程管理在 `host`。
+//! 单一事实源 `OP_FIELDS` 亦在此），宿主进程管理在 `host`；两宿主
+//! （ztw-host-js / ztw-host-py）共享的 IPC 骨架与故障注入框架在
+//! `host_ipc`（旋钮清单 `FAULT_KNOBS` 的单一事实源）。
 
 pub mod harness;
 pub(crate) mod host;
+pub mod host_ipc;
 pub mod memory;
 pub mod mirror;
 pub mod ops;

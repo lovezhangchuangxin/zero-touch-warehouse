@@ -72,6 +72,19 @@
 
 出现以下任一情况时，显式评审"JS 先行、Python 后置"的范围收缩，而不是默认坚持：原型 D 的 universal 合并与签名公证无法在一个里程碑内收敛；原型 A 浸泡显示命名空间重建泄漏，改用宿主重启后热重载延迟显著超标；Python 侧资源限制与故障分级的实现复杂度挤占玩法开发、连续拖期两个里程碑。评审结论与理由记录进本目录文档。
 
+## 双宿主平行演进与共享骨架（评审 2026-09）
+
+两宿主各自保持独立二进制是明文决策（引擎生命周期与故障分级有意分叉：JS 环境级销毁重建 Runtime，Python 解释器常驻只重建命名空间；中断可捕获性不同，见上文与 records/a1-findings 双语言语义差异备忘）——不抽全量 host-common crate，骨架抽出后两 main 各剩约 720 / 830 行引擎绑定与粘合层。两侧**逐字等价的骨架**单源在 `ztw_api::host_ipc`：ZTW_FAULT 注入框架（`Faults` / `parse_faults` / 旋钮清单 `FAULT_KNOBS`）、宿主会话状态（`HostState` + 每执行复位）与同步请求-回复循环（`ipc_roundtrip`，含会话头回显校验与全部帧级注入）、首次 loop 前的传输层注入（`inject_oversize_or_hang`）。协议编解码与帧类型本就在 `ztw_api::protocol` 单源。
+
+**协议演进时的双改同步点**（改协议版本或帧语义时，两宿主 main.rs 中不可单源化的部分）：
+
+- init / loop 帧的分发与环境生命周期（JS 的 Env 重建 vs Python 的 GIL 内命名空间重建）；
+- Complete / Fault 帧的构造与 env 销毁 / protocol 退出策略；
+- `inject_loop_faults` 中 skip_delta_replay 的置位机制（JS 写 bootstrap 全局，Python 经绑定层 setter——2c2fc4b 的漂移事故点）；
+- 绑定层 bootstrap.js / bootstrap.py（经 ops 的 `OP_FIELDS` 对账测试锚定）。
+
+**机械对账**：`crates/runtime-py/tests/a1_fault_parity.rs` 对 `FAULT_KNOBS` 的每个旋钮以同一探针分别驱动两宿主，断言结局投影（故障类别 / 结果码 / 宿主存活 / 日志落地 / 世界终态）一致，并保证旋钮清单与探针一一对应（新增旋钮漏探针即红）。已知的语义等价对与格式差异在 records/a1-findings 备忘记账并对账归一化（Error≡GameError、数字格式化）。
+
 ## 故障分级
 
 | 级别 | 触发 | 处理 |

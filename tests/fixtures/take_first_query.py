@@ -3,7 +3,7 @@
 # 与 take_first_query.js 产出同构日志（take/after/listings 锚点）。
 def loop():
     if Game.tick == 0 and len(Game.market.sell_orders()) > 0:
-        ident = Game.market.sell_orders()[0].id  # 预检查询（会先重建一次镜像）
+        ident = Game.market.sell_orders()[0].id  # 预检查询（执行前注入的全量镜像仍有效，不发 mirror.fetch）
         code = Game.market.take(ident)  # 增量被注入丢弃 → stale
         after = len(Game.my_orders())  # 重建后查询
         listings = len(Game.market.sell_orders()) + len(Game.market.buy_orders())
