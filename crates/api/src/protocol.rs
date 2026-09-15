@@ -4,15 +4,18 @@
 //! 宿主代次 `host_epoch` 与执行编号 `execution_id`；`request_id` 支持
 //! 执行内去重（同号同负载返回原结果，异负载为协议故障），旧代次 /
 //! 旧执行消息一律拒绝（语义在 harness 与宿主两侧执行）。v3（A2）把
-//! init 帧的单串 `source` 换成文件集 `files` + 入口名 `entry`。
+//! init 帧的单串 `source` 换成文件集 `files` + 入口名 `entry`。v4 把
+//! `payload` / `result` / `mirror` 从内嵌 JSON 字符串改为原始 JSON 值
+//! （RawValue）：线格式不再双重转义，编解码各省一轮。
 //!
 //! 变更型调用（动作受理、管理操作）与 memory 读写走本协议；数据查询走
 //! 宿主本地镜像，仅在镜像失效时经 `mirror.fetch` 回退重建。
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::io::{Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// 帧硬上限之上的“物理”上限：防御长度前缀被破坏后的巨量读取。
 const ABSOLUTE_FRAME_CAP: u64 = 64 * 1024 * 1024;
@@ -21,14 +24,12 @@ const ABSOLUTE_FRAME_CAP: u64 = 64 * 1024 * 1024;
 // 主进程 → 宿主
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum MainFrame {
     /// 发起一次执行。init 携带完整玩家程序（文件集 + 入口）并重建执行
     /// 环境；loop 复用环境。
     Exec {
         /// 协议版本（消息头要求，docs/architecture/03 IPC 提交协议）。
-        #[serde(default = "protocol_version")]
         v: u32,
         /// 宿主代次：每次 spawn 递增；旧代次消息永远拒绝。
         host_epoch: u64,
@@ -45,24 +46,297 @@ pub enum MainFrame {
         /// 仅 init：入口文件名（JS 为 ESM 入口模块名；Python 为整段执行
         /// 的源码文件）。None 时宿主用语言默认名（main.js / main.py）。
         entry: Option<String>,
-        /// 全量查询镜像（JSON 字符串）。init 与每 tick 均携带。
-        mirror: Option<String>,
+        /// 全量查询镜像（原始 JSON 值）。init 与每 tick 均携带。
+        mirror: Option<Box<RawValue>>,
         /// memory 会话代次：宿主据此失效旧句柄缓存。
         memory_gen: u64,
     },
-    /// 对 Game 请求的回复。`result` 为统一结果 JSON（见下）。
+    /// 对 Game 请求的回复。`result` 为统一结果 JSON（原始值，见下）。
     Reply {
-        #[serde(default = "protocol_version")]
         v: u32,
         host_epoch: u64,
         execution_id: u64,
         request_id: u64,
-        result: String,
+        result: Box<RawValue>,
     },
 }
 
 pub fn protocol_version() -> u32 {
     PROTOCOL_VERSION
+}
+
+// 手写 serde：内部标签枚举（tag = "type"）的派生实现会经 Content /
+// FlatMap 缓冲中转，而 RawValue 的透传依赖 serde_json 原生序列化器的
+// 私有 token（"$serde_json::private::RawValue"），缓冲路径不认识它——
+// 写侧平铺失败、读侧报「invalid type: newtype struct」。手写后序列化
+// 逐字段直达 serde_json（token 透传成立），反序列化先把整帧捕获为
+// RawValue 再按 type 二段解析：变体字段仍全必填（缺字段即 Malformed，
+// 与派生实现的严格性对齐），未知字段忽略（同派生默认）。
+impl Serialize for MainFrame {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        match self {
+            MainFrame::Exec {
+                v,
+                host_epoch,
+                execution_id,
+                kind,
+                tick,
+                budget_ms,
+                files,
+                entry,
+                mirror,
+                memory_gen,
+            } => {
+                let mut st = serializer.serialize_struct("Exec", 11)?;
+                st.serialize_field("type", "Exec")?;
+                st.serialize_field("v", v)?;
+                st.serialize_field("host_epoch", host_epoch)?;
+                st.serialize_field("execution_id", execution_id)?;
+                st.serialize_field("kind", kind)?;
+                st.serialize_field("tick", tick)?;
+                st.serialize_field("budget_ms", budget_ms)?;
+                st.serialize_field("files", files)?;
+                st.serialize_field("entry", entry)?;
+                st.serialize_field("mirror", mirror)?;
+                st.serialize_field("memory_gen", memory_gen)?;
+                st.end()
+            }
+            MainFrame::Reply {
+                v,
+                host_epoch,
+                execution_id,
+                request_id,
+                result,
+            } => {
+                let mut st = serializer.serialize_struct("Reply", 6)?;
+                st.serialize_field("type", "Reply")?;
+                st.serialize_field("v", v)?;
+                st.serialize_field("host_epoch", host_epoch)?;
+                st.serialize_field("execution_id", execution_id)?;
+                st.serialize_field("request_id", request_id)?;
+                st.serialize_field("result", result)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MainFrame {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = <Box<RawValue>>::deserialize(d)?;
+        #[derive(Deserialize)]
+        struct TagOnly<'a> {
+            #[serde(borrow, rename = "type")]
+            kind: &'a str,
+        }
+        let tag: TagOnly = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+        match tag.kind {
+            "Exec" => {
+                #[derive(Deserialize)]
+                struct Exec {
+                    #[serde(default = "protocol_version")]
+                    v: u32,
+                    host_epoch: u64,
+                    execution_id: u64,
+                    kind: String,
+                    tick: u64,
+                    budget_ms: u64,
+                    files: Option<std::collections::BTreeMap<String, String>>,
+                    entry: Option<String>,
+                    mirror: Option<Box<RawValue>>,
+                    memory_gen: u64,
+                }
+                let f: Exec = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+                Ok(MainFrame::Exec {
+                    v: f.v,
+                    host_epoch: f.host_epoch,
+                    execution_id: f.execution_id,
+                    kind: f.kind,
+                    tick: f.tick,
+                    budget_ms: f.budget_ms,
+                    files: f.files,
+                    entry: f.entry,
+                    mirror: f.mirror,
+                    memory_gen: f.memory_gen,
+                })
+            }
+            "Reply" => {
+                #[derive(Deserialize)]
+                struct Reply {
+                    #[serde(default = "protocol_version")]
+                    v: u32,
+                    host_epoch: u64,
+                    execution_id: u64,
+                    request_id: u64,
+                    result: Box<RawValue>,
+                }
+                let f: Reply = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+                Ok(MainFrame::Reply {
+                    v: f.v,
+                    host_epoch: f.host_epoch,
+                    execution_id: f.execution_id,
+                    request_id: f.request_id,
+                    result: f.result,
+                })
+            }
+            other => Err(D::Error::custom(format!("未知 MainFrame 类型 {other:?}"))),
+        }
+    }
+}
+
+impl Serialize for HostFrame {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        match self {
+            HostFrame::Request {
+                v,
+                host_epoch,
+                execution_id,
+                request_id,
+                op,
+                payload,
+            } => {
+                let mut st = serializer.serialize_struct("Request", 7)?;
+                st.serialize_field("type", "Request")?;
+                st.serialize_field("v", v)?;
+                st.serialize_field("host_epoch", host_epoch)?;
+                st.serialize_field("execution_id", execution_id)?;
+                st.serialize_field("request_id", request_id)?;
+                st.serialize_field("op", op)?;
+                st.serialize_field("payload", payload)?;
+                st.end()
+            }
+            HostFrame::Complete {
+                v,
+                host_epoch,
+                execution_id,
+                last_request_id,
+                has_loop,
+                stats,
+            } => {
+                let mut st = serializer.serialize_struct("Complete", 7)?;
+                st.serialize_field("type", "Complete")?;
+                st.serialize_field("v", v)?;
+                st.serialize_field("host_epoch", host_epoch)?;
+                st.serialize_field("execution_id", execution_id)?;
+                st.serialize_field("last_request_id", last_request_id)?;
+                st.serialize_field("has_loop", has_loop)?;
+                st.serialize_field("stats", stats)?;
+                st.end()
+            }
+            HostFrame::Fault {
+                v,
+                host_epoch,
+                execution_id,
+                class,
+                code,
+                message,
+                stack,
+                last_request_id,
+                stats,
+            } => {
+                let mut st = serializer.serialize_struct("Fault", 10)?;
+                st.serialize_field("type", "Fault")?;
+                st.serialize_field("v", v)?;
+                st.serialize_field("host_epoch", host_epoch)?;
+                st.serialize_field("execution_id", execution_id)?;
+                st.serialize_field("class", class)?;
+                st.serialize_field("code", code)?;
+                st.serialize_field("message", message)?;
+                st.serialize_field("stack", stack)?;
+                st.serialize_field("last_request_id", last_request_id)?;
+                st.serialize_field("stats", stats)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HostFrame {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = <Box<RawValue>>::deserialize(d)?;
+        #[derive(Deserialize)]
+        struct TagOnly<'a> {
+            #[serde(borrow, rename = "type")]
+            kind: &'a str,
+        }
+        let tag: TagOnly = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+        match tag.kind {
+            "Request" => {
+                #[derive(Deserialize)]
+                struct Request {
+                    #[serde(default = "protocol_version")]
+                    v: u32,
+                    host_epoch: u64,
+                    execution_id: u64,
+                    request_id: u64,
+                    op: String,
+                    payload: Box<RawValue>,
+                }
+                let f: Request = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+                Ok(HostFrame::Request {
+                    v: f.v,
+                    host_epoch: f.host_epoch,
+                    execution_id: f.execution_id,
+                    request_id: f.request_id,
+                    op: f.op,
+                    payload: f.payload,
+                })
+            }
+            "Complete" => {
+                #[derive(Deserialize)]
+                struct Complete {
+                    #[serde(default = "protocol_version")]
+                    v: u32,
+                    host_epoch: u64,
+                    execution_id: u64,
+                    last_request_id: u64,
+                    has_loop: bool,
+                    stats: ExecStats,
+                }
+                let f: Complete = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+                Ok(HostFrame::Complete {
+                    v: f.v,
+                    host_epoch: f.host_epoch,
+                    execution_id: f.execution_id,
+                    last_request_id: f.last_request_id,
+                    has_loop: f.has_loop,
+                    stats: f.stats,
+                })
+            }
+            "Fault" => {
+                #[derive(Deserialize)]
+                struct Fault {
+                    #[serde(default = "protocol_version")]
+                    v: u32,
+                    host_epoch: u64,
+                    execution_id: u64,
+                    class: String,
+                    code: String,
+                    message: String,
+                    stack: String,
+                    last_request_id: u64,
+                    stats: ExecStats,
+                }
+                let f: Fault = serde_json::from_str(raw.get()).map_err(D::Error::custom)?;
+                Ok(HostFrame::Fault {
+                    v: f.v,
+                    host_epoch: f.host_epoch,
+                    execution_id: f.execution_id,
+                    class: f.class,
+                    code: f.code,
+                    message: f.message,
+                    stack: f.stack,
+                    last_request_id: f.last_request_id,
+                    stats: f.stats,
+                })
+            }
+            other => Err(D::Error::custom(format!("未知 HostFrame 类型 {other:?}"))),
+        }
+    }
 }
 
 /// init 帧携带的完整玩家程序：文件集 + 入口名（宿主侧的最小解析形态；
@@ -92,23 +366,20 @@ pub fn resolve_program(
 // 宿主 → 主进程
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum HostFrame {
     /// 玩家代码发起的变更型调用 / memory 读写 / 日志 / 镜像重建。
     Request {
-        #[serde(default = "protocol_version")]
         v: u32,
         host_epoch: u64,
         execution_id: u64,
         request_id: u64,
         op: String,
-        payload: String,
+        payload: Box<RawValue>,
     },
     /// 执行完成；引用最后请求号。宿主按 FIFO 串行发请求，此前的请求
     /// 必已处理完（docs/architecture/03 IPC 提交协议）。
     Complete {
-        #[serde(default = "protocol_version")]
         v: u32,
         host_epoch: u64,
         execution_id: u64,
@@ -122,7 +393,6 @@ pub enum HostFrame {
     ///        "environment"（环境级：JS 内存超限等，运行时状态不可信）|
     ///        "protocol"（宿主侧协议错误，进程将退出）
     Fault {
-        #[serde(default = "protocol_version")]
         v: u32,
         host_epoch: u64,
         execution_id: u64,
@@ -152,7 +422,7 @@ pub struct ExecStats {
 
 /// 统一回复：`{"ok":true, ...}` 或 `{"ok":false,"code":..,"message":..}`。
 /// 绑定层把 !ok 转为带 code 的异常。
-pub fn ok_result(fields: serde_json::Value) -> String {
+pub fn ok_result(fields: serde_json::Value) -> Box<RawValue> {
     let mut obj = serde_json::Map::new();
     // 先并 fields，再写入 ok：调用方即使传入 "ok":false 也不能翻转语义。
     if let serde_json::Value::Object(m) = fields {
@@ -161,16 +431,31 @@ pub fn ok_result(fields: serde_json::Value) -> String {
         }
     }
     obj.insert("ok".into(), serde_json::Value::Bool(true));
-    serde_json::Value::Object(obj).to_string()
+    raw_or_quoted(serde_json::Value::Object(obj).to_string())
 }
 
-pub fn err_result(code: &str, message: &str) -> String {
-    serde_json::json!({
-        "ok": false,
-        "code": code,
-        "message": message,
-    })
-    .to_string()
+pub fn err_result(code: &str, message: &str) -> Box<RawValue> {
+    raw_or_quoted(
+        serde_json::json!({
+            "ok": false,
+            "code": code,
+            "message": message,
+        })
+        .to_string(),
+    )
+}
+
+/// 把已序列化的 JSON 文本包为线格式原始值。正常路径（绑定层 / serde
+/// 产物）恒为合法 JSON；防御性兜底把非法文本退化为 JSON 字符串字面量，
+/// 保持「任意文本都能上线、解析失败发生在主进程 op 侧」的旧语义。
+pub fn raw_or_quoted(s: String) -> Box<RawValue> {
+    match RawValue::from_string(s.clone()) {
+        Ok(v) => v,
+        Err(_) => {
+            let quoted = serde_json::to_string(&s).expect("字符串序列化必成");
+            RawValue::from_string(quoted).expect("字符串字面量必为合法 JSON")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,8 +507,13 @@ pub fn write_frame<W: Write, T: Serialize>(w: &mut W, frame: &T) -> Result<(), F
             limit: ABSOLUTE_FRAME_CAP,
         });
     }
-    w.write_all(&(body.len() as u32).to_be_bytes())?;
-    w.write_all(&body)?;
+    // 前缀与体拼入同一缓冲、单次 write：管道是字节流，两次 write 在对端
+    // 可能读到半帧；单次写让「一次唤醒读完整帧」成为常态（对 stdin
+    // 无缓冲的子进程管道，每次 write 即一次 syscall）。
+    let mut out = Vec::with_capacity(body.len() + 4);
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    w.write_all(&out)?;
     w.flush()?;
     Ok(())
 }
@@ -312,7 +602,7 @@ mod tests {
             budget_ms: 200,
             files: None,
             entry: None,
-            mirror: Some("{}".into()),
+            mirror: Some(raw_or_quoted("{}".into())),
             memory_gen: 3,
         };
         let mut buf = Vec::new();
@@ -334,7 +624,8 @@ mod tests {
     fn session_headers_are_strict() {
         // v2 会话头（host_epoch / execution_id）缺失的帧必须解码失败，
         // 不静默补零——两端严格对齐是旧代次 / 旧执行拒绝的前提。
-        let legacy = br#"{"type":"Request","v":2,"request_id":1,"op":"log","payload":"{}"}"#;
+        // （v4 起 payload 是原始 JSON 值，不再带引号。）
+        let legacy = br#"{"type":"Request","v":2,"request_id":1,"op":"log","payload":{}}"#;
         let mut buf = Vec::new();
         buf.extend_from_slice(&(legacy.len() as u32).to_be_bytes());
         buf.extend_from_slice(legacy);
@@ -347,7 +638,7 @@ mod tests {
             execution_id: 9,
             request_id: 4,
             op: "log".into(),
-            payload: "{}".into(),
+            payload: raw_or_quoted("{}".into()),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &f).unwrap();
@@ -400,8 +691,9 @@ mod tests {
     #[test]
     fn version_field_defaults_and_roundtrip() {
         // 无 v 字段的旧帧可解析（default），新帧携带当前版本。
+        // （v4 起 result 是原始 JSON 值，不再带引号。）
         let legacy =
-            br#"{"type":"Reply","host_epoch":1,"execution_id":2,"request_id":1,"result":"{}"}"#;
+            br#"{"type":"Reply","host_epoch":1,"execution_id":2,"request_id":1,"result":{}}"#;
         let mut buf = Vec::new();
         buf.extend_from_slice(&(legacy.len() as u32).to_be_bytes());
         buf.extend_from_slice(legacy);
@@ -415,7 +707,7 @@ mod tests {
     #[test]
     fn ok_result_cannot_be_flipped() {
         let r = ok_result(serde_json::json!({ "ok": false }));
-        assert!(r.contains("\"ok\":true"));
+        assert!(r.get().contains("\"ok\":true"));
     }
 
     #[test]

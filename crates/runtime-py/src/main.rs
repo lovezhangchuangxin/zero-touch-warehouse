@@ -173,7 +173,7 @@ fn __ipc(op: String, payload: String) -> String {
             execution_id: frame_exec,
             request_id: rid,
             op: op.clone(),
-            payload,
+            payload: ztw_api::protocol::raw_or_quoted(payload.clone()),
         };
         // 解码前的限长检查（拒绝时不消耗请求号，帧未发出主进程不会见到）。
         let body = serde_json::to_vec(&frame).unwrap_or_default();
@@ -182,7 +182,9 @@ fn __ipc(op: String, payload: String) -> String {
             return err_result(
                 "FRAME_LIMIT",
                 &format!("请求帧 {}B 超上限 {}B", body.len() + 4, h.frame_limit),
-            );
+            )
+            .get()
+            .to_string();
         }
         if write_frame(&mut h.stdout, &frame).is_err() {
             eprintln!("ztw-host-py: 写 Game 请求失败");
@@ -259,7 +261,7 @@ fn __ipc(op: String, payload: String) -> String {
                 eprintln!("ztw-host-py: 期望重发的 Reply 帧");
                 std::process::exit(3);
             };
-            if rid2 != rid || result2 != result {
+            if rid2 != rid || result2.get() != result.get() {
                 eprintln!("ztw-host-py: 重发回复错位或不一致");
                 std::process::exit(3);
             }
@@ -269,7 +271,14 @@ fn __ipc(op: String, payload: String) -> String {
             eprintln!("ztw-host-py: 故障注入 dup_request_corrupt:{rid}");
             let mut dup = frame.clone();
             if let HostFrame::Request { payload, .. } = &mut dup {
-                payload.insert(0, ' '); // 指纹不同，负载仍可解析
+                // 指纹不同，负载仍可解析。v4 注意：RawValue 的捕获区间
+                // 会跳过前导空白，只能在值内部（`{` 之后）插空格才能
+                // 跨线存活。
+                let mut text = payload.get().to_string();
+                if !text.is_empty() {
+                    text.insert(1, ' ');
+                }
+                *payload = ztw_api::protocol::raw_or_quoted(text);
             }
             if write_frame(&mut h.stdout, &dup).is_err() {
                 std::process::exit(3);
@@ -283,7 +292,7 @@ fn __ipc(op: String, payload: String) -> String {
                 Err(_) => std::process::exit(3),
             }
         }
-        result
+        result.get().to_string()
     })
 }
 
@@ -573,7 +582,7 @@ fn main() {
                     &mut ctx,
                     is_init,
                     program.as_ref(),
-                    mirror.as_deref(),
+                    mirror.as_ref().map(|m| m.get()),
                     memory_gen,
                     &fired,
                 )

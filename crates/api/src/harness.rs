@@ -2,26 +2,29 @@
 //! 的宿主生命周期管理与世界线程角色，仅供 `cargo test` 与量测使用，
 //! 不属于正式发布的主进程。
 //!
-//! 世界线程按消息循环实现（docs/architecture/03）：发出执行请求后只处理
-//! 四类事件——Game 请求应答、执行完成、执行故障、宿主终止（EOF/坏帧）。
+//! 世界线程按消息循环实现（docs/architecture/03）：发出执行请求后在
+//! 本线程直读宿主管道，只处理四类事件——Game 请求应答、执行完成、
+//! 执行故障、宿主终止（EOF/坏帧）。
 //! 看门狗在独立线程对执行计时，超宽限期直接终止宿主进程，不经过
 //! Game 请求队列。
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use serde_json::value::RawValue;
 use ztw_model::{MemValue, OrderSide};
 use ztw_sim::World;
 
 use crate::memory::{MemoryLimits, MemoryTree, NodeKind, ReadResult};
 use crate::mirror::{MirrorDelta, MirrorView, WorldRevision};
 use crate::protocol::{
-    ExecStats, HostFrame, MainFrame, err_result, ok_result, read_frame, write_frame,
+    ExecStats, HostFrame, MainFrame, err_result, ok_result, raw_or_quoted, read_frame, write_frame,
 };
 
 // ---------------------------------------------------------------------------
@@ -249,25 +252,23 @@ impl SessionStats {
 // 宿主进程
 // ---------------------------------------------------------------------------
 
-enum Ev {
-    Frame(HostFrame),
-    Eof,
-    Invalid(String),
-}
-
 struct HostProc {
     child: Arc<Mutex<Child>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
-    /// 读线程见到 EOF / 坏帧（进程退出）。
+    /// 执行期读到 EOF / 坏帧，或被本进程终止（进程退出）。
     dead: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    reader: JoinHandle<()>,
     #[allow(dead_code)]
     stderr_thread: JoinHandle<()>,
 }
 
 impl HostProc {
-    fn spawn(cfg: &SessionConfig) -> std::io::Result<(HostProc, ChildStdin, mpsc::Receiver<Ev>)> {
+    fn spawn(
+        cfg: &SessionConfig,
+    ) -> std::io::Result<(
+        HostProc,
+        ChildStdin,
+        std::io::BufReader<std::process::ChildStdout>,
+    )> {
         let mut cmd = Command::new(&cfg.host_bin);
         cmd.args([
             "--heap-limit",
@@ -287,36 +288,7 @@ impl HostProc {
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
-        let (tx, rx) = mpsc::channel();
-        let limit = cfg.frame_limit as u64;
         let dead = Arc::new(AtomicBool::new(false));
-        let dead_r = dead.clone();
-        let reader = std::thread::Builder::new()
-            .name("ztw-host-reader".into())
-            .spawn(move || {
-                let mut stdout = stdout;
-                loop {
-                    match read_frame::<_, HostFrame>(&mut stdout, limit) {
-                        Ok(f) => {
-                            if tx.send(Ev::Frame(f)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(crate::protocol::FrameError::Io(_))
-                        | Err(crate::protocol::FrameError::Closed) => {
-                            dead_r.store(true, Ordering::SeqCst);
-                            let _ = tx.send(Ev::Eof);
-                            break;
-                        }
-                        Err(e) => {
-                            dead_r.store(true, Ordering::SeqCst);
-                            let _ = tx.send(Ev::Invalid(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            })
-            .expect("spawn reader");
         let stderr_tail = Arc::new(Mutex::new(Vec::new()));
         let tail = stderr_tail.clone();
         let stderr_thread = std::thread::Builder::new()
@@ -345,10 +317,11 @@ impl HostProc {
             child: Arc::new(Mutex::new(child)),
             stderr_tail,
             dead,
-            reader,
             stderr_thread,
         };
-        Ok((proc, stdin, rx))
+        // BufReader：宿主单次写整帧后，前缀 + 体的两次 read 命中同一缓冲，
+        // 每帧一次 syscall（跨帧残余也留在缓冲里）。
+        Ok((proc, stdin, std::io::BufReader::new(stdout)))
     }
 }
 
@@ -370,6 +343,7 @@ fn kill_and_reap(child: &Arc<Mutex<Child>>) {
 
 impl HostProc {
     fn kill(&self) {
+        self.dead.store(true, Ordering::SeqCst);
         kill_and_reap(&self.child);
     }
 
@@ -458,7 +432,7 @@ pub struct Session {
     pub logs: VecDeque<(u64, String)>,
     host: Option<HostProc>,
     host_stdin: Option<ChildStdin>,
-    host_rx: Option<mpsc::Receiver<Ev>>,
+    host_stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
     program: Option<PlayerProgram>,
     pub initialized: bool,
     pub fault: Option<FaultRecord>,
@@ -470,8 +444,8 @@ pub struct Session {
     /// 当前执行的去重缓存：request_id →（op+payload 指纹, 原结果）。
     /// 重复请求号同负载返回原结果、异负载协议故障；缓存随执行清空，
     /// 容量受条目数与字节（exec_dedup_bytes ↔ cfg.dedup_cache_bytes）
-    /// 双上界约束。
-    exec_dedup: std::collections::HashMap<u64, (String, String)>,
+    /// 双上界约束。值 =（(op,payload) 增量哈希， 原结果）。
+    exec_dedup: std::collections::HashMap<u64, (u64, Box<RawValue>)>,
     /// 本执行去重缓存累计字节（指纹 + 结果），随 exec_dedup 在执行
     /// 入口归零；达到 cfg.dedup_cache_bytes 后跳过缓存新条目——该号
     /// 重发走既有 DUP_REQUEST_MISMATCH 协议故障（降级语义见 dedup_put）。
@@ -507,7 +481,7 @@ impl Session {
             logs: VecDeque::new(),
             host: None,
             host_stdin: None,
-            host_rx: None,
+            host_stdout: None,
             program: None,
             initialized: false,
             fault: None,
@@ -614,13 +588,15 @@ impl Session {
         }
         if self.host.is_none() {
             match HostProc::spawn(&self.cfg) {
-                Ok((proc, stdin, rx)) => {
+                // BufReader：宿主单次写整帧后，前缀 + 体的两次 read 命中同一缓冲，
+                // 每帧一次 syscall（跨帧残余也留在缓冲里）。
+                Ok((proc, stdin, stdout)) => {
                     // 新宿主进程 = 新代次（docs/architecture/03：重启递增
                     // host_epoch，旧代次消息永远拒绝）。
                     self.host_epoch += 1;
                     self.host = Some(proc);
                     self.host_stdin = Some(stdin);
-                    self.host_rx = Some(rx);
+                    self.host_stdout = Some(stdout);
                 }
                 Err(e) => {
                     return InitOutcome {
@@ -937,7 +913,7 @@ impl Session {
         }
         self.host = None;
         self.host_stdin = None;
-        self.host_rx = None;
+        self.host_stdout = None;
         // 请求号在宿主代次内单调；重启即新 id 空间。代次本身只增不回收
         // （host_epoch），旧代次帧永远对不上号。
         self.last_request_id = 0;
@@ -979,8 +955,9 @@ impl Session {
 
     // -- 消息循环 ------------------------------------------------------------
     ///
-    /// rx / stdin 移出到局部变量，避免与 handle_op 的可变借用冲突——
-    /// 世界线程本体只是「收事件 → 应答」的循环，不嵌套阻塞调用宿主。
+    /// stdin / stdout 移出到局部变量，避免与 handle_op 的可变借用冲突——
+    /// 世界线程本体是「直读帧 → 应答」的循环（执行期同步读宿主管道，
+    /// 免去独立读线程的每次一跳线程转交），不嵌套阻塞调用宿主。
     fn run_exec(
         &mut self,
         exec_id: u64,
@@ -1035,7 +1012,8 @@ impl Session {
                 });
         }
         let mut stdin = self.host_stdin.take().expect("宿主在场");
-        let rx = self.host_rx.take().expect("宿主在场");
+        let mut stdout = self.host_stdout.take().expect("宿主在场");
+        let frame_limit = self.cfg.frame_limit as u64;
         let frame = MainFrame::Exec {
             v: crate::protocol::PROTOCOL_VERSION,
             host_epoch: self.host_epoch,
@@ -1045,7 +1023,7 @@ impl Session {
             budget_ms,
             files: program.map(|p| p.files.clone()),
             entry: program.map(|p| p.entry.clone()),
-            mirror: Some(mirror),
+            mirror: Some(raw_or_quoted(mirror)),
             memory_gen: self.memory_generation(),
         };
         let write_failed = write_frame(&mut stdin, &frame).is_err();
@@ -1133,15 +1111,15 @@ impl Session {
             }
         } else {
             loop {
-                match rx.recv() {
-                    Ok(Ev::Frame(HostFrame::Request {
+                match read_frame::<_, HostFrame>(&mut stdout, frame_limit) {
+                    Ok(HostFrame::Request {
                         v,
                         host_epoch,
                         execution_id,
                         request_id,
                         op,
                         payload,
-                    })) => {
+                    }) => {
                         if v != crate::protocol::PROTOCOL_VERSION {
                             break ExecResult::Faulted {
                                 class: FaultClass::HostTerminated("protocol"),
@@ -1193,7 +1171,10 @@ impl Session {
                             send_reply!(request_id, reply);
                             continue;
                         }
-                        let fingerprint = format!("{op}\u{0}{payload}");
+                        let mut fp_hash = std::collections::hash_map::DefaultHasher::new();
+                        op.hash(&mut fp_hash);
+                        payload.get().hash(&mut fp_hash);
+                        let fingerprint = fp_hash.finish();
                         if request_id == self.exec_seen_request_id + 1 {
                             // 新请求（无论受理还是拒绝，都已“见到”）。
                             self.exec_seen_request_id = request_id;
@@ -1212,7 +1193,12 @@ impl Session {
                                         self.cfg.request_limit_per_exec
                                     ),
                                 );
-                                self.dedup_put(request_id, &fingerprint, &reply);
+                                self.dedup_put(
+                                    request_id,
+                                    fingerprint,
+                                    op.len() + payload.get().len(),
+                                    &reply,
+                                );
                                 send_reply!(request_id, reply);
                                 continue;
                             }
@@ -1225,7 +1211,12 @@ impl Session {
                                 .push(t0.elapsed().as_micros().max(1) as u64);
                             requests_served += 1;
                             self.exec_new_requests += 1;
-                            self.dedup_put(request_id, &fingerprint, &reply);
+                            self.dedup_put(
+                                request_id,
+                                fingerprint,
+                                op.len() + payload.get().len(),
+                                &reply,
+                            );
                             send_reply!(request_id, reply);
                         } else if request_id <= self.exec_seen_request_id {
                             // 重复请求号：同负载返回原结果、不重复执行；
@@ -1289,14 +1280,14 @@ impl Session {
                             };
                         }
                     }
-                    Ok(Ev::Frame(HostFrame::Complete {
+                    Ok(HostFrame::Complete {
                         v,
                         host_epoch,
                         execution_id,
                         last_request_id,
                         has_loop,
                         stats,
-                    })) => {
+                    }) => {
                         if v != crate::protocol::PROTOCOL_VERSION {
                             break ExecResult::Faulted {
                                 class: FaultClass::HostTerminated("protocol"),
@@ -1375,7 +1366,7 @@ impl Session {
                             requests_served,
                         };
                     }
-                    Ok(Ev::Frame(HostFrame::Fault {
+                    Ok(HostFrame::Fault {
                         v,
                         host_epoch,
                         execution_id,
@@ -1385,7 +1376,7 @@ impl Session {
                         stack,
                         last_request_id,
                         stats,
-                    })) => {
+                    }) => {
                         let _ = v; // 故障帧不因版本差异拒收（诊断优先）
                         if host_epoch != self.host_epoch {
                             if let Some(h) = &self.host {
@@ -1444,7 +1435,11 @@ impl Session {
                             last_request_id,
                         };
                     }
-                    Ok(Ev::Eof) => {
+                    Err(crate::protocol::FrameError::Io(_))
+                    | Err(crate::protocol::FrameError::Closed) => {
+                        if let Some(h) = &self.host {
+                            h.dead.store(true, Ordering::SeqCst);
+                        }
                         let watchdog = fired.load(Ordering::SeqCst);
                         let killed = self.killed_by_us.swap(false, Ordering::SeqCst);
                         let (reason, code) = if watchdog {
@@ -1477,26 +1472,16 @@ impl Session {
                             last_request_id: self.last_request_id,
                         };
                     }
-                    Ok(Ev::Invalid(msg)) => {
+                    Err(e) => {
                         if let Some(h) = &self.host {
+                            h.dead.store(true, Ordering::SeqCst);
                             h.kill();
                         }
+                        let msg = e.to_string();
                         break ExecResult::Faulted {
                             class: FaultClass::HostTerminated("protocol"),
                             code: "BAD_FRAME".into(),
                             message: format!("非法或超大帧：{msg}"),
-                            stack: String::new(),
-                            stats: ExecStats::default(),
-                            requests_served,
-                            last_request_id: self.last_request_id,
-                        };
-                    }
-                    Err(_) => {
-                        let stderr = self.stderr_text();
-                        break ExecResult::Faulted {
-                            class: FaultClass::HostTerminated("crash"),
-                            code: "HOST_EXITED".into(),
-                            message: format!("宿主进程退出：{stderr}"),
                             stack: String::new(),
                             stats: ExecStats::default(),
                             requests_served,
@@ -1516,7 +1501,7 @@ impl Session {
         // 宿主仍活着才放回通道与管道（死亡则丢弃，drop_host 已处理）。
         if self.host.is_some() {
             self.host_stdin = Some(stdin);
-            self.host_rx = Some(rx);
+            self.host_stdout = Some(stdout);
         }
         result
     }
@@ -1525,22 +1510,24 @@ impl Session {
     /// （dedup_cache_bytes）双上界。字节预算耗尽后跳过缓存——请求本身
     /// 照常执行并应答，此后该号重发无缓存可回放，按既有
     /// DUP_REQUEST_MISMATCH 协议故障降级（docs 03 已文档化的可接受
-    /// 角落），主进程不随请求风暴无界堆积镜像级结果。收 &str、命中
-    /// 才克隆：跳过路径恰是 MB 级镜像回复的风暴场景，不做无谓拷贝。
-    fn dedup_put(&mut self, request_id: u64, fingerprint: &str, reply: &str) {
+    /// 角落），主进程不随请求风暴无界堆积镜像级结果。命中才克隆：
+    /// 跳过路径恰是 MB 级镜像回复的风暴场景，不做无谓拷贝。指纹为
+    /// （op, payload）增量哈希 u64；字节记账按请求 + 回复口径（超长
+    /// 日志场景的耗尽语义不变）。
+    fn dedup_put(&mut self, request_id: u64, fingerprint: u64, req_bytes: usize, reply: &RawValue) {
         if self.exec_dedup.len() >= self.cfg.request_limit_per_exec as usize + 1024 {
             return;
         }
         let bytes = self
             .exec_dedup_bytes
-            .saturating_add(fingerprint.len())
-            .saturating_add(reply.len());
+            .saturating_add(req_bytes)
+            .saturating_add(reply.get().len());
         if bytes > self.cfg.dedup_cache_bytes {
             return;
         }
         self.exec_dedup_bytes = bytes;
         self.exec_dedup
-            .insert(request_id, (fingerprint.to_string(), reply.to_string()));
+            .insert(request_id, (fingerprint, reply.to_owned()));
     }
 
     fn memory_generation(&self) -> u64 {
@@ -1565,7 +1552,7 @@ impl Session {
     // -- Game 请求处理 -------------------------------------------------------
 
     /// 初始化阶段禁用动作与管理操作（docs/architecture/03），统一记录诊断。
-    fn reject_init_phase(&mut self, op: &str, subject: Option<ztw_model::Id>) -> String {
+    fn reject_init_phase(&mut self, op: &str, subject: Option<ztw_model::Id>) -> Box<RawValue> {
         self.diag_push(
             DiagTapKind::AcceptFail,
             op,
@@ -1584,10 +1571,10 @@ impl Session {
         }
     }
 
-    fn handle_op(&mut self, op: &str, payload: &str) -> String {
+    fn handle_op(&mut self, op: &str, payload: &RawValue) -> Box<RawValue> {
         macro_rules! parse {
             () => {
-                match serde_json::from_str::<serde_json::Value>(payload) {
+                match serde_json::from_str::<serde_json::Value>(payload.get()) {
                     Ok(v) => v,
                     Err(e) => return err_result("BAD_PAYLOAD", &e.to_string()),
                 }
@@ -1920,9 +1907,11 @@ impl Session {
             "mirror.fetch" => {
                 // 回退重建必须反映当前世界（含本 tick 已生效管理操作），
                 // 不能复用 tick 开始的旧镜像——镜像是世界状态的纯函数
-                //（docs/architecture/03 宿主本地查询镜像）。
+                //（docs/architecture/03 宿主本地查询镜像）。v4 起镜像作为
+                // 原始 JSON 值内嵌（服务端 serde 产物，拼接安全），绑定层
+                // 免一层 stringify+parse。
                 let mirror = self.produce_mirror();
-                ok_result(serde_json::json!({ "mirror": mirror }))
+                raw_or_quoted(format!("{{\"ok\":true,\"mirror\":{mirror}}}"))
             }
             _ if op.starts_with("mem.") => self.handle_mem_op(op, payload),
             _ => err_result("UNKNOWN_OP", &format!("未知操作 {op}")),
@@ -1931,7 +1920,7 @@ impl Session {
 
     /// 管理操作成功路径的统一回复：递增世界修订号并携带镜像同步增量
     /// （docs/architecture/03 管理操作当 tick 可见）。
-    fn mgmt_ok(&mut self, delta: MirrorDelta) -> String {
+    fn mgmt_ok(&mut self, delta: MirrorDelta) -> Box<RawValue> {
         self.revision.mgmt_count += 1;
         let delta_json = delta.to_json();
         self.stats.delta_bytes.push(delta_json.len());
@@ -1940,8 +1929,8 @@ impl Session {
         ok_result(serde_json::json!({ "code": ztw_model::codes::OK, "delta": delta_val }))
     }
 
-    fn handle_mem_op(&mut self, op: &str, payload: &str) -> String {
-        let p: serde_json::Value = match serde_json::from_str(payload) {
+    fn handle_mem_op(&mut self, op: &str, payload: &RawValue) -> Box<RawValue> {
+        let p: serde_json::Value = match serde_json::from_str(payload.get()) {
             Ok(v) => v,
             Err(e) => return err_result("BAD_PAYLOAD", &e.to_string()),
         };

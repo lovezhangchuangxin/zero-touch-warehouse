@@ -205,7 +205,7 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
             execution_id: frame_exec,
             request_id: rid,
             op: op.clone(),
-            payload,
+            payload: ztw_api::protocol::raw_or_quoted(payload.clone()),
         };
         // 解码前的限长检查：先实测完整帧的序列化长度（JSON 字符串转义会
         // 膨胀），超限以可读错误拒绝，避免必然被杀的协议路径。
@@ -216,7 +216,9 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
             return Ok(err_result(
                 "FRAME_LIMIT",
                 &format!("请求帧 {}B 超上限 {}B", body.len() + 4, h.frame_limit),
-            ));
+            )
+            .get()
+            .to_string());
         }
         if write_frame(&mut h.stdout, &frame).is_err() {
             eprintln!("ztw-host: 写 Game 请求失败");
@@ -298,7 +300,7 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
                 eprintln!("ztw-host: 重发回复请求号错位 {rid2} != {rid}");
                 std::process::exit(3);
             }
-            if result2 != result {
+            if result2.get() != result.get() {
                 eprintln!("ztw-host: 重发回复与原回复不一致");
                 std::process::exit(3);
             }
@@ -308,7 +310,14 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
             eprintln!("ztw-host: 故障注入 dup_request_corrupt:{rid}");
             let mut dup = frame.clone();
             if let HostFrame::Request { payload, .. } = &mut dup {
-                payload.insert(0, ' '); // 指纹不同，负载仍可解析
+                // 指纹不同，负载仍可解析。v4 注意：RawValue 的捕获区间
+                // 会跳过前导空白，只能在值内部（`{` 之后）插空格才能
+                // 跨线存活。
+                let mut text = payload.get().to_string();
+                if !text.is_empty() {
+                    text.insert(1, ' ');
+                }
+                *payload = ztw_api::protocol::raw_or_quoted(text);
             }
             if write_frame(&mut h.stdout, &dup).is_err() {
                 std::process::exit(3);
@@ -326,7 +335,7 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
                 Err(_) => std::process::exit(3),
             }
         }
-        Ok(result)
+        Ok(result.get().to_string())
     })
 }
 
@@ -711,14 +720,15 @@ fn main() {
                 eprintln!("ztw-host: 执行环境已销毁，需要 init 执行重建");
                 std::process::exit(3);
             };
-            let (mirror_json, session_gen) = (mirror.unwrap_or_else(|| "{}".into()), memory_gen);
+            let mirror_str = mirror.as_ref().map(|m| m.get()).unwrap_or("{}");
+            let session_gen = memory_gen;
             let t0 = Instant::now();
             let set_res = env.ctx.with(|cx| {
                 let f: Function = cx
                     .globals()
                     .get::<_, Function>("__setMirror")
                     .expect("bootstrap 提供 __setMirror");
-                f.call::<_, ()>((mirror_json, session_gen))
+                f.call::<_, ()>((mirror_str, session_gen))
             });
             let mirror_us = t0.elapsed().as_micros() as u64;
             HOST.with(|h| h.borrow_mut().stats.mirror_parse_us = mirror_us);

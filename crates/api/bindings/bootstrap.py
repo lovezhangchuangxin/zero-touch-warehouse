@@ -156,7 +156,8 @@ def _ensure_mirror():
         return
     t0 = __ztw.__now_us()
     r = _ipc("mirror.fetch", {})
-    M = _json.loads(r["mirror"])
+    # v4：镜像以原始 JSON 值内嵌于回复，免一层 loads。
+    M = r["mirror"]
     stale = False
     _stats["rebuild_us"] += __ztw.__now_us() - t0
 
@@ -478,13 +479,15 @@ def _mem_proxy(node, kind):
 
 
 class MemoryMap(MutableMapping):
-    """受控映射：每一次读写都是一次同步 IPC（与 JS 版一致，无缓冲）。
+    """受控映射：标量读写是一次同步 IPC（与 JS 版一致）；容器键查找经
+    槽位缓存（key → 子代理，写透失效，代次变化随 _handle_cache 重建）。
     键一律转字符串键；相等性按（会话代次, 节点号）判定（docs 06）。
     操作面以文档为准——变更型 ABC 混入（pop/update/clear 等）显式拒绝。"""
 
     def __init__(self, gen, node):
         self._gen = gen
         self._node = node
+        self._slots = {}
 
     def __eq__(self, other):
         return (
@@ -513,18 +516,30 @@ class MemoryMap(MutableMapping):
         raise GameError("INVALID_OPERATION", "受控映射不支持 setdefault（读取请用 m[key] 或 in）")
 
     def __getitem__(self, key):
-        r = _ipc("mem.map_get", {"gen": self._gen, "node": self._node, "key": str(key)})
+        k = str(key)
+        hit = self._slots.get(k)
+        if hit is not None:
+            return hit
+        r = _ipc("mem.map_get", {"gen": self._gen, "node": self._node, "key": k})
+        if r["t"] == "handle":
+            w = _mem_proxy(r["node"], r["kind"])
+            self._slots[k] = w
+            return w
         if r["t"] == "missing":
             raise KeyError(key)
-        return _read_result(r)
+        return r["v"]
 
     def __setitem__(self, key, value):
+        k = str(key)
         _ipc("mem.map_set", {
-            "gen": self._gen, "node": self._node, "key": str(key), "value": _to_wire(value),
+            "gen": self._gen, "node": self._node, "key": k, "value": _to_wire(value),
         })
+        self._slots.pop(k, None)
 
     def __delitem__(self, key):
-        _ipc("mem.map_delete", {"gen": self._gen, "node": self._node, "key": str(key)})
+        k = str(key)
+        _ipc("mem.map_delete", {"gen": self._gen, "node": self._node, "key": k})
+        self._slots.pop(k, None)
 
     def __iter__(self):
         return iter(_ipc("mem.map_keys", {"gen": self._gen, "node": self._node})["keys"])
@@ -590,6 +605,8 @@ class MemoryList(MutableSequence):
         """按下标删除（与 JS 版 remove(i) 一致）。"""
         self._check_index(index)
         _ipc("mem.list_remove", {"gen": self._gen, "node": self._node, "index": index})
+        # 下标整体平移，槽位全清。
+        self._slots.clear()
 
     def insert(self, index, value):
         raise GameError("INVALID_OPERATION", "受控列表不支持 insert（用 append/remove 组合）")

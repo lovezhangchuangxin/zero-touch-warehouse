@@ -119,8 +119,9 @@
   function ensureMirror() {
     if (M !== null && !stale) return false;
     const t0 = __nowUs();
+    // v4：镜像以原始 JSON 值内嵌于回复，免一层 parse。
     const r = rt("mirror.fetch", {});
-    M = JSON.parse(r.mirror);
+    M = r.mirror;
     stale = false;
     mirrorStats.rebuild_us += __nowUs() - t0;
     return true;
@@ -415,12 +416,33 @@
   const MAP_METHOD_KEYS = new Set(["keys", "size", "to_dict"]);
 
   function mapHandler(node, gen) {
+    // 槽位缓存：key → handle 型子代理（只缓存容器查找，标量与 missing
+    // 不缓存）。嵌套访问 m.a.b 从两次往返降为一次（b 的读取仍走 IPC）。
+    // 失效协议：本代理的 set / delete 陷阱必经此处，写透即删槽——
+    // 「同执行先写后读」保持；句柄别名语义不变（旧包装器仍持旧 node，
+    // 服务端 kill_subtree 照常拒绝）。服务端对玩家树的结构性改动只
+    // 可能落在 robots/<id> 的保留标量（_move），不产生句柄槽，此处
+    // 无需为它失效（代次变化时 handleCache 连同本缓存一并重建）。
+    const slots = new Map();
+    // 返回三态：undefined = missing；Proxy = 容器；其余 = 标量值。
+    const lookup = (k) => {
+      const hit = slots.get(k);
+      if (hit !== undefined) return hit;
+      const r = rt("mem.map_get", { gen, node, key: k });
+      if (r.t === "handle") {
+        const w = memProxy(r.node, r.kind);
+        slots.set(k, w);
+        return w;
+      }
+      if (r.t === "scalar") return r.v;
+      return undefined;
+    };
     return {
       get(_t, k) {
         if (typeof k === "symbol") return undefined;
         if (MAP_METHOD_KEYS.has(k)) {
-          const probe = rt("mem.map_get", { gen, node, key: k });
-          if (probe.t !== "missing") return readResult(probe);
+          const v = lookup(k);
+          if (v !== undefined) return v;
           if (k === "keys") {
             return function () { return rt("mem.map_keys", { gen, node }).keys; };
           }
@@ -429,17 +451,18 @@
           }
           return rt("mem.map_size", { gen, node }).value;
         }
-        const r = rt("mem.map_get", { gen, node, key: String(k) });
-        return readResult(r);
+        return lookup(String(k));
       },
       set(_t, k, v) {
         if (typeof k === "symbol") throw ipcError("INVALID_VALUE", "memory 不支持 symbol 键");
         rtVoid("mem.map_set", { gen, node, key: String(k), value: toWire(v) });
+        slots.delete(String(k));
         return true;
       },
       deleteProperty(_t, k) {
         if (typeof k === "symbol") return false;
         rtVoid("mem.map_delete", { gen, node, key: String(k) });
+        slots.delete(String(k));
         return true;
       },
       has(_t, k) {
@@ -451,14 +474,30 @@
       },
       getOwnPropertyDescriptor(_t, k) {
         if (typeof k === "symbol") return undefined;
-        const r = rt("mem.map_get", { gen, node, key: String(k) });
-        if (r.t === "missing") return undefined;
-        return { value: readResult(r), enumerable: true, writable: true, configurable: true };
+        const v = lookup(String(k));
+        if (v === undefined) return undefined;
+        return { value: v, enumerable: true, writable: true, configurable: true };
       },
     };
   }
 
+  // 列表槽位缓存：与 mapHandler 的 slots 同构，按下标缓存 handle 型
+  // 子代理；remove 使下标整体平移，全清。
+  function listLookup(node, gen, i, slots) {
+    const hit = slots.get(i);
+    if (hit !== undefined) return hit;
+    const r = rt("mem.list_get", { gen, node, index: i });
+    if (r.t === "handle") {
+      const w = memProxy(r.node, r.kind);
+      slots.set(i, w);
+      return w;
+    }
+    if (r.t === "scalar") return r.v;
+    return undefined;
+  }
+
   function listHandler(node, gen) {
+    const listSlots = new Map();
     return {
       get(_t, k) {
         if (typeof k === "symbol") {
@@ -481,10 +520,11 @@
               throw ipcError("INVALID_ARGUMENT", "remove 需要非负整数下标");
             }
             rtVoid("mem.list_remove", { gen, node, index: i });
+            listSlots.clear();
           };
         }
         if (/^(0|[1-9][0-9]*)$/.test(k)) {
-          return readResult(rt("mem.list_get", { gen, node, index: parseInt(k, 10) }));
+          return listLookup(node, gen, parseInt(k, 10), listSlots);
         }
         return undefined;
       },
@@ -493,6 +533,7 @@
           throw ipcError("INVALID_VALUE", "受控列表只支持数字下标写入");
         }
         rtVoid("mem.list_set", { gen, node, index: parseInt(k, 10), value: toWire(v) });
+        listSlots.delete(parseInt(k, 10));
         return true;
       },
       has(_t, k) {
@@ -514,9 +555,9 @@
       },
       getOwnPropertyDescriptor(_t, k) {
         if (typeof k === "symbol" || !/^(0|[1-9][0-9]*)$/.test(k)) return undefined;
-        const r = rt("mem.list_get", { gen, node, index: parseInt(k, 10) });
-        if (r.t === "missing") return undefined;
-        return { value: readResult(r), enumerable: true, writable: true, configurable: true };
+        const v = listLookup(node, gen, parseInt(k, 10), listSlots);
+        if (v === undefined) return undefined;
+        return { value: v, enumerable: true, writable: true, configurable: true };
       },
     };
   }
