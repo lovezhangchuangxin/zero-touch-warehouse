@@ -39,6 +39,8 @@ interface Chain {
 
 const CHAIN_RE = /([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*)\.?$/;
 const IDENT_RE = /^[A-Za-z_][\w$]*$/;
+/** "Game" 的前缀（g/ga/gam/game，大小写任意）——根对象发现性补全用。 */
+const GAME_PREFIX_RE = /^[Gg](?:[Aa](?:[Mm](?:[Ee])?)?)?$/;
 
 function chainBefore(state: EditorState, pos: number): Chain | null {
   const line = state.doc.lineAt(pos);
@@ -46,7 +48,14 @@ function chainBefore(state: EditorState, pos: number): Chain | null {
   const m = CHAIN_RE.exec(before);
   if (!m) return null;
   const segs = m[1].split(".");
-  if (segs[0] !== "Game") return null;
+  if (segs[0] !== "Game") {
+    // 首段还不是 Game：仅当它是 Game 的前缀（正输入 Ga…）时保留链，
+    // 供 GAME_SELF 补全根对象；其余标识符不归本源管。
+    if (segs.length === 1 && GAME_PREFIX_RE.test(segs[0])) {
+      return { segments: [], word: segs[0], from: pos - segs[0].length, afterDot: false };
+    }
+    return null;
+  }
   const afterDot = before.endsWith(".");
   if (afterDot) return { segments: segs.slice(1), word: "", from: pos, afterDot: true };
   const word = segs[segs.length - 1];
@@ -58,13 +67,16 @@ function chainBefore(state: EditorState, pos: number): Chain | null {
   };
 }
 
-/** 字符串 / 注释内不触发补全与悬浮（JS 与 Python 的节点名并集）。 */
+/** 字符串 / 注释内不触发补全与悬浮（JS 与 Python 的节点名并集）；
+ * 模板插值 ${...} / f-string {...} 内是合法代码，命中即放行。 */
 const NO_COMPLETION_NODE =
   /^(String|TemplateString|FormatString|LineComment|BlockComment|Comment|RegExp)$/;
+const INTERPOLATION_NODE = /^(Interpolation|FormatReplacement)$/;
 
 function inStringOrComment(state: EditorState, pos: number): boolean {
   let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, -1);
   for (; node; node = node.parent) {
+    if (INTERPOLATION_NODE.test(node.name)) break;
     if (NO_COMPLETION_NODE.test(node.name)) return true;
   }
   return false;
@@ -151,10 +163,9 @@ function docFor(segments: string[]): DocEntry | null {
   const [head, ...rest] = segments;
   if (head === "E") {
     if (rest.length === 0) {
-      return {
-        title: "Game.E",
-        body: `结果码表。${RESULT_CODE_NOTE}`,
-      };
+      // 与补全 info 同文：直接取 apiData 中 E 的 doc
+      const e = GAME_MEMBERS.find((m) => m.name === "E");
+      return e ? { title: "Game.E", body: e.doc } : null;
     }
     if (rest.length > 1) return null;
     const label = CODE_LABELS[rest[0]];
@@ -211,19 +222,16 @@ function hoverChain(state: EditorState, pos: number): string[] | null {
   return segs.slice(1);
 }
 
-export const gameDocTooltip = hoverTooltip(
-  (view, pos) => {
-    if (inStringOrComment(view.state, pos)) return null;
-    const segments = hoverChain(view.state, pos);
-    if (!segments) return null;
-    const entry = docFor(segments);
-    if (!entry) return null;
-    return {
-      pos,
-      create() {
-        return { dom: docDom(entry) };
-      },
-    };
-  },
-  { hoverTime: 300 },
-);
+export const gameDocTooltip = hoverTooltip((view, pos) => {
+  if (inStringOrComment(view.state, pos)) return null;
+  const segments = hoverChain(view.state, pos);
+  if (!segments) return null;
+  const entry = docFor(segments);
+  if (!entry) return null;
+  return {
+    pos,
+    create() {
+      return { dom: docDom(entry) };
+    },
+  };
+});

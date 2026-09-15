@@ -72,7 +72,9 @@ export function createCodeEditor(host: HTMLElement, opts: CodeEditorOptions): Co
 
   const buildExtensions = (language: Language): Extension[] => [
     keymap.of([
-      // 置于各默认 keymap 之前；CM6 对已消费按键自动 preventDefault
+      // Mod-s 全部默认 keymap 均无此绑定，放在首位仅求直观；
+      // Enter/Esc 等补全键实际由 autocompletion() 自带的
+      // Prec.highest keymap 接管，此处 completionKeymap 属冗余兜底。
       {
         key: "Mod-s",
         run: () => {

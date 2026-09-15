@@ -46,10 +46,6 @@ export const gameTheme = EditorView.theme(
     ".cm-activeLine": {
       backgroundColor: "color-mix(in srgb, var(--panel-2) 60%, transparent)",
     },
-    ".cm-activeLineGutter": {
-      backgroundColor: "transparent",
-      color: "var(--fg)",
-    },
     ".cm-placeholder": {
       color: "var(--dim)",
     },
@@ -57,9 +53,6 @@ export const gameTheme = EditorView.theme(
       backgroundColor: "transparent",
       outline: "1px solid color-mix(in srgb, var(--accent) 60%, transparent)",
       color: "inherit",
-    },
-    ".cm-selectionMatch": {
-      backgroundColor: "color-mix(in srgb, var(--warn) 25%, transparent)",
     },
     ".cm-searchMatch": {
       backgroundColor: "color-mix(in srgb, var(--warn) 25%, transparent)",

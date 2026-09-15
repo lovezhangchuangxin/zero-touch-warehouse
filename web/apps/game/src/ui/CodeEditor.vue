@@ -56,8 +56,9 @@ onMounted(() => {
   if (import.meta.env.DEV) {
     (window as unknown as { __ztwEditor?: CodeEditorHandle }).__ztwEditor = ed;
   }
-  // 全局 Cmd/Ctrl+S：焦点不在编辑器内（如按钮刚点过）也能保存；
-  // 编辑器内由 keymap 先行消费（defaultPrevented 已置位则跳过）。
+  // 全局 Cmd/Ctrl+S：焦点不在编辑器内（如按钮刚点过）也能保存。
+  // 编辑器内 keymap 先消费一次，这里会再触发一次——双触发由 save()
+  // 的 busy 排队去重（见 pendingSave），不会双发 hotReload。
   window.addEventListener("keydown", onGlobalKey);
 });
 
@@ -78,8 +79,15 @@ function onGlobalKey(e: KeyboardEvent) {
   }
 }
 
+let pendingSave = false;
+
 async function save() {
-  if (!ed || busy.value) return;
+  if (!ed) return;
+  if (busy.value) {
+    // 重载进行中的再次保存（⌘S 连按）不静默丢弃，完成后补一次
+    pendingSave = true;
+    return;
+  }
   busy.value = true;
   saveError.value = "";
   try {
@@ -98,12 +106,19 @@ async function save() {
     saveError.value = `重载失败：${String(e)}`;
   } finally {
     busy.value = false;
+    if (pendingSave) {
+      pendingSave = false;
+      void save();
+    }
   }
 }
 
 function loadDemo() {
   const d = DEMO_SCRIPTS.find((s) => s.id === demoSel.value);
   if (!d || !ed) return;
+  const file = activeFile.value;
+  // 多文件预留：草稿同步进文件模型，切 tab 重建 state 时才有正确内容
+  if (file) file.code = d.code;
   ed.setDoc(d.code);
   langSel.value = d.language;
   demoSel.value = "";
@@ -137,7 +152,7 @@ function selectTab(id: string) {
       </select>
       <button :disabled="busy" @click="save">保存并重载</button>
       <span class="dim hint"
-        >⌘/Ctrl+S 保存并重载；重载会暂停世界并重建执行环境，Game.memory 保留</span
+        >⌘/Ctrl+S 保存并重载；重载会暂停世界并重建执行环境，Game.memory 保留，普通全局变量重置</span
       >
       <span v-if="saveError" class="warn">{{ saveError }}</span>
     </div>

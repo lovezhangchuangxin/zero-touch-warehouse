@@ -74,7 +74,7 @@ export const GAME_MEMBERS: ApiMember[] = [
     signature: "robots() → Robot[]",
     template: "robots()",
     doc:
-      "全部机器人视图：id / pos / energy / carry / last_result / memory，" +
+      "全部机器人视图：id / pos / energy / energy_max / carry / last_result / memory，" +
       "动作方法 move、charge、take、give、pick、drop。" +
       "基于 tick 快照，机器人动作不改变本 tick 查询结果。",
   },
@@ -107,7 +107,7 @@ export const GAME_MEMBERS: ApiMember[] = [
     name: "vehicles",
     kind: "method",
     signature: "vehicles(kind?) → Vehicle[]",
-    template: "vehicles(${kind})",
+    template: "vehicles()",
     doc:
       '占用装卸位的车辆视图：id / kind（"in" 入库、"out" 出库）/ goods_type / ' +
       "interact_pos / order_id / dock / boxes。kind 过滤车型，缺省返回全部。" +
@@ -127,7 +127,7 @@ export const GAME_MEMBERS: ApiMember[] = [
     kind: "method",
     signature: "my_orders() → Order[]",
     template: "my_orders()",
-    doc: "已接未完成的订单，比市场订单多 vehicle 与 dock 两个字段。",
+    doc: "已接未完成的订单，vehicle / dock 字段已填充（市场订单中为 null）。",
   },
   {
     name: "objects_at",
@@ -258,17 +258,18 @@ export const GAME_MEMBERS: ApiMember[] = [
     name: "log",
     kind: "method",
     signature: "log(...args)",
-    template: "log(${msg})",
+    template: "log(${args})",
     doc: "输出一行到日志面板。多参数以空格连接，非字符串参数 JSON 序列化。",
   },
   {
     name: "memory",
     kind: "property",
-    signature: "memory → MemoryMap",
+    signature: "memory → 受控映射",
     doc:
       "受控根映射：主进程持有的数据树，跨代码重载持久。" +
       "读写与嵌套修改即时提交；写入原生容器先深拷贝，之后改原变量不动 memory。" +
-      "方法：keys() / size / to_dict()（JS 受控列表另有 push / remove(i) / to_list()）。" +
+      "操作面两语言不同——JS：映射 keys()/size/to_dict()，列表 length/push/remove(i)/to_list()；" +
+      "Python：映射 keys()/to_dict()/len(m)，列表 append/remove(i)/to_list()（remove 按下标）。" +
       "robots 键为宿主保留，玩家勿占用。",
   },
 ];
