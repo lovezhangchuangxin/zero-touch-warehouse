@@ -20,53 +20,24 @@ void props;
 </script>
 
 <template>
-  <div class="banner">
-    <div class="head">
+  <div
+    class="absolute inset-x-3 bottom-3 z-10 rounded-md border border-bad bg-bad-deep/95 px-3 py-2 shadow-lg shadow-black/40"
+  >
+    <div class="flex items-baseline gap-2.5">
       <strong>{{ classLabel(fault.class) }}</strong>
-      <code class="code">{{ fault.code }}</code>
-      <span class="dim">tick {{ fault.tick }}</span>
+      <code class="text-bad">{{ fault.code }}</code>
+      <span class="text-dim">tick {{ fault.tick }}</span>
     </div>
-    <div class="msg">{{ fault.message }}</div>
-    <div v-if="fault.stack" class="stack mono">{{ fault.stack }}</div>
-    <div class="meta dim mono">
+    <div class="mt-1 whitespace-pre-wrap">{{ fault.message }}</div>
+    <div
+      v-if="fault.stack"
+      class="mt-1 max-h-[90px] overflow-auto whitespace-pre-wrap font-mono text-xs text-dim"
+    >
+      {{ fault.stack }}
+    </div>
+    <div class="mt-1 font-mono text-xs text-dim">
       最后已提交请求 #{{ fault.last_request_id }} {{ fault.last_op || "—" }} ｜ 本执行已应答
       {{ fault.requests_served }} 条
     </div>
   </div>
 </template>
-
-<style scoped>
-.banner {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
-  background: rgba(46, 22, 26, 0.92);
-  border: 1px solid var(--bad);
-  border-radius: 6px;
-  padding: 8px 12px;
-  z-index: 5;
-}
-.head {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-}
-.code {
-  color: var(--bad);
-}
-.msg {
-  margin-top: 4px;
-  white-space: pre-wrap;
-}
-.stack {
-  margin-top: 4px;
-  color: var(--dim);
-  white-space: pre-wrap;
-  max-height: 90px;
-  overflow: auto;
-}
-.meta {
-  margin-top: 4px;
-}
-</style>

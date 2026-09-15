@@ -1,0 +1,90 @@
+/* 根样式：Tailwind v4 入口与全局设计令牌。
+   色板 / 字号 / 字体统一在 @theme 声明（原 App.vue :root 内联令牌迁入），
+   工具类与 var() 消费方共用同一份色板，换皮单点生效。 */
+@import "tailwindcss";
+
+@theme {
+  /* 游戏色板 */
+  --color-bg: #14161a;
+  --color-panel: #1d2026;
+  --color-panel-2: #242830;
+  --color-line: #323743;
+  --color-fg: #d7dbe2;
+  --color-dim: #8b93a1;
+  --color-ok: #56c271;
+  --color-bad: #e2606b;
+  --color-bad-deep: #2e161a;
+  --color-warn: #e0b34c;
+  --color-accent: #4da3e0;
+  --color-selected: #2c3a4e;
+
+  /* 字号（刻意覆写框架默认刻度：sm 14→13、xs 行高统一，新增 2xs=11）：
+     sm=正文 13 / xs=代码 12 / 2xs=辅助 11，行高统一 1.45 */
+  --text-sm: 13px;
+  --text-sm--line-height: 1.45;
+  --text-xs: 12px;
+  --text-xs--line-height: 1.45;
+  --text-2xs: 11px;
+  --text-2xs--line-height: 1.45;
+
+  --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+  body {
+    @apply bg-bg font-sans text-sm text-fg antialiased;
+  }
+  code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+  /* 细滚动条（Tauri 双端 WKWebView / WebView2 均支持） */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  /* 旧令牌桥：editor/theme.ts 以 JS 内联样式消费 --panel 等旧名，
+     统一转发到 @theme 变量，CodeMirror 换皮不改名即继续生效。 */
+  :root {
+    --bg: var(--color-bg);
+    --panel: var(--color-panel);
+    --panel-2: var(--color-panel-2);
+    --line: var(--color-line);
+    --fg: var(--color-fg);
+    --dim: var(--color-dim);
+    --ok: var(--color-ok);
+    --bad: var(--color-bad);
+    --warn: var(--color-warn);
+    --accent: var(--color-accent);
+  }
+}
+
+@layer components {
+  /* 按钮基类（原全局 button 元素样式），状态类 .btn-on / .btn-danger 叠加 */
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-1 rounded-sm border border-line bg-panel-2 px-2.5 py-1 text-fg transition-colors enabled:hover:border-accent disabled:opacity-40;
+  }
+  .btn-on {
+    @apply border-accent bg-selected;
+  }
+  .btn-danger {
+    @apply border-bad/40 text-bad enabled:hover:border-bad enabled:hover:bg-bad/10;
+  }
+  /* 下拉 / 输入框基底 */
+  .field {
+    @apply rounded-sm border border-line bg-panel-2 px-2 py-0.5;
+  }
+}

@@ -46,78 +46,33 @@ function describe(e: DiagEvent): string {
 function kindClass(kind: string): string {
   switch (kind) {
     case "fault":
-      return "bad";
+      return "text-bad";
     case "accept_fail":
-      return "warn";
+      return "text-warn";
     case "order_done":
-      return "ok";
+      return "text-ok";
     default:
-      return "dim";
+      return "text-dim";
   }
 }
 </script>
 
 <template>
-  <div class="wrap">
-    <div v-if="store.diagGap" class="gap">
+  <div class="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+    <div
+      v-if="store.diagGap"
+      class="mx-2 my-1.5 rounded-sm border border-dashed border-warn px-2 py-1 text-xs text-warn"
+    >
       部分历史已过期：事件 #{{ store.diagGap.from }}–{{ store.diagGap.to }} 已被覆盖
       （诊断环有界，docs/architecture/02）
     </div>
-    <div class="list">
-      <div v-for="e in events" :key="e.seq" class="ev">
-        <span class="mono dim tick">{{ e.tick }}</span>
-        <span class="kind" :class="kindClass(e.kind)">{{ KIND_LABELS[e.kind] ?? e.kind }}</span>
-        <span class="text">{{ describe(e) }}</span>
+    <div class="min-h-0 overflow-auto px-2 pb-2 pt-1">
+      <div v-for="e in events" :key="e.seq" class="flex gap-2 py-px text-xs">
+        <span class="min-w-10 text-right font-mono text-dim">{{ e.tick }}</span>
+        <span class="min-w-14" :class="kindClass(e.kind)">{{ KIND_LABELS[e.kind] ?? e.kind }}</span>
+        <span>{{ describe(e) }}</span>
       </div>
-      <div v-if="events.length === 0" class="dim empty">（暂无事件）</div>
+      <div v-if="events.length === 0" class="px-2 py-2 text-dim">（暂无事件）</div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.wrap {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
-}
-.gap {
-  margin: 6px 8px;
-  padding: 4px 8px;
-  border: 1px dashed var(--warn);
-  border-radius: 4px;
-  color: var(--warn);
-  font-size: 12px;
-}
-.list {
-  overflow: auto;
-  padding: 4px 8px 8px;
-}
-.ev {
-  display: flex;
-  gap: 8px;
-  font-size: 12px;
-  padding: 1px 0;
-}
-.tick {
-  min-width: 40px;
-  text-align: right;
-}
-.kind {
-  min-width: 56px;
-}
-.kind.bad {
-  color: var(--bad);
-}
-.kind.warn {
-  color: var(--warn);
-}
-.kind.ok {
-  color: var(--ok);
-}
-.dim {
-  color: var(--dim);
-}
-.empty {
-  padding: 8px;
-}
-</style>

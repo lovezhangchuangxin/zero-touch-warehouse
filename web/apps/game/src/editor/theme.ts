@@ -1,8 +1,10 @@
 // 编辑器主题：EditorView.theme + HighlightStyle 直接消费游戏 CSS 变量
-// （App.vue :root 的 --panel / --panel-2 / --line / --fg / --dim / --ok /
-// --bad / --warn / --accent），游戏换皮即编辑器换皮。
+// （styles/main.css @theme 的 --panel / --panel-2 / --line / --fg / --dim /
+// --ok / --bad / --warn / --accent 经 :root 旧名桥接转发），游戏换皮即
+// 编辑器换皮。
 // 少量半透明叠色用 color-mix 从变量派生（WKWebView 16.2+），不引入
-// 固定色值。选中底色沿用 App.vue button.on 的 #2c3a4e（面板内既定选中色）。
+// 固定色值。选中底色沿用 styles/main.css --color-selected 的 #2c3a4e
+// （面板内既定选中色）。
 
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";

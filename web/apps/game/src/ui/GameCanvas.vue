@@ -41,25 +41,7 @@ watch(
 </script>
 
 <template>
-  <div ref="el" class="canvas">
-    <div v-if="!ready" class="loading">加载精灵…</div>
+  <div ref="el" class="relative min-h-0 overflow-hidden rounded-md border border-line bg-panel">
+    <div v-if="!ready" class="absolute inset-0 grid place-items-center text-dim">加载精灵…</div>
   </div>
 </template>
-
-<style scoped>
-.canvas {
-  position: relative;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  min-height: 0;
-  overflow: hidden;
-}
-.loading {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: var(--dim);
-}
-</style>

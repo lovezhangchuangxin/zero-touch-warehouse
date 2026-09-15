@@ -15,62 +15,17 @@ const flood = computed(() => store.logBurst > 60);
 </script>
 
 <template>
-  <div class="wrap">
-    <div class="tools">
-      <input v-model="filter" placeholder="过滤…" class="filter" />
-      <span v-if="flood" class="warn">日志刷屏中：仅显示最近条目</span>
+  <div class="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+    <div class="flex items-center gap-2.5 px-2 pt-1">
+      <input v-model="filter" placeholder="过滤…" class="field w-40" />
+      <span v-if="flood" class="text-warn">日志刷屏中：仅显示最近条目</span>
     </div>
-    <div class="list mono">
-      <div v-for="l in filtered" :key="l.seq" class="line">
-        <span class="dim tick">{{ l.tick }}</span>
-        <span class="text">{{ l.line }}</span>
+    <div class="min-h-0 overflow-auto px-2 pb-2 pt-1 font-mono text-xs">
+      <div v-for="l in filtered" :key="l.seq" class="flex gap-2.5 whitespace-pre-wrap">
+        <span class="min-w-9 text-right text-dim">{{ l.tick }}</span>
+        <span>{{ l.line }}</span>
       </div>
-      <div v-if="filtered.length === 0" class="dim empty">（暂无 Game.log 输出）</div>
+      <div v-if="filtered.length === 0" class="px-2 py-2 text-dim">（暂无 Game.log 输出）</div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.wrap {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
-}
-.tools {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 4px 8px 0;
-}
-.filter {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 2px 8px;
-  width: 160px;
-}
-.list {
-  overflow: auto;
-  padding: 4px 8px 8px;
-}
-.line {
-  display: flex;
-  gap: 10px;
-  white-space: pre-wrap;
-}
-.tick {
-  min-width: 36px;
-  text-align: right;
-  color: var(--dim);
-}
-.empty {
-  padding: 8px;
-}
-.warn {
-  color: #e8a24a;
-}
-
-.dim {
-  color: var(--dim);
-}
-</style>

@@ -15,29 +15,17 @@ defineEmits<{
 </script>
 
 <template>
-  <div class="tabs" role="tablist">
+  <div class="flex gap-1 px-2 pt-1.5" role="tablist">
     <button
       v-for="f in files"
       :key="f.id"
+      class="btn rounded-b-none"
       role="tab"
       :aria-selected="f.id === activeId"
-      :class="{ on: f.id === activeId }"
+      :class="{ 'btn-on': f.id === activeId }"
       @click="$emit('select', f.id)"
     >
       {{ f.name }}
     </button>
   </div>
 </template>
-
-<style scoped>
-.tabs {
-  display: flex;
-  gap: 4px;
-  padding: 6px 8px 0;
-}
-.tabs button {
-  border-radius: 4px;
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-</style>

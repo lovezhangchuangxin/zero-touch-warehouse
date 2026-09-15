@@ -140,66 +140,26 @@ function selectTab(id: string) {
 </script>
 
 <template>
-  <section class="editor">
-    <div class="tools">
-      <select v-model="demoSel" @change="loadDemo">
+  <section class="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-panel">
+    <div class="flex flex-wrap items-center gap-2 px-2 py-1.5">
+      <select v-model="demoSel" class="field" @change="loadDemo">
         <option value="" disabled>载入示例…</option>
         <option v-for="d in DEMO_SCRIPTS" :key="d.id" :value="d.id">{{ d.name }}</option>
       </select>
-      <select v-model="langSel" aria-label="语言">
+      <select v-model="langSel" class="field" aria-label="语言">
         <option value="js">JavaScript</option>
         <option value="py">Python</option>
       </select>
-      <button :disabled="busy" @click="save">保存并重载</button>
-      <span class="dim hint"
+      <button class="btn" :disabled="busy" @click="save">保存并重载</button>
+      <span class="text-2xs text-dim"
         >⌘/Ctrl+S 保存并重载；重载会暂停世界并重建执行环境，Game.memory 保留，普通全局变量重置</span
       >
-      <span v-if="saveError" class="warn">{{ saveError }}</span>
+      <span v-if="saveError" class="text-warn">{{ saveError }}</span>
     </div>
     <EditorTabs v-if="files.length > 1" :files="files" :active-id="activeId" @select="selectTab" />
-    <div ref="host" class="cm-host" />
+    <div
+      ref="host"
+      class="mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-sm border border-line bg-panel"
+    />
   </section>
 </template>
-
-<style scoped>
-.warn {
-  color: #e8a24a;
-}
-.editor {
-  display: flex;
-  flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  min-height: 0;
-  overflow: hidden;
-}
-.tools {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding: 6px 8px;
-  flex-wrap: wrap;
-}
-.tools select {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 2px 4px;
-}
-.hint {
-  font-size: 11px;
-}
-.dim {
-  color: var(--dim);
-}
-.cm-host {
-  flex: 1;
-  min-height: 0;
-  margin: 0 8px 8px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  overflow: hidden;
-}
-</style>
