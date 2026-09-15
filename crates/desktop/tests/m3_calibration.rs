@@ -254,7 +254,15 @@ fn run(name: &str, code: &str) -> Recorder {
     for &seed in &SEEDS {
         let mut spec = scenario::M3_TRADE.clone();
         spec.seed = seed;
-        let mut s = Session::new(SessionConfig::new(bins.js.clone()), scenario::build(&spec));
+        // 本测试校准的是经济指标，不检验「脚本 200ms 内跑完」——那是
+        // runtime 故障注入套件的职责。生产默认预算是墙钟口径，共享
+        // CI runner（macos）上 200ms 级的调度停顿落进任一 tick 的执行
+        // 窗口即误报 INTERRUPTED（语义零问题的单点尖峰）。此处放宽
+        // base 与 cap（cap 默认 500ms 会把 base 钳回，须一并调）。
+        let mut cfg = SessionConfig::new(bins.js.clone());
+        cfg.tick_budget_base_ms = 2_000;
+        cfg.tick_budget_cap_ms = 2_000;
+        let mut s = Session::new(cfg, scenario::build(&spec));
         assert!(s.load_code(code).ok, "{name} 加载失败：{:?}", s.fault);
         let initial_gold = s.world.gold_milli;
         let mut rec = Recorder::new();
