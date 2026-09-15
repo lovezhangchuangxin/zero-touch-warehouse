@@ -1,39 +1,126 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import type { EditorState } from "@codemirror/state";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import * as api from "../api";
 import { store } from "../store";
 import { DEMO_SCRIPTS } from "../scripts";
+import type { Language } from "../scripts";
+import { createCodeEditor, type CodeEditorHandle } from "../editor/setup";
+import { fileNameFor, makeMainFile, type EditorFile } from "../editor/files";
+import EditorTabs from "./EditorTabs.vue";
 
-// 代码输入（B2 为纯 textarea；Monaco / CodeMirror 选型属后续里程碑）。
-// “保存并重载”= 热重载：当前 tick 结束后暂停 → 保存即重建执行环境
-// （docs/architecture/05 §代码编辑器）。语言切换走宿主重启（docs 03：
-// 同一存档同一时间只运行一种语言），已提交 Game.memory 保留。
-const local = ref(store.code);
-const langSel = ref(store.language);
+// 代码编辑器（CodeMirror 6，docs/architecture/05 §代码编辑器）。
+// 「保存并重载」= 热重载：当前 tick 结束后暂停 → 保存即重建执行环境。
+// 语言切换走宿主重启（docs 03：同一存档同一时间只运行一种语言），
+// 已提交 Game.memory 保留。行为与 B2 textarea 版一致：示例载入、
+// 语言下拉、失败提示、草稿保存时才提交 store。
+const host = ref<HTMLElement | null>(null);
 const demoSel = ref("");
 const busy = ref(false);
-
 const saveError = ref("");
+
+// 多文件预留：当前恒为 1 个主文件（宿主协议单字符串），tab 条仅在 >1 时渲染。
+const files = ref<EditorFile[]>([makeMainFile(store.code, store.language as Language)]);
+const activeId = ref(files.value[0]!.id);
+const stateCache = new Map<string, EditorState>();
+
+const activeFile = computed(() => files.value.find((f) => f.id === activeId.value));
+const langSel = computed<string>({
+  get: () => activeFile.value?.language ?? "js",
+  set: (v) => {
+    const file = activeFile.value;
+    if (!file) return;
+    file.language = v as Language;
+    file.name = fileNameFor(file.language);
+    ed?.setLanguage(file.language);
+  },
+});
+
+let ed: CodeEditorHandle | null = null;
+
+function placeholderFor(language: Language): string {
+  return language === "py" ? "def loop(): …" : "export function loop() { … }";
+}
+
+onMounted(() => {
+  if (!host.value) return;
+  const file = files.value[0]!;
+  ed = createCodeEditor(host.value, {
+    doc: file.code,
+    language: file.language,
+    placeholderFor,
+    onSave: () => void save(),
+  });
+  // dev-only 自动化测试钩子（生产构建剔除）：自动化环境注入不了受信
+  // 键盘事件，经 handle.typeAtEnd 以真实打字路径驱动补全等行为。
+  if (import.meta.env.DEV) {
+    (window as unknown as { __ztwEditor?: CodeEditorHandle }).__ztwEditor = ed;
+  }
+  // 全局 Cmd/Ctrl+S：焦点不在编辑器内（如按钮刚点过）也能保存；
+  // 编辑器内由 keymap 先行消费（defaultPrevented 已置位则跳过）。
+  window.addEventListener("keydown", onGlobalKey);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onGlobalKey);
+  if (import.meta.env.DEV) {
+    delete (window as unknown as { __ztwEditor?: unknown }).__ztwEditor;
+  }
+  ed?.destroy();
+  ed = null;
+  stateCache.clear();
+});
+
+function onGlobalKey(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "s") {
+    if (!e.defaultPrevented) e.preventDefault();
+    void save();
+  }
+}
+
 async function save() {
+  if (!ed || busy.value) return;
   busy.value = true;
   saveError.value = "";
   try {
-    store.code = local.value;
-    store.language = langSel.value;
-    await api.hotReload(local.value, langSel.value);
+    const code = ed.getDoc();
+    const language = langSel.value;
+    const file = activeFile.value;
+    if (file) {
+      file.code = code;
+      file.language = language as Language;
+      file.name = fileNameFor(file.language);
+    }
+    store.code = code;
+    store.language = language;
+    await api.hotReload(code, language);
   } catch (e) {
     saveError.value = `重载失败：${String(e)}`;
   } finally {
     busy.value = false;
   }
 }
+
 function loadDemo() {
   const d = DEMO_SCRIPTS.find((s) => s.id === demoSel.value);
-  if (d) {
-    local.value = d.code;
-    langSel.value = d.language;
-    demoSel.value = "";
-  }
+  if (!d || !ed) return;
+  ed.setDoc(d.code);
+  langSel.value = d.language;
+  demoSel.value = "";
+}
+
+// 多文件切换（预留路径）：活动文件状态留在缓存（doc 与撤销历史都在
+// state 里），目标文件无缓存则按其内容新建。语言隔间随 state 各自
+// 持有，缓存态语言若与文件声明漂移则就地重配。
+function selectTab(id: string) {
+  if (!ed || id === activeId.value) return;
+  stateCache.set(activeId.value, ed.view.state);
+  const file = files.value.find((f) => f.id === id);
+  if (!file) return;
+  const cached = stateCache.get(id);
+  ed.switchState(cached ?? ed.newState(file.code, file.language));
+  if (ed.currentLanguage() !== file.language) ed.setLanguage(file.language);
+  activeId.value = id;
 }
 </script>
 
@@ -49,15 +136,13 @@ function loadDemo() {
         <option value="py">Python</option>
       </select>
       <button :disabled="busy" @click="save">保存并重载</button>
-      <span class="dim hint">重载会暂停世界并重建执行环境；Game.memory 保留，普通全局变量重置</span>
+      <span class="dim hint"
+        >⌘/Ctrl+S 保存并重载；重载会暂停世界并重建执行环境，Game.memory 保留</span
+      >
       <span v-if="saveError" class="warn">{{ saveError }}</span>
     </div>
-    <textarea
-      v-model="local"
-      spellcheck="false"
-      :placeholder="langSel === 'py' ? 'def loop(): …' : 'export function loop() { … }'"
-      class="code mono"
-    />
+    <EditorTabs v-if="files.length > 1" :files="files" :active-id="activeId" @select="selectTab" />
+    <div ref="host" class="cm-host" />
   </section>
 </template>
 
@@ -66,12 +151,13 @@ function loadDemo() {
   color: #e8a24a;
 }
 .editor {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
   min-height: 0;
+  overflow: hidden;
 }
 .tools {
   display: flex;
@@ -89,17 +175,16 @@ function loadDemo() {
 .hint {
   font-size: 11px;
 }
-.code {
-  margin: 0 8px 8px;
-  background: #171a1f;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 8px;
-  resize: none;
-  tab-size: 2;
-  min-height: 0;
-}
 .dim {
   color: var(--dim);
+}
+.cm-host {
+  flex: 1;
+  min-height: 0;
+  margin: 0 8px 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
 }
 </style>
