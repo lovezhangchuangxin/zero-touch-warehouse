@@ -5,7 +5,7 @@ let phase = "go-port"; // go-port → unload → charge → deliver
 let sellId = null;
 let buyId = null;
 
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
 
   if (phase === "go-port") {

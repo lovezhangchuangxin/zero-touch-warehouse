@@ -6,7 +6,10 @@
 
 A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D（双平台构建
 冒烟）、A1（完整协议与双语言，验收证据见 `records/a1-protocol-playthrough.md`
-与 `records/a1-findings.md`）之上完成里程碑 3：市场生成器（三货物均值
+与 `records/a1-findings.md`）、A2（多文件模块 + JS 全面 ESM 化：协议 v3
+文件集、JS 内存模块加载器与入口导出契约、Python 内存 finder 与玩家模块
+驱逐、async 边界防线——TLA 未完成 / 未处理拒绝 / async 入口的可读故障）
+之上完成里程碑 3：市场生成器（三货物均值
 回归价格、双向常驻挂单、板面刷新与不变量维护）、借贷（按 tick 复利、
 信用额度）与商店购买（robot/shelf/charger/dock，装卸位朝向自边界墙
 推导）；经济不变量属性测试（会计恒等式风暴 + 借贷穷举矩阵）与周转 /

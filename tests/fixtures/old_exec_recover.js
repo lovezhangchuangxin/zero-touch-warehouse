@@ -2,7 +2,7 @@
 // 主进程回 EXEC_CLOSED 错误结果、绑定层抛异常；捕获后继续发正常请求并
 // 正常完成——验证被拒请求号计入已见对账（不触发 REQUEST_ID_GAP /
 // 完成帧 LAST_REQUEST_MISMATCH）。
-function loop() {
+export function loop() {
   try {
     Game.log("first-rejected");
   } catch (e) {

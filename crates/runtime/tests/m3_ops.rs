@@ -46,7 +46,7 @@ const seen = [];
 seen.push(Game.borrow(10));
 seen.push(Game.buy("shelf", 5, 5));
 Game.log("init:" + seen.join(","));
-function loop() {}
+export function loop() {}
 "#,
         )
         .ok;
@@ -70,7 +70,7 @@ function loop() {}
 fn interest_accrues_through_session_tick() {
     let mut s = Session::new(SessionConfig::new(common::host_bin()), demo_world());
     assert!(
-        s.load_code("function loop() { if (Game.tick === 0) Game.borrow(100); }")
+        s.load_code("export function loop() { if (Game.tick === 0) Game.borrow(100); }")
             .ok,
         "初始化失败：{:?}",
         s.fault
@@ -91,7 +91,7 @@ fn funds_and_buy_visible_after_replay_failure() {
     assert!(
         s.load_code(
             r#"
-function loop() {
+export function loop() {
   Game.borrow(50.5);
   Game.log("f:" + Math.floor(Game.gold * 1000 + 0.5) + "," + Math.floor(Game.debt * 1000 + 0.5));
   Game.buy("shelf", 5, 5);

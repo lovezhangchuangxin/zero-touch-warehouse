@@ -49,6 +49,12 @@ pub const TRANSITIVE: &[&str] = &[
     "copyreg",
 ];
 
+/// 收窄后仍保留在 `sys.modules` 的机器私有项（import 机器的硬需求，
+/// 见 NARROW_PY 的 `_ZTW_KEEP_PRIVATE`）。玩家文件名与其冲突必须在
+/// init 拒绝——注册表的驱逐按名匹配，玩家模块会顶掉真模块并永久
+/// 破坏宿主的源码装载。
+pub const KEEP_PRIVATE: &[&str] = &["_io", "_warnings"];
+
 /// 玩家可 import 的顶层模块白名单（含必要的传递依赖根）。
 pub const WHITELIST: &[&str] = &[
     "math",
@@ -81,6 +87,78 @@ import json  # noqa: F401
 
 _ZTW_WHITELIST = frozenset(__ZTW_WHITELIST__) | frozenset(__ZTW_TRANSITIVE__)
 
+# 预导入玩家模块注册表所需模块：与 collections.abc 同款时序约束——必须
+# 在 meta_path 替换之前以原生 import 机器完成加载。inspect / importlib.util
+# 不在白名单，随后会被 sys.modules 洗除，但此处捕获的模块对象引用持续
+# 有效。注意：注册表与 loader 是引导期代码但不做属性链隔离——玩家可经
+# sys.meta_path[0].find_spec.__globals__ 到达本命名空间（真 builtins 的
+# exec/compile 等）；这与既有的 collections._sys 属性链残余同类
+#（误用防护定位，源头拆除仍是真闸门），不得在此存放更敏感的状态。
+import importlib.util as _ztw_ilu  # noqa: F401
+import inspect as _ztw_inspect  # noqa: F401
+
+
+class _ZtwPlayerLoader:
+    """内存源加载器：玩家模块命名空间显式注入受限 __builtins__ 与当代
+    宿主绑定（Game 等）。CPython 在模块 dict 缺 __builtins__ 时会回填
+    【真】builtins——这里显式设置是收窄的关键一步。"""
+
+    def __init__(self, registry, fullname):
+        self._registry = registry
+        self.fullname = fullname
+
+    def create_module(self, spec):
+        return None  # 走默认模块创建
+
+    def exec_module(self, module):
+        src = self._registry.files[self.fullname]
+        module.__dict__['__file__'] = '<player>/' + self.fullname + '.py'
+        module.__dict__['__builtins__'] = _ztw_new_builtins()
+        for _k, _v in self._registry.bindings.items():
+            module.__dict__[_k] = _v
+        exec(compile(src, '<player>/' + self.fullname + '.py', 'exec'),
+             module.__dict__)
+
+
+class _ZtwPlayerRegistry:
+    """玩家多文件注册表：文件集（模块名 → 源码）+ 绑定注入。
+
+    - find_spec 只认注册表内的顶层模块名；其余返回 None 交给白名单
+      finder（标准库照常、白名单外仍拒）。
+    - update 在每次 init 调用：先驱逐 sys.modules 里的旧玩家模块——
+      解释器跨热重载常驻，缓存里的旧模块持有旧绑定与旧状态，不得
+      存活到新一代环境。
+    - 名字与标准库/保护名的冲突在宿主侧 init 校验拦截（PROGRAM_INVALID），
+      find_spec 不再重复。
+    """
+
+    def __init__(self):
+        self.files = {}
+        self.bindings = {}
+        self._known = frozenset()
+
+    def update(self, files, bindings):
+        for name in [m for m in list(_ztw_sys.modules)
+                     if m in self._known or m in files]:
+            del _ztw_sys.modules[name]
+        self.files = dict(files)
+        self.bindings = dict(bindings)
+        self._known = frozenset(files)
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in self.files:
+            return _ztw_ilu.spec_from_loader(
+                fullname,
+                _ZtwPlayerLoader(self, fullname),
+                origin='<player>/' + fullname + '.py')
+        return None  # 非玩家名（或玩家模块的不受支持子模块）：交后续 finder
+
+    def entry_is_async(self, fn):
+        return _ztw_inspect.iscoroutinefunction(fn)
+
+
+_ztw_registry = _ZtwPlayerRegistry()
+
 class _ZtwFinder:
     """白名单 finder：顶层不在白名单的 import 一律给可读错误。"""
 
@@ -93,7 +171,7 @@ class _ZtwFinder:
                 "文件、网络与系统访问不可用（能力收窄为误用防护）。")
         return None  # 白名单内：交给后续原生 finder（builtin / frozen / path）
 
-_ztw_sys.meta_path = [_ZtwFinder()] + _ztw_sys.meta_path
+_ztw_sys.meta_path = [_ztw_registry, _ZtwFinder()] + _ztw_sys.meta_path
 
 # sys.path 只留发行物内的标准库目录（去 cwd 与 site-packages：不提供
 # pip）。Windows 的 sys.path 条目可能以相对形式或与 prefix 不同大小写/
@@ -208,12 +286,15 @@ _ZTW_PROTECTED = _ZTW_WHITELIST | {'builtins', '__ztw'}
 # frozen importlib 链 / _imp / _codecs 均不依赖 sys.modules 条目（import
 # 机器持有模块对象引用），且保留会开放危险面——尤其 `import _imp` 的
 # create_dynamic 可加载任意原生库且不经过任何审计事件。
-_ZTW_KEEP_PRIVATE = frozenset(('_io', '_warnings'))
+_ZTW_KEEP_PRIVATE = frozenset(__ZTW_KEEP_PRIVATE__)
 for _m in [m for m in list(_ztw_sys.modules)
            if m.split('.', 1)[0] not in _ZTW_PROTECTED
            and m.split('.', 1)[0] not in _ZTW_KEEP_PRIVATE]:
     del _ztw_sys.modules[_m]
 
+# 玩家模块的 __spec__/__loader__/__file__ 属性链可达注册表与 loader
+# 对象，进而经 find_spec.__globals__ 到达收窄命名空间（见上方预导入
+# 注释）——与下述属性链残余同类，一并按误用防护口径接受。
 # 已加载模块的属性链（collections._sys、json.decoder.re 等）仍指向真实
 # 模块对象——逐链追捕不可靠，改为在源头拆除危险入口：
 # - 真 builtins 模块删除 open/input/print/breakpoint（玩家白名单 dict
@@ -231,21 +312,28 @@ for _n in ('stdin', 'stdout', '__stdin__', '__stdout__'):
         delattr(_ztw_sys, _n)
 "#;
 
-/// 执行收窄。返回 `_ztw_new_builtins` 可调用（每次建立玩家命名空间时
-/// 调用，产出白名单 __builtins__ dict）。
-pub fn narrow(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+/// 执行收窄。返回 `(_ztw_new_builtins, _ztw_player_registry)` 两个可调用
+/// /对象（每次建立玩家命名空间时调用前者产出白名单 __builtins__ dict；
+/// 每次 init 调后者的 update 更新玩家文件集与绑定注入）。
+pub fn narrow(
+    py: pyo3::Python<'_>,
+) -> pyo3::PyResult<(pyo3::Py<pyo3::PyAny>, pyo3::Py<pyo3::PyAny>)> {
     use pyo3::types::PyDictMethods;
     let code = NARROW_PY
         .replace("__ZTW_WHITELIST__", &format!("{:?}", WHITELIST))
-        .replace("__ZTW_TRANSITIVE__", &format!("{:?}", TRANSITIVE));
+        .replace("__ZTW_TRANSITIVE__", &format!("{:?}", TRANSITIVE))
+        .replace("__ZTW_KEEP_PRIVATE__", &format!("{:?}", KEEP_PRIVATE));
     let globals = pyo3::types::PyDict::new(py);
     py.run(
         &std::ffi::CString::new(code).expect("收窄源码无 NUL"),
         Some(&globals),
         None,
     )?;
-    Ok(globals
-        .get_item("_ztw_new_builtins")?
-        .expect("收窄片段导出 _ztw_new_builtins")
-        .unbind())
+    let get = |key: &'static str| {
+        globals
+            .get_item(key)?
+            .map(pyo3::Py::from)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(key))
+    };
+    Ok((get("_ztw_new_builtins")?, get("_ztw_registry")?))
 }

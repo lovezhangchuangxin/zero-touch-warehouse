@@ -348,7 +348,7 @@ function leveragePolicy() {
   }
 }
 
-function loop() {
+export function loop() {
   updateEmas();
   leveragePolicy();
   tradePolicy();

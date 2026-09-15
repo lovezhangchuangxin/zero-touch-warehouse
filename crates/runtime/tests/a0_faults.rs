@@ -136,7 +136,7 @@ fn long_uninterruptible_op_killed_by_watchdog() {
 #[test]
 fn forged_interrupt_and_oom_classification() {
     let code = r#"
-function loop() {
+export function loop() {
   if (Game.tick === 0) {
     throw Object.assign(new Error("interrupted"), { name: "InternalError" });
   }
@@ -160,7 +160,7 @@ function loop() {
     }
     // 伪造 OOM：按环境级处理（自伤路径），宿主存活、可恢复。
     let code = r#"
-function loop() {
+export function loop() {
   throw Object.assign(new Error("out of memory"), { name: "InternalError" });
 }
 "#;
@@ -172,7 +172,7 @@ function loop() {
     // 空消息 InternalError（引擎构造 OOM 消息失败的退化形态）同走环境级
     // 自伤路径；见 runtime classify_fault 注释。
     let code = r"
-function loop() {
+export function loop() {
   throw new InternalError();
 }
 ";
@@ -274,7 +274,7 @@ fn accepted_move_survives_host_termination() {
     // 下一 tick 可见结算结果（重启后）。
     assert!(s.restart_host().ok);
     let code = r#"
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   Game.log("res", r.last_result ? r.last_result.code + ":" + r.last_result.action + ":" + r.last_result.arg : "none");
 }
@@ -303,7 +303,8 @@ fn init_failure_discards_branch_world_unchanged() {
     assert_eq!(rec.class, FaultClass::Script);
     assert_eq!(rec.code, "Error");
     assert!(rec.message.contains("boom"));
-    assert!(rec.stack.contains("<player>"), "应带源码名堆栈：{rec:?}");
+    // ESM 化后堆栈带入口模块名（默认 main.js）。
+    assert!(rec.stack.contains("main.js"), "应带源码名堆栈：{rec:?}");
     assert_eq!(s.memory_snapshot(), MemValue::Map(vec![]), "临时分支被丢弃");
     assert_eq!(s.world.tick, 0);
 

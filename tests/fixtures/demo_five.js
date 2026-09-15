@@ -1,5 +1,5 @@
 // 代表性负载（五台机器人）：移动 + 每台 memory 记账 + 根计数。
-function loop() {
+export function loop() {
   const east = Game.tick % 2 === 0;
   for (const r of Game.robots()) {
     r.memory["last"] = Game.tick;

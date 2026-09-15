@@ -373,7 +373,7 @@ fn market_accepts_objects_per_docs() {
     let mut s = Session::new(SessionConfig::new(host_bin()), demo_world());
     assert!(
         s.load_code(
-            "function loop() {\n  const r = Game.robots()[0];\n  Game.log('by_obj ' + (Game.get_object_by_id(r).id === r.id));\n  Game.market.take(Game.market.sell_orders()[0]);\n}\n"
+            "export function loop() {\n  const r = Game.robots()[0];\n  Game.log('by_obj ' + (Game.get_object_by_id(r).id === r.id));\n  Game.market.take(Game.market.sell_orders()[0]);\n}\n"
         )
         .ok,
         "{:?}",

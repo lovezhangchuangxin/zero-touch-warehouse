@@ -2,6 +2,10 @@
 // 脚本本体放 demos/ 下，经 Vite ?raw 内联——同一份文本既是编辑器示例，
 // 也是桌面端集成测试 include_str! 的对象（单一事实源）。
 // A1 起示例分语言（js / py）；Python 示例与 JS 同地图可对照试玩。
+// A2 起 JS 示例是 ESM 模块（export function loop 入口契约）；?raw 的
+// 默认导出是 Vite 注入的整文件文本，import/default 规则解析不了，
+// 对本文件的这组导入定向豁免。
+/* oxlint-disable import/default */
 import demoOne from "./demos/demo_one.js?raw";
 import demoFiveLanes from "./demos/demo_five_lanes.js?raw";
 import demoFiveNaive from "./demos/demo_five_naive.js?raw";
@@ -9,6 +13,7 @@ import demoPyBasics from "./demos/demo_py_basics.py?raw";
 import demoTradeFast from "./demos/demo_trade_fast.js?raw";
 import demoTradeHoard from "./demos/demo_trade_hoard.js?raw";
 import demoTradeLeverage from "./demos/demo_trade_leverage.js?raw";
+/* oxlint-enable import/default */
 
 /** 玩家代码语言（与桌面端 Language 对应，"js" / "py"）。 */
 export type Language = "js" | "py";

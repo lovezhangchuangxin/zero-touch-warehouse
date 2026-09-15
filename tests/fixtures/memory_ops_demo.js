@@ -10,7 +10,7 @@ Game.memory["items"].push(2);     // 受控句柄追加 → 提交
 Game.memory["nested"] = { a: { b: [1, 2] } };
 Game.memory["nested"]["a"]["c"] = 3;   // 嵌套句柄写 → 逐层提交
 
-function loop() {
+export function loop() {
   Game.memory["items"].push(Game.tick);
   Game.memory["count"] = Game.memory["items"].length;
   const r = Game.robots()[0];

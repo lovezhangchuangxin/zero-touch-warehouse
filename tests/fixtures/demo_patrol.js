@@ -2,7 +2,7 @@
 // 查询走本地镜像（无 IPC）；move 走同步 IPC 受理。
 let dir = Game.EAST;
 
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   if (r.last_result && r.last_result.code !== Game.E.OK) {
     Game.log("settle-fail", r.id, r.last_result.code);

@@ -60,7 +60,7 @@ function parkBox(r) {
   }
 }
 
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   const vin = Game.vehicles("in")[0];
   const vout = Game.vehicles("out")[0];

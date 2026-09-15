@@ -39,7 +39,7 @@ fn patrol_moves_east_and_west() {
 fn mirror_serves_queries_without_ipc() {
     // 只查询不动作的脚本：整个 tick 零 IPC（查询走本地镜像）。
     let code = r#"
-function loop() {
+export function loop() {
   const rs = Game.robots();
   const vs = Game.vehicles();
   const s = Game.shelves().length + Game.chargers().length + Game.docks().length;
@@ -120,7 +120,7 @@ fn take_effect_visible_same_tick_via_delta_replay() {
 fn last_result_visible_next_tick() {
     // 结算结果经镜像在下一 tick 可见；顶到墙角后受理失败日志可见。
     let code = r#"
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   Game.log("res", r.id, r.pos.x, r.pos.y,
            r.last_result ? r.last_result.code + ":" + r.last_result.action + ":" + r.last_result.arg : "none");

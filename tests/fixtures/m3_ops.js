@@ -5,7 +5,7 @@
 // 世界前提（demo_world）：12×8 无墙、1 机器人、1 货架 (6,3)、1 充电桩
 // (2,5)、1 装卸位、金币 200、无欠款。
 
-function loop() {
+export function loop() {
   // E 码表对账：键集合排序后逐字一致（codes::ALL ↔ 两份 bootstrap）。
   Game.log("e:" + Object.keys(Game.E).sort().join(","));
 

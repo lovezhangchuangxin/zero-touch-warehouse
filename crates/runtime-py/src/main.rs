@@ -35,7 +35,9 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::{PyCode, PyCodeInput, PyDict, PyDictMethods, PyModule, PyTraceback};
 use ztw_api::BOOTSTRAP_PY;
-use ztw_api::protocol::{ExecStats, HostFrame, MainFrame, err_result, read_frame, write_frame};
+use ztw_api::protocol::{
+    ExecStats, HostFrame, MainFrame, err_result, read_frame, resolve_program, write_frame,
+};
 
 use py_alloc::SIGINT;
 
@@ -46,6 +48,8 @@ const HOST_READ_LIMIT: u64 = 64 * 1024 * 1024;
 const PLAYER_FILENAME: &str = "<player>";
 /// 绑定层的编译名（堆栈帧过滤用）。
 const BOOTSTRAP_FILENAME: &str = "<bootstrap>";
+/// Python 程序的默认入口文件名（协议 entry 字段可覆盖）。
+const DEFAULT_ENTRY: &str = "main.py";
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -307,6 +311,10 @@ fn register_bridge(py: Python<'_>) -> PyResult<()> {
 /// 玩家命名空间的 __builtins__ 构造函数（收窄时捕获，见 main 引导）。
 static NEW_BUILTINS: OnceLock<Py<PyAny>> = OnceLock::new();
 
+/// 玩家模块注册表（收窄期创建的 _ZtwPlayerRegistry 实例）：每次 init
+/// 调 update 更新文件集（模块名 → 源码）与绑定注入，并驱逐旧玩家模块。
+static PLAYER_REGISTRY: OnceLock<Py<PyAny>> = OnceLock::new();
+
 // ---------------------------------------------------------------------------
 // 故障分类
 // ---------------------------------------------------------------------------
@@ -456,8 +464,11 @@ fn main() {
         py.import("_signal")
             .expect("导入 _signal 注册 SIGINT 处理器");
         register_bridge(py).expect("注册 __ztw 桥");
-        let new_builtins = narrow::narrow(py).expect("能力收窄");
+        let (new_builtins, player_registry) = narrow::narrow(py).expect("能力收窄");
         NEW_BUILTINS.set(new_builtins).expect("收窄只执行一次");
+        PLAYER_REGISTRY
+            .set(player_registry)
+            .expect("收窄只执行一次");
     });
 
     // 运行时内中断：deadline + 注入标志（与 ztw-host-js 相同的语义）。
@@ -487,7 +498,8 @@ fn main() {
             execution_id,
             kind,
             budget_ms,
-            source,
+            files,
+            entry,
             mirror,
             memory_gen,
             ..
@@ -524,18 +536,49 @@ fn main() {
         interrupt_fired.store(false, Ordering::SeqCst);
         py_alloc::STATE.reset_for_exec();
 
-        let outcome = Python::attach(|py| {
-            let fired = interrupt_fired.clone();
-            run_exec(
-                py,
-                &mut ctx,
-                is_init,
-                source.as_deref(),
-                mirror.as_deref(),
-                memory_gen,
-                &fired,
-            )
-        });
+        let mut program: Option<ztw_api::protocol::ResolvedProgram> = None;
+        let mut program_invalid: Option<FaultOut> = None;
+        if is_init {
+            match resolve_program(files, entry, DEFAULT_ENTRY) {
+                Ok(Some(p)) => program = Some(p),
+                Ok(None) => {
+                    // init 帧缺文件集：与 JS 宿主同口径，按脚本级
+                    // PROGRAM_INVALID 上报（harness 不会发出这种帧，
+                    // 统一分类只为未来第三方主进程接入时行为不分叉）。
+                    program_invalid = Some(FaultOut {
+                        class: "script",
+                        code: "PROGRAM_INVALID".into(),
+                        message: "init 帧缺少文件集".into(),
+                        stack: String::new(),
+                    });
+                }
+                Err(message) => {
+                    program_invalid = Some(FaultOut {
+                        class: "script",
+                        code: "PROGRAM_INVALID".into(),
+                        message,
+                        stack: String::new(),
+                    });
+                }
+            }
+        }
+
+        let outcome = if let Some(fault) = program_invalid {
+            Err(fault)
+        } else {
+            Python::attach(|py| {
+                let fired = interrupt_fired.clone();
+                run_exec(
+                    py,
+                    &mut ctx,
+                    is_init,
+                    program.as_ref(),
+                    mirror.as_deref(),
+                    memory_gen,
+                    &fired,
+                )
+            })
+        };
         // 恢复“无限”deadline，避免执行间隙误注入。
         deadline.store(u64::MAX, Ordering::Relaxed);
 
@@ -644,7 +687,7 @@ fn run_exec(
     py: Python<'_>,
     ctx: &mut ExecCtx,
     is_init: bool,
-    source: Option<&str>,
+    program: Option<&ztw_api::protocol::ResolvedProgram>,
     mirror: Option<&str>,
     memory_gen: u64,
     interrupt_fired: &AtomicBool,
@@ -766,10 +809,48 @@ fn run_exec(
     HOST.with(|h| h.borrow_mut().stats.mirror_parse_us = mirror_us);
 
     if is_init {
-        // 玩家源码整段执行（编译名 <player>）。
-        let source = source.unwrap_or_default();
+        // 玩家模块注册表更新：文件名校验折算模块名（lib.py → lib）、
+        // 驱逐旧玩家模块（解释器常驻，sys.modules 不得跨热重载存活）、
+        // 注入本代绑定（Game 等）供玩家模块使用。
+        let (files, entry) = program.expect("init 已解析出程序");
+        let module_names = py_module_names(files)?;
+        let registry = PLAYER_REGISTRY.get().ok_or_else(|| FaultOut {
+            class: "environment",
+            code: "BOOTSTRAP_FAILED".into(),
+            message: "玩家模块注册表未初始化（收窄未完成）".into(),
+            stack: String::new(),
+        })?;
+        let files_py = pyo3::types::PyDict::new(py);
+        for (k, v) in &module_names {
+            files_py
+                .set_item(k, v)
+                .map_err(|e| registry_fault(py, e, interrupt_fired))?;
+        }
+        let bindings_py = pyo3::types::PyDict::new(py);
+        for key in ["Game", "Position", "GameError"] {
+            if let Some(v) = ctx
+                .ns
+                .as_ref()
+                .expect("刚建立")
+                .bind(py)
+                .get_item(key)
+                .ok()
+                .flatten()
+            {
+                bindings_py
+                    .set_item(key, v)
+                    .map_err(|e| registry_fault(py, e, interrupt_fired))?;
+            }
+        }
+        registry
+            .bind(py)
+            .call_method1("update", (files_py, bindings_py))
+            .map_err(|e| registry_fault(py, e, interrupt_fired))?;
+
+        // 玩家入口整段执行（编译名 <player>/<entry>）。
+        let source = files.get(entry).expect("resolve_program 已校验入口存在");
         let ns = ctx.ns.as_ref().expect("刚建立").bind(py);
-        let c_src = match CString::new(source) {
+        let c_src = match CString::new(source.as_str()) {
             Ok(c) => c,
             Err(_) => {
                 return Err(FaultOut {
@@ -780,7 +861,7 @@ fn run_exec(
                 });
             }
         };
-        let c_name = CString::new(PLAYER_FILENAME).expect("固定文件名");
+        let c_name = CString::new(format!("{PLAYER_FILENAME}/{entry}")).expect("入口名无 NUL");
         let code = match PyCode::compile(py, &c_src, &c_name, PyCodeInput::File) {
             Ok(c) => c,
             Err(e) => return Err(classify(py, &e, interrupt_fired)),
@@ -788,11 +869,14 @@ fn run_exec(
         if let Err(e) = eval_in(py, &code, ns) {
             return Err(classify(py, &e, interrupt_fired));
         }
-        let has_loop = ns
-            .get_item("loop")
-            .ok()
-            .flatten()
-            .is_some_and(|v| v.is_callable());
+        let entry_fn = ns.get_item("loop").ok().flatten();
+        let has_loop = entry_fn.as_ref().is_some_and(|v| v.is_callable());
+        if has_loop {
+            let f = entry_fn.expect("is_some_and 刚确认");
+            if entry_is_async(py, &f)? {
+                return Err(async_entry_fault());
+            }
+        }
         Ok(has_loop)
     } else {
         if !ctx.first_loop_injected {
@@ -809,11 +893,151 @@ fn run_exec(
                 stack: String::new(),
             });
         };
+        if entry_is_async(py, &entry)? {
+            return Err(async_entry_fault());
+        }
         match entry.call0() {
             Ok(_) => Ok(true),
             Err(e) => Err(classify(py, &e, interrupt_fired)),
         }
     }
+}
+
+/// Python 玩家文件名校验并折算模块名：仅根目录下的 `.py` 文件
+/// （`lib.py` → 模块名 `lib`），模块名不得与标准库白名单/保留名冲突
+///（sys.modules 预载的白名单名玩家侧不可达，未预载的会被 finder 遮蔽
+/// 造成语义混淆，一律在 init 拦下给可读错误）。
+fn py_module_names(
+    files: &std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, String>, FaultOut> {
+    let invalid = |message: String| FaultOut {
+        class: "script",
+        code: "PROGRAM_INVALID".into(),
+        message,
+        stack: String::new(),
+    };
+    let mut out = std::collections::BTreeMap::new();
+    for (name, src) in files {
+        let stem = name
+            .strip_suffix(".py")
+            .filter(|s| {
+                !s.is_empty()
+                    && !s.contains('/')
+                    && !s.contains('\\')
+                    && !s.contains('.')
+                    && !s.contains('\0')
+            })
+            .ok_or_else(|| {
+                invalid(format!(
+                    "玩家文件 {name:?} 不合法：Python 侧仅支持根目录下的 .py 文件（如 lib.py → import lib）"
+                ))
+            })?;
+        if narrow::WHITELIST.contains(&stem)
+            || narrow::TRANSITIVE.contains(&stem)
+            || narrow::KEEP_PRIVATE.contains(&stem)
+            || matches!(
+                stem,
+                "builtins" | "__ztw" | "__main__" | "sys" | "_signal" | "importlib" | "inspect"
+            )
+        {
+            return Err(invalid(format!(
+                "玩家文件 {name:?} 的模块名 {stem:?} 与标准库/保留名冲突，请改名"
+            )));
+        }
+        // 模块名还必须是合法 Python 标识符且非关键字：非标识符名
+        //（如 my-lib.py / a b.py）注册后 `import` 语句写不出来，只能经
+        // __import__ 触达，成死重量；错误在 init 给出并提示改名。
+        if !is_python_identifier(stem) || PY_KEYWORDS.contains(&stem) {
+            return Err(invalid(format!(
+                "玩家文件 {name:?} 的模块名 {stem:?} 不是合法的 Python 标识符（或为关键字），无法 import，请改名"
+            )));
+        }
+        out.insert(stem.to_string(), src.clone());
+    }
+    Ok(out)
+}
+
+/// Python 标识符近似校验（首字符字母/下划线，其余加数字；不引入完整
+/// XID 表——覆盖常见形态即可，非 ASCII 字母按字母类放行）。
+fn is_python_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_alphanumeric())
+}
+
+/// Python 关键字（与钉版 CPython grammar 对齐；soft keywords 的
+/// match/case/_ 不是保留字，可作模块名，不列）。
+const PY_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+];
+
+/// 注册表操作属宿主引导机械：失败按环境级（与 bootstrap 失败同类）。
+/// 两个例外对齐 classify 的玩家可诱发口径：预算内看门狗注入的
+/// KeyboardInterrupt 归脚本级 INTERRUPTED；配额耗尽的 MemoryError 归
+/// 脚本级 MEMORY_LIMIT——否则玩家可把脚本错误伪装成环境故障触发
+/// 无谓的环境重建。
+fn registry_fault(py: Python<'_>, e: pyo3::PyErr, interrupt_fired: &AtomicBool) -> FaultOut {
+    if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py)
+        && interrupt_fired.load(Ordering::SeqCst)
+    {
+        return FaultOut {
+            class: "script",
+            code: "INTERRUPTED".into(),
+            message: "执行超预算，运行时内中断生效（落在玩家模块注册表更新处）".into(),
+            stack: String::new(),
+        };
+    }
+    if e.is_instance_of::<pyo3::exceptions::PyMemoryError>(py)
+        && py_alloc::STATE.limit_hit.load(Ordering::SeqCst)
+    {
+        return FaultOut {
+            class: "script",
+            code: "MEMORY_LIMIT".into(),
+            message: "Python 内存超限（落在玩家模块注册表更新处）".into(),
+            stack: String::new(),
+        };
+    }
+    FaultOut {
+        class: "environment",
+        code: "BOOTSTRAP_FAILED".into(),
+        message: format!("玩家模块注册表操作失败：{e}"),
+        stack: String::new(),
+    }
+}
+
+fn async_entry_fault() -> FaultOut {
+    FaultOut {
+        class: "script",
+        code: "ASYNC_ENTRY".into(),
+        message: "入口 loop 不能是 async 函数（沙箱为同步执行模型，协程不会被驱动）".into(),
+        stack: String::new(),
+    }
+}
+
+/// 入口 async 检测：经收窄期捕获的 inspect.iscoroutinefunction
+///（注册表方法）。async def loop 会静默不执行函数体，必须在入口处
+/// 拦下给可读错误（docs/game-design/05 异步边界）。
+fn entry_is_async(py: Python<'_>, entry: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<bool, FaultOut> {
+    let registry = PLAYER_REGISTRY.get().ok_or_else(|| FaultOut {
+        class: "environment",
+        code: "BOOTSTRAP_FAILED".into(),
+        message: "玩家模块注册表未初始化（收窄未完成）".into(),
+        stack: String::new(),
+    })?;
+    // 检查失败按"非 async"放行：敌意可调用对象（覆写 __code__ /
+    // partial.func 抛异常）随后在 entry 调用处必炸，真实异常交 classify
+    // 按脚本级上报——不把玩家可诱发的错误伪装成环境故障。
+    Ok(registry
+        .bind(py)
+        .call_method1("entry_is_async", (entry,))
+        .and_then(|v| v.extract::<bool>())
+        .unwrap_or(false))
 }
 
 /// 首次 loop 执行前的故障注入（oversize_frame / hang_exec /

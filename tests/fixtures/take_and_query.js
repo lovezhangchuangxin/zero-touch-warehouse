@@ -1,6 +1,6 @@
 // 管理操作当 tick 可见性验证：take 后同 tick 查询 my_orders 与 gold
 //（增量回放路径），并确认挂单同步消失。
-function loop() {
+export function loop() {
   const before = Game.my_orders().length;
   const asks = Game.market.sell_orders();
   if (asks.length > 0 && before === 0) {

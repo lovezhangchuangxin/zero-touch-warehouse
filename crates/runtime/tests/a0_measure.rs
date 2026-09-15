@@ -173,7 +173,7 @@ fn a0_measurements() {
     // —— 镜像产出：纯查询脚本跑 500 tick。
     {
         let mut s = Session::new(SessionConfig::new(host_bin()), demo_world());
-        let code = "function loop() { Game.robots(); Game.tick; }";
+        let code = "export function loop() { Game.robots(); Game.tick; }";
         assert!(s.load_code(code).ok);
         for _ in 0..500 {
             let out = s.tick();
@@ -299,7 +299,7 @@ fn a0_measurements() {
         "\n## 初始化延迟（20 样本）\n\n| 指标 | 样本 | p50 | p95 | max |\n|---|---|---|---|---|\n",
     );
     {
-        let code = "Game.memory[\"a\"] = 1;\nfunction loop() {}";
+        let code = "Game.memory[\"a\"] = 1;\nexport function loop() {}";
         let mut times: Vec<u64> = Vec::new();
         for _ in 0..20 {
             let mut s = Session::new(SessionConfig::new(host_bin()), demo_world());

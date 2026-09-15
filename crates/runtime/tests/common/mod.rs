@@ -4,6 +4,7 @@ use ztw_api::harness::{Session, SessionConfig};
 use ztw_model::{OrderSide, Position};
 use ztw_sim::World;
 
+#[allow(dead_code)] // 各测试二进制独立编译，未用到该助手的套件不告警
 pub fn fixture(name: &str) -> String {
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
     std::fs::read_to_string(format!("{p}{name}")).expect("fixture 存在")

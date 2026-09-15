@@ -116,7 +116,7 @@ function drive(r, vin, vout) {
   }
 }
 
-function loop() {
+export function loop() {
   const vin = Game.vehicles("in")[0];
   const vout = Game.vehicles("out")[0];
   for (const r of Game.robots()) drive(r, vin, vout);

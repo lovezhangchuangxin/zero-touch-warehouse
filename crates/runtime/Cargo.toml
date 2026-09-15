@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 ztw-api = { path = "../api" }
-rquickjs = { version = "0.13", features = ["bindgen", "allocator"] }
+rquickjs = { version = "0.13", features = ["bindgen", "allocator", "loader"] }
 serde_json = "1"
 
 [dev-dependencies]

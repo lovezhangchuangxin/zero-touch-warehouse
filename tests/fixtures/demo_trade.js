@@ -1,5 +1,5 @@
 // 交易示例：有在途订单时不再接单（幂等防重，崩溃修复演示的基础）。
-function loop() {
+export function loop() {
   if (Game.my_orders().length > 0) return;
   const asks = Game.market.sell_orders();
   if (asks.length > 0) {

@@ -63,7 +63,7 @@ Game.memory["pos2"] = [3, 4];
 Game.memory["held"] = { x: 0 };
 const held = Game.memory["held"];
 
-function loop() {
+export function loop() {
   step("held_stale", function () {
     held["x"] = 1;
   });

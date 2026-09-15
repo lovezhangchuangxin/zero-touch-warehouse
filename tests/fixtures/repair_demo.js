@@ -12,7 +12,7 @@ function repair() {
 }
 repair();   // 初始化阶段即对账（查询与 memory 写在 init 允许）
 
-function loop() {
+export function loop() {
   repair();
   if (Game.my_orders().length === 0 && Game.market.sell_orders().length > 0) {
     const asks = Game.market.sell_orders();

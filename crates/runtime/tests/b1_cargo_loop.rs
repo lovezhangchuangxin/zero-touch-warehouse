@@ -69,7 +69,7 @@ fn accepted_take_survives_host_termination() {
     let mut s = Session::new(cfg, w);
     // 机器人 (1,1) 与车辆交互格 (0,4) 不相邻——先走三步到位再触发故障注入。
     let walk = r#"
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   if (r.pos.y < 4) { r.move(Game.SOUTH); return; }
   const v = Game.vehicles("in")[0];
@@ -97,7 +97,7 @@ function loop() {
     assert!(
         s.load_code(
             r#"
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   Game.log("res", r.last_result ? r.last_result.code + ":" + r.last_result.action : "none");
 }
@@ -125,7 +125,7 @@ fn cancel_and_destroy_visible_same_tick_via_delta() {
     w.add_listing(OrderSide::Sell, "battery", 1, 5_000);
     let mut s = Session::new(SessionConfig::new(host_bin()), w);
     let code = r#"
-function loop() {
+export function loop() {
   if (Game.tick === 0) {
     const o = Game.market.sell_orders()[0];
     Game.log("take", Game.market.take(o.id));

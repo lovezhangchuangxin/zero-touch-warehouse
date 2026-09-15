@@ -1,14 +1,21 @@
-//! A0 JS 宿主进程（docs/architecture/03「JS 宿主」）。
+//! JS 宿主进程（docs/architecture/03「JS 宿主」）。
 //!
 //! - 内嵌 rquickjs（quickjs-ng）；Runtime 启动即设置堆上限、栈上限与
 //!   中断处理器（deadline 到期返回 true，引擎抛出不可捕获异常）。
-//! - 玩家代码整脚本求值（初始化执行一次），此后每 tick 同步调用 loop()；
-//!   loop() 返回后清空微任务队列，计入同一预算与中断覆盖。
+//! - 玩家程序按 ESM 模块图求值：入口模块（默认 main.js）经内存
+//!   loader（player_modules，仅相对说明符、仅文件集内）链接依赖，
+//!   初始化执行一次；此后每 tick 从入口模块 namespace 取 `loop` 导出
+//!   （活绑定）同步调用。模块体运行错误让 eval 返回的 Promise 变
+//!   Rejected——宿主收割后走统一故障分类；顶层 await 未完成
+//!   （Pending）分类为脚本级故障。
+//! - loop() 返回后清空微任务队列（动态 import() 与 await 续体在此
+//!   解析），计入同一预算与中断覆盖；未处理的 Promise 拒绝经宿主端
+//!   rejection tracker 收割，按脚本级故障上报。
 //! - 变更型 Game 调用与 memory 读写经同步 IPC（stdin/stdout，长度前缀
-//!   JSON）到主进程；查询经本地镜像应答。
-//! - 动态 import 不注册加载器，运行时报错；不提供定时器 / 网络。
-//! - 故障分类：脚本级（语法 / 未捕获 / 中断）保持宿主存活；环境级
-//!   （JS 内存超限）销毁执行环境待主进程重新初始化；协议错误退出进程。
+//!   JSON）到主进程；查询经本地镜像应答。不提供定时器 / 网络。
+//! - 故障分类：脚本级（语法 / 未捕获 / 中断 / TLA 未完成 / 未处理
+//!   拒绝 / 程序不合法）保持宿主存活；环境级（JS 内存超限）销毁执行
+//!   环境待主进程重新初始化；协议错误退出进程。
 //!
 //! 故障注入（ZTW_FAULT，逗号分隔，测试专用）：
 //!   abort_init_after_mem        初始化第一条 memory 回复后 abort()
@@ -32,16 +39,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use rquickjs::{Context, Ctx, Function, Runtime, Value};
+use rquickjs::promise::PromiseState;
+use rquickjs::{Context, Ctx, Function, Module, Object, Persistent, Runtime, Value};
 
 use ztw_api::BOOTSTRAP_JS;
 
 mod limit_alloc;
+mod player_modules;
 use limit_alloc::LimitAllocator;
-use ztw_api::protocol::{ExecStats, HostFrame, MainFrame, err_result, read_frame, write_frame};
+use player_modules::{PlayerLoader, PlayerResolver, RejectLedger, validate_files};
+use ztw_api::protocol::{
+    ExecStats, HostFrame, MainFrame, err_result, read_frame, resolve_program, write_frame,
+};
 
 /// 宿主读取主进程帧的上限（镜像随世界规模增长，取宽上限）。
 const HOST_READ_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// JS 程序的默认入口文件名（协议 entry 字段可覆盖）。
+const DEFAULT_ENTRY: &str = "main.js";
 
 /// 宿主进程启动时刻：__nowUs 的计时零点。
 static START: std::sync::LazyLock<std::time::Instant> =
@@ -320,6 +335,12 @@ fn ipc_js(_cx: Ctx, op: String, payload: String) -> rquickjs::Result<String> {
 // ---------------------------------------------------------------------------
 
 struct Env {
+    /// 入口模块的 namespace（活绑定容器）与未处理拒绝账本。字段声明顺序
+    /// 即 drop 顺序：两者都可能持有 Persistent / JS 值引用，不得活过
+    /// Runtime——账本还经 tracker 闭包（存于 Runtime opaque）共享一份，
+    /// 全部声明在 `rt` 之前，保证 Runtime 存活期内释放。
+    loop_ns: Option<Persistent<Object<'static>>>,
+    rejects: std::rc::Rc<std::cell::RefCell<RejectLedger>>,
     rt: Runtime,
     ctx: Context,
     /// 分配器状态镜像：限额拒绝标志（故障分类）与当前总额（诊断）。
@@ -337,6 +358,7 @@ fn build_env(
     stack_limit: usize,
     deadline: Arc<AtomicU64>,
     interrupt_fired: Arc<AtomicBool>,
+    files: &std::collections::BTreeMap<String, String>,
 ) -> Env {
     // 堆限额由分配器执行（拒绝时置标志供故障分类，见 limit_alloc 模块
     // 注释）；quickjs 自身限额放到无穷，避免它的无标志拒绝抢先发生。
@@ -344,6 +366,29 @@ fn build_env(
     let rt = Runtime::new_with_alloc(alloc).expect("创建 Runtime");
     rt.set_memory_limit(usize::MAX);
     rt.set_max_stack_size(stack_limit);
+    // 玩家模块装载：内存文件集 + 仅相对说明符（player_modules 注释）。
+    // 未注册 loader 时 quickjs-ng 无文件系统回退，这里注册即封闭世界。
+    rt.set_loader(PlayerResolver, PlayerLoader::new(files.clone()));
+    // 未处理拒绝观测：async 内 throw / 无 catch 的拒绝原本随被丢弃的
+    // promise 静默消失，tracker 把它们记入账本供执行尾部收割。
+    // tracker 由引擎在 promise 机械内部同步调用——回调里不得执行任何
+    // 玩家 JS（reason 的属性读取会跑 getter / Proxy trap，异常会以
+    // pending 形态横跨帧边界污染后续执行），只做 C 级的 Persistent
+    // 引用接管与计数；reason 的文本提取推迟到 harvest 的受控点。
+    let rejects = std::rc::Rc::new(std::cell::RefCell::new(RejectLedger::default()));
+    {
+        let rejects = rejects.clone();
+        rt.set_host_promise_rejection_tracker(Some(Box::new(
+            move |cx, _promise, reason, handled| {
+                let mut ledger = rejects.borrow_mut();
+                if handled {
+                    ledger.note_handled();
+                } else {
+                    ledger.note_unhandled(Persistent::save(&cx, reason));
+                }
+            },
+        )));
+    }
     let ctx = Context::full(&rt).expect("创建 Context");
     {
         let deadline = deadline.clone();
@@ -382,9 +427,31 @@ fn build_env(
         cx.eval::<Value, _>(BOOTSTRAP_JS).expect("bootstrap 求值");
     });
     Env {
+        loop_ns: None,
         rt,
         ctx,
         alloc_state,
+        rejects,
+    }
+}
+
+/// 拒绝原因的受控文本化（仅 harvest 调用）：属性读取可能执行玩家
+/// getter / Proxy trap，每次读取后无条件清 pending，防异常跨帧污染。
+fn describe_reason_guarded(cx: &Ctx<'_>, v: &Value<'_>) -> String {
+    if let Some(o) = v.as_object() {
+        let name: String = o.get::<_, String>("name").ok().unwrap_or_default();
+        let _ = cx.catch();
+        let message: String = o.get::<_, String>("message").ok().unwrap_or_default();
+        let _ = cx.catch();
+        if name.is_empty() && message.is_empty() {
+            format!("{:?}", v.type_of())
+        } else {
+            format!("{name}: {message}")
+        }
+    } else if let Some(s) = v.as_string() {
+        s.to_string().unwrap_or_default()
+    } else {
+        format!("{:?}", v.type_of())
     }
 }
 
@@ -553,7 +620,7 @@ fn main() {
     let deadline = Arc::new(AtomicU64::new(u64::MAX));
     let interrupt_fired = Arc::new(AtomicBool::new(false));
     let mut env: Option<Env> = None;
-    let mut source: Option<String> = None;
+    let mut program: Option<ztw_api::protocol::ResolvedProgram> = None;
     let mut first_loop_injected = false;
 
     loop {
@@ -570,7 +637,8 @@ fn main() {
             execution_id,
             kind,
             budget_ms,
-            source: src,
+            files,
+            entry,
             mirror,
             memory_gen,
             ..
@@ -595,15 +663,37 @@ fn main() {
             h.execution_id = execution_id;
             h.exec_first_request_sent = false;
         });
+        let mut program_fault: Option<FaultOut> = None;
         if is_init {
             // 初始化即重建执行环境（首次加载 / 热重载 / 环境故障恢复同路径）。
-            env = Some(build_env(
-                heap_limit,
-                stack_limit,
-                deadline.clone(),
-                interrupt_fired.clone(),
-            ));
-            source = src;
+            let resolved = resolve_program(files, entry, DEFAULT_ENTRY).and_then(|p| match p {
+                Some((files, entry)) => validate_files(&files).map(|()| (files, entry)),
+                None => Err("init 帧缺少文件集".to_string()),
+            });
+            match resolved {
+                Ok(p) => {
+                    env = Some(build_env(
+                        heap_limit,
+                        stack_limit,
+                        deadline.clone(),
+                        interrupt_fired.clone(),
+                        &p.0,
+                    ));
+                    program = Some(p);
+                }
+                Err(message) => {
+                    // 程序不合法（空文件集 / 入口缺失）：脚本级故障，
+                    // 旧环境随之失效（本 init 未重建成功）。
+                    env = None;
+                    program_fault = Some(FaultOut {
+                        class: "script",
+                        code: "PROGRAM_INVALID".into(),
+                        message,
+                        stack: String::new(),
+                        bare: false,
+                    });
+                }
+            }
         }
         // 运行时内中断 deadline：本次执行的预算；中断标记同步复位。
         deadline.store(now_ms().saturating_add(budget_ms), Ordering::Relaxed);
@@ -613,8 +703,10 @@ fn main() {
         }
 
         // 注入镜像；执行玩家代码。env 借用限制在本块内。
-        let run: Run = {
-            let Some(env) = env.as_ref() else {
+        let run: Run = if let Some(fault) = program_fault {
+            Run::Fault(fault)
+        } else {
+            let Some(env) = env.as_mut() else {
                 // 环境故障销毁后、重新初始化前收到 loop：协议错误，干净退出。
                 eprintln!("ztw-host: 执行环境已销毁，需要 init 执行重建");
                 std::process::exit(3);
@@ -635,7 +727,7 @@ fn main() {
                 Ok(()) => run_player(
                     env,
                     is_init,
-                    source.as_deref(),
+                    program.as_ref(),
                     &mut first_loop_injected,
                     &interrupt_fired,
                     heap_limit,
@@ -707,72 +799,169 @@ fn main() {
     }
 }
 
-/// 玩家代码执行（init 求值 / loop 调用 + 微任务清空）。
+/// 玩家代码执行。init = ESM 入口模块声明 + 求值 + 终态收割；
+/// loop = 入口模块 namespace 取 `loop` 导出（活绑定）调用。
+/// 两分支结尾都在 with 块外清空微任务队列并收割未处理拒绝。
 fn run_player(
-    env: &Env,
+    env: &mut Env,
     is_init: bool,
-    source: Option<&str>,
+    program: Option<&ztw_api::protocol::ResolvedProgram>,
     first_loop_injected: &mut bool,
     interrupt_fired: &AtomicBool,
     heap_limit: usize,
 ) -> Run {
+    env.rejects.borrow_mut().reset();
     if is_init {
-        let code = source.unwrap_or_default();
-        use rquickjs::context::EvalOptions;
-        let mut opts = EvalOptions::default();
-        opts.global = true;
-        opts.filename = Some("<player>".into());
-        match env
-            .ctx
-            .with(|cx| cx.eval_with_options::<(), _>(code.as_bytes(), opts))
-        {
-            Ok(_) => {
-                let has_loop = env.ctx.with(|cx| {
-                    cx.globals()
-                        .get::<_, Value>("loop")
-                        .map(|v| v.is_function())
-                        .unwrap_or(false)
-                });
-                Run::Ok(has_loop)
+        let (files, entry) = program.expect("init 已解析出程序");
+        let entry_src = files
+            .get(entry)
+            .expect("resolve_program 已校验入口存在")
+            .clone();
+        // 声明（链接期校验）→ 求值 → namespace/promise 持久化，全部在同一
+        // with 块内完成：Module 与 Promise 受 ctx 生命周期约束不可逃逸，
+        // 只有 Persistent 句柄能出块。Err 覆盖说明符非法 / 模块缺失等
+        // 链接期失败（异常留在 pending，走统一分类）。
+        type Saved = (
+            Persistent<Object<'static>>,
+            Persistent<rquickjs::Promise<'static>>,
+        );
+        let saved = env.ctx.with(|cx| -> rquickjs::Result<Saved> {
+            let module = Module::declare(cx.clone(), entry.clone(), entry_src)?;
+            let (module, promise) = module.eval()?;
+            let ns = module.namespace()?;
+            Ok((Persistent::save(&cx, ns), Persistent::save(&cx, promise)))
+        });
+        let (ns_persist, promise_persist) = match saved {
+            Ok(pair) => pair,
+            Err(e) => return Run::Fault(classify_call_err(env, interrupt_fired, heap_limit, e)),
+        };
+        // 动态 import() 与顶层 await 续体在微任务队列里：with 块外 drain。
+        if let Err(out) = drain_microtasks(env, interrupt_fired, heap_limit) {
+            return Run::Fault(out);
+        }
+        // 模块求值终态：Resolved（完成）/ Rejected（模块体故障）/
+        // Pending（顶层 await 未完成——await 永不解析的值挂起整个初始化）。
+        enum Final {
+            Done(bool),
+            Rejected,
+            Pending,
+        }
+        let final_state = env.ctx.with(|cx| -> Final {
+            let Ok(promise) = promise_persist.clone().restore(&cx) else {
+                // restore 失败无 pending 可读：按脚本错误处理。
+                return Final::Rejected;
+            };
+            match promise.state() {
+                PromiseState::Resolved => {
+                    let has_loop = ns_persist
+                        .clone()
+                        .restore(&cx)
+                        .ok()
+                        .and_then(|ns| ns.get::<_, Value>("loop").ok())
+                        .is_some_and(|v| v.is_function());
+                    Final::Done(has_loop)
+                }
+                PromiseState::Rejected => {
+                    // 把拒绝值转成 pending 异常，块外走统一分类。
+                    let _ = promise.result::<()>();
+                    Final::Rejected
+                }
+                PromiseState::Pending => Final::Pending,
             }
-            Err(e) => Run::Fault(classify_call_err(env, interrupt_fired, heap_limit, e)),
+        });
+        match final_state {
+            Final::Done(has_loop) => {
+                env.loop_ns = Some(ns_persist);
+                harvest_rejections(env).map_or(Run::Ok(has_loop), Run::Fault)
+            }
+            Final::Rejected => {
+                Run::Fault(classify_exec_fault(env, interrupt_fired, heap_limit))
+            }
+            Final::Pending => Run::Fault(FaultOut {
+                class: "script",
+                code: "ASYNC_INIT_PENDING".into(),
+                message: "模块初始化未完成：顶层 await 等待的值在本执行内没有解析（沙箱无定时器/网络；跨执行挂起初始化不受支持）".into(),
+                stack: String::new(),
+                bare: false,
+            }),
         }
     } else {
         if !*first_loop_injected {
             *first_loop_injected = true;
             inject_loop_faults(env);
         }
-        // 入口可能被玩家代码覆写（globalThis.loop = 5）：脚本级故障，
-        // 不炸宿主进程（docs/architecture/03 故障分级）。
+        // 入口契约：模块 namespace 的 loop 导出（活绑定，玩家重绑定可见）。
+        let Some(ns_persist) = env.loop_ns.clone() else {
+            return Run::Fault(FaultOut {
+                class: "script",
+                code: "ENTRY_MISSING".into(),
+                message: "入口模块 namespace 不存在（初始化未完成？）".into(),
+                stack: String::new(),
+                bare: false,
+            });
+        };
         let entry_ok = env.ctx.with(|cx| {
-            cx.globals()
-                .get::<_, Value>("loop")
-                .map(|v| v.is_function())
-                .unwrap_or(false)
+            ns_persist
+                .clone()
+                .restore(&cx)
+                .ok()
+                .and_then(|ns| ns.get::<_, Value>("loop").ok())
+                .is_some_and(|v| v.is_function())
         });
         if !entry_ok {
             return Run::Fault(FaultOut {
                 class: "script",
                 code: "ENTRY_MISSING".into(),
-                message: "入口 loop 不再是函数（被玩家代码覆写？）".into(),
+                message: "入口 loop 导出不再是函数（被玩家代码重绑定？）".into(),
                 stack: String::new(),
                 bare: false,
             });
         }
-        match env.ctx.with(|cx| {
-            let f: Function = cx
-                .globals()
-                .get::<_, Function>("loop")
-                .expect("已校验 loop 入口仍为函数");
+        let called = env.ctx.with(|cx| {
+            let ns = ns_persist.restore(&cx).expect("刚校验可恢复");
+            let f: Function = ns.get("loop").expect("已校验 loop 仍为函数");
             f.call::<_, ()>(())
-        }) {
+        });
+        match called {
             Ok(()) => match drain_microtasks(env, interrupt_fired, heap_limit) {
-                Ok(()) => Run::Ok(true),
+                Ok(()) => harvest_rejections(env).map_or(Run::Ok(true), Run::Fault),
                 Err(out) => Run::Fault(out),
             },
             Err(e) => Run::Fault(classify_call_err(env, interrupt_fired, heap_limit, e)),
         }
     }
+}
+
+/// 执行尾部收割：存在未处理拒绝 → 脚本级可读故障（教学面：async 内
+/// throw / 无 catch 的拒绝不再静默消失）。reason 的文本化在宿主受控
+/// 点进行（见 describe_reason_guarded）。
+fn harvest_rejections(env: &Env) -> Option<FaultOut> {
+    let (unhandled, first) = {
+        let mut ledger = env.rejects.borrow_mut();
+        (ledger.unhandled_count(), ledger.take_first_reason())
+    };
+    if unhandled == 0 {
+        return None;
+    }
+    let reason = env.ctx.with(|cx| {
+        let desc = first
+            .and_then(|p| p.restore(&cx).ok())
+            .map(|v| describe_reason_guarded(&cx, &v))
+            .unwrap_or_else(|| "(无消息)".to_string());
+        // 兜底：提取路径的最后一步若留下 pending（防御性，正常已被
+        // 逐次清除），在此统一清空。
+        let _ = cx.catch();
+        desc
+    });
+    Some(FaultOut {
+        class: "script",
+        code: "UNHANDLED_REJECTION".into(),
+        message: format!(
+            "存在 {unhandled} 个未处理的 Promise 拒绝（async 内抛错或 .then 链无 catch）；首个原因：{reason}"
+        ),
+        stack: String::new(),
+        bare: false,
+    })
 }
 
 /// 首次 loop 执行前的故障注入（ZTW_FAULT）。

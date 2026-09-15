@@ -60,7 +60,7 @@ fn deep_copy_trap_and_controlled_ops() {
 #[test]
 fn illegal_values_rejected_tree_unchanged() {
     let code = r#"
-function loop() {
+export function loop() {
   Game.memory["seed"] = 1;
   const before = JSON.stringify(Game.memory.to_dict());
   const tries = [];
@@ -123,7 +123,7 @@ fn init_branch_commit_or_discard() {
 Game.memory["a"] = 1;
 Game.memory["b"] = [1, 2, 3];
 Game.memory["c"] = { k: "v" };
-function loop() {}
+export function loop() {}
 "#;
     let mut s = session(demo_world());
     assert!(s.load_code(ok_code).ok);
@@ -155,7 +155,7 @@ throw new Error("half done");
 #[test]
 fn reserved_keys_rejected() {
     let code = r#"
-function loop() {
+export function loop() {
   const tries = [];
   try { Game.memory["robots"] = 1; } catch (e) { tries.push(e.code); }
   try { delete Game.memory["robots"]; } catch (e) { tries.push(e.code); }
@@ -180,7 +180,7 @@ function loop() {
 #[test]
 fn stale_handle_after_replacement() {
     let code = r#"
-function loop() {
+export function loop() {
   Game.memory["m"] = { k: 1 };
   const h = Game.memory["m"];          // 句柄
   Game.memory["m"] = 2;                 // 整体替换 → 旧句柄失效
@@ -209,7 +209,7 @@ fn memory_survives_hot_reload_and_host_restart() {
     let first = r#"
 Game.memory["persist"] = "v1";
 Game.memory["counter"] = 0;
-function loop() { Game.memory["counter"] = Game.memory["counter"] + 1; }
+export function loop() { Game.memory["counter"] = Game.memory["counter"] + 1; }
 "#;
     assert!(s.load_code(first).ok);
     s.tick();
@@ -218,7 +218,7 @@ function loop() { Game.memory["counter"] = Game.memory["counter"] + 1; }
 
     // 热重载：普通全局变量重置，memory 保留。
     let second = r#"
-function loop() { Game.memory["counter"] = Game.memory["counter"] + 10; }
+export function loop() { Game.memory["counter"] = Game.memory["counter"] + 10; }
 "#;
     assert!(s.load_code(second).ok, "热重载初始化失败");
     s.tick();
@@ -250,7 +250,7 @@ fn failed_hot_reload_preserves_existing_memory() {
     let first = r#"
 Game.memory["stage"] = "A";
 Game.memory["log"] = [1, 2];
-function loop() { Game.memory["stage"] = "A"; }
+export function loop() { Game.memory["stage"] = "A"; }
 "#;
     assert!(s.load_code(first).ok);
     s.tick();
@@ -269,7 +269,7 @@ throw new Error("reload failed");
     assert_eq!(s.memory_snapshot(), before);
     // 会话可用：再次热重载成功后继续。
     let good = r#"
-function loop() { Game.memory["stage"] = "C"; }
+export function loop() { Game.memory["stage"] = "C"; }
 "#;
     assert!(s.load_code(good).ok);
     let out = s.tick();
@@ -289,7 +289,7 @@ codes.push(Game.robots()[0].move(Game.EAST));      // INIT_PHASE
 codes.push(Game.market.take(Game.market.sell_orders()[0].id)); // INIT_PHASE
 Game.memory["inited"] = Game.tick;                 // 允许
 const seen = Game.my_orders().length;              // 查询允许
-function loop() {
+export function loop() {
   Game.log("codes", codes.join(","), "orders", seen);
 }
 "#;

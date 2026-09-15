@@ -334,7 +334,7 @@ function robotWork(r, zone) {
   if (!at(r, zone.idle[0], zone.idle[1])) stepToward(r, zone.idle[0], zone.idle[1]);
 }
 
-function loop() {
+export function loop() {
   updateEmas();
   tradePolicy();
   Game.robots().forEach((r, i) => {

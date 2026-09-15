@@ -84,6 +84,19 @@ impl SessionConfig {
         self.env.push(("ZTW_FAULT".to_string(), faults.to_string()));
         self
     }
+
+    /// 宿主二进制是否为 Python 宿主（决定 load_code 单文件便捷包装的
+    /// 入口名 main.py / main.js）。以二进制文件名含 "py" 判定——本仓
+    /// 内仅有 ztw-host-js / ztw-host-py 两种宿主。已知限制：经
+    /// ZTW_HOST_BIN 指到自命名二进制可能误判，但两个误判方向都终止于
+    /// 宿主侧扩展名校验的可读 PROGRAM_INVALID，不存在按错误语言静默
+    /// 执行的路径；桌面生产路径带显式 language，不受此影响。
+    pub fn is_python_host(&self) -> bool {
+        self.host_bin
+            .file_name()
+            .map(|s| s.to_string_lossy().contains("py"))
+            .unwrap_or(false)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +402,52 @@ enum ExecResult {
 }
 
 // ---------------------------------------------------------------------------
+// 玩家程序（多文件形态）
+// ---------------------------------------------------------------------------
+
+/// 一次 init 提交的完整玩家程序：文件集 + 入口文件名。
+/// 语言由宿主二进制决定（ztw-host-js / ztw-host-py）。
+#[derive(Debug, Clone)]
+pub struct PlayerProgram {
+    /// 文件名（相对名，如 `main.js`、`lib/geo.js`）→ 源码。
+    pub files: std::collections::BTreeMap<String, String>,
+    /// 入口文件名。JS 侧是 ESM 入口模块，Python 侧是整段执行的源码文件。
+    pub entry: String,
+}
+
+impl PlayerProgram {
+    pub fn new(
+        files: std::collections::BTreeMap<String, String>,
+        entry: impl Into<String>,
+    ) -> Self {
+        PlayerProgram {
+            files,
+            entry: entry.into(),
+        }
+    }
+
+    /// 单文件便捷形态（JS）：整个源码即入口 `main.js`。
+    pub fn single_js(code: &str) -> Self {
+        PlayerProgram::new(
+            [("main.js".to_string(), code.to_string())]
+                .into_iter()
+                .collect(),
+            "main.js",
+        )
+    }
+
+    /// 单文件便捷形态（Python）：整个源码即入口 `main.py`。
+    pub fn single_py(code: &str) -> Self {
+        PlayerProgram::new(
+            [("main.py".to_string(), code.to_string())]
+                .into_iter()
+                .collect(),
+            "main.py",
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
@@ -400,7 +459,7 @@ pub struct Session {
     host: Option<HostProc>,
     host_stdin: Option<ChildStdin>,
     host_rx: Option<mpsc::Receiver<Ev>>,
-    code: Option<String>,
+    program: Option<PlayerProgram>,
     pub initialized: bool,
     pub fault: Option<FaultRecord>,
     /// 宿主代次：每次 spawn 递增、不回收；旧代次消息永远拒绝
@@ -449,7 +508,7 @@ impl Session {
             host: None,
             host_stdin: None,
             host_rx: None,
-            code: None,
+            program: None,
             initialized: false,
             fault: None,
             host_epoch: 0,
@@ -514,9 +573,45 @@ impl Session {
 
     // -- 对外：初始化 / tick / 恢复 ------------------------------------------
 
-    /// 加载玩家源码：启动（或复用）宿主并运行初始化执行。
-    /// 失败时世界与原 memory 不变（docs/architecture/06）。
+    /// 加载玩家源码（单文件便捷形态）：按宿主二进制语言包成
+    /// `main.js` / `main.py` 单文件程序。多文件用 [`Session::load_program`]。
     pub fn load_code(&mut self, code: &str) -> InitOutcome {
+        let program = if self.cfg.is_python_host() {
+            PlayerProgram::single_py(code)
+        } else {
+            PlayerProgram::single_js(code)
+        };
+        self.load_program(&program)
+    }
+
+    /// 加载完整玩家程序（文件集 + 入口）：启动（或复用）宿主并运行
+    /// 初始化执行。失败时世界与原 memory 不变（docs/architecture/06）。
+    pub fn load_program(&mut self, program: &PlayerProgram) -> InitOutcome {
+        // 快速失败：入口缺失 / 空文件集直接在主进程拦截（与宿主侧
+        // resolve_program 同源同文案），省一次完整 spawn + init 往返
+        //（Python 宿主引导是百毫秒级）。
+        if let Err(message) = crate::protocol::resolve_program(
+            Some(program.files.clone()),
+            Some(program.entry.clone()),
+            "",
+        ) {
+            let rec = FaultRecord {
+                class: FaultClass::Script,
+                code: "PROGRAM_INVALID".into(),
+                message,
+                stack: String::new(),
+                tick: self.world.tick,
+                last_request_id: 0,
+                last_op: String::new(),
+                requests_served: 0,
+            };
+            self.fault = Some(rec.clone());
+            return InitOutcome {
+                ok: false,
+                fault: Some(rec),
+                has_loop: false,
+            };
+        }
         if self.host.is_none() {
             match HostProc::spawn(&self.cfg) {
                 Ok((proc, stdin, rx)) => {
@@ -549,16 +644,22 @@ impl Session {
                 }
             }
         }
-        self.code = Some(code.to_string());
-        self.run_init(code)
+        self.program = Some(program.clone());
+        self.run_init(program)
     }
 
-    fn run_init(&mut self, code: &str) -> InitOutcome {
+    fn run_init(&mut self, program: &PlayerProgram) -> InitOutcome {
         self.init_branch = Some(self.memory.fork());
         self.in_init = true;
         let mirror = self.produce_mirror();
         let exec_id = self.next_exec_id();
-        let result = self.run_exec(exec_id, "init", self.cfg.init_budget_ms, mirror, Some(code));
+        let result = self.run_exec(
+            exec_id,
+            "init",
+            self.cfg.init_budget_ms,
+            mirror,
+            Some(program),
+        );
         self.in_init = false;
         match result {
             ExecResult::Complete { has_loop: true, .. } => {
@@ -578,6 +679,10 @@ impl Session {
                 ..
             } => {
                 self.init_branch = None; // 丢弃临时分支
+                // init 失败即未初始化：清除旧值，防止陈旧的 initialized
+                // 让 resume_after_script_error 放行后续 loop 帧打到已
+                // 销毁的环境（宿主侧 exit(3)）。
+                self.initialized = false;
                 let rec = FaultRecord {
                     class: FaultClass::Script,
                     code: "ENTRY_MISSING".into(),
@@ -605,6 +710,9 @@ impl Session {
                 ..
             } => {
                 self.init_branch = None; // 丢弃临时分支：世界与原 memory 不变
+                // 同上：init 失败后旧环境可能已被宿主销毁（如
+                // PROGRAM_INVALID / 环境级故障），不得再接受 loop 帧。
+                self.initialized = false;
                 if matches!(class, FaultClass::HostTerminated(_)) {
                     self.drop_host();
                 }
@@ -755,7 +863,7 @@ impl Session {
         }
     }
 
-    /// 环境级故障恢复：宿主内销毁重建执行环境，重新初始化同一源码。
+    /// 环境级故障恢复：宿主内销毁重建执行环境，重新初始化同一程序。
     pub fn reinit_after_env_fault(&mut self) -> InitOutcome {
         let can = matches!(
             self.fault.as_ref().map(|f| &f.class),
@@ -768,16 +876,16 @@ impl Session {
                 has_loop: false,
             };
         }
-        let code = self.code.clone().expect("有已加载源码");
-        self.run_init(&code)
+        let program = self.program.clone().expect("有已加载程序");
+        self.run_init(&program)
     }
 
     /// 宿主终止恢复：重启宿主进程并重新初始化。
     pub fn restart_host(&mut self) -> InitOutcome {
         self.drop_host();
         self.stats.host_restarts += 1;
-        let code = match &self.code {
-            Some(c) => c.clone(),
+        let program = match &self.program {
+            Some(p) => p.clone(),
             None => {
                 return InitOutcome {
                     ok: false,
@@ -786,17 +894,17 @@ impl Session {
                 };
             }
         };
-        self.load_code(&code)
+        self.load_program(&program)
     }
 
-    /// 语言切换 / 换宿主二进制专用：只杀宿主进程并清空待重载代码。
+    /// 语言切换 / 换宿主二进制专用：只杀宿主进程并清空待重载程序。
     /// 与 restart_host 的区别：绝不拿旧代码在新宿主上重跑初始化——
     /// 换语言后旧代码对新宿主是外语，重跑只产出一次注定失败且被吞的
     /// init。切换后由调用方以新代码 load_code（docs 03：语言切换走宿主
     /// 重启，已提交 memory 保留）。
     pub fn drop_host_for_switch(&mut self) {
         self.drop_host();
-        self.code = None;
+        self.program = None;
     }
 
     /// 主进程主动终止（“终止按钮”路径）：直接杀进程，不经过 Game 队列。
@@ -879,7 +987,7 @@ impl Session {
         kind: &str,
         budget_ms: u64,
         mirror: String,
-        source: Option<&str>,
+        program: Option<&PlayerProgram>,
     ) -> ExecResult {
         // 本执行的去重缓存与计数清零（docs/architecture/03：请求结果
         // 保存在当前执行内，不跨执行）。已见号不重置：请求号跨执行
@@ -935,7 +1043,8 @@ impl Session {
             kind: kind.to_string(),
             tick: self.world.tick,
             budget_ms,
-            source: source.map(|s| s.to_string()),
+            files: program.map(|p| p.files.clone()),
+            entry: program.map(|p| p.entry.clone()),
             mirror: Some(mirror),
             memory_gen: self.memory_generation(),
         };

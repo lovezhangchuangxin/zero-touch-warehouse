@@ -1,5 +1,5 @@
 // 变更型调用基线：每 tick 恰一次 move（东西往返）。
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   const east = Game.tick % 2 === 0;
   const w = Game.map_size()[0];

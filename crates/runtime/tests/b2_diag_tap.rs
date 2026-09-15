@@ -25,7 +25,7 @@ fn diag_world() -> World {
 fn accept_failures_and_init_phase_are_tapped() {
     let mut s = Session::new(SessionConfig::new(host_bin()), diag_world());
     // 初始化阶段提交动作：INIT_PHASE 拒绝应有采集记录。
-    let init_code = "const r = Game.robots()[0]; r.move(Game.SOUTH); function loop() {}";
+    let init_code = "const r = Game.robots()[0]; r.move(Game.SOUTH); export function loop() {}";
     assert!(s.load_code(init_code).ok);
     let taps = s.take_diag();
     assert_eq!(taps.len(), 1, "初始化拒绝应有一条采集：{taps:?}");
@@ -36,7 +36,7 @@ fn accept_failures_and_init_phase_are_tapped() {
 
     // 执行期撞墙：CELL_BLOCKED 受理失败；成功受理的移动不产生采集。
     assert!(
-        s.load_code("function loop() { Game.robots()[0].move(Game.SOUTH); }")
+        s.load_code("export function loop() { Game.robots()[0].move(Game.SOUTH); }")
             .ok
     );
     assert!(s.take_diag().is_empty(), "热重载本身不产生动作采集");
@@ -56,7 +56,7 @@ fn manage_ops_tap_success_and_failure() {
     let mut s = Session::new(SessionConfig::new(host_bin()), diag_world());
     let code = r#"
 let done = false;
-function loop() {
+export function loop() {
   if (done) return;
   const o = Game.market.sell_orders()[0];
   Game.log("take1", Game.market.take(o.id));
@@ -120,7 +120,7 @@ fn host_control_kills_without_queueing_behind_game_requests() {
     let (ctl_tx, ctl_rx) = mpsc::channel();
     let worker = thread::spawn(move || {
         let mut s = Session::new(cfg, diag_world());
-        assert!(s.load_code("function loop() {}").ok);
+        assert!(s.load_code("export function loop() {}").ok);
         let ctl = s.host_control();
         ctl_tx.send(ctl).expect("发送控制柄");
         let out = s.tick(); // 阻塞在挂起的宿主上，直到被外部终止

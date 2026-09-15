@@ -48,7 +48,7 @@ fn host_rejects_oversized_payload_with_readable_error() {
     let mut cfg = SessionConfig::new(host_bin());
     cfg.frame_limit = 8 * 1024;
     let code = r#"
-function loop() {
+export function loop() {
   Game.memory["seed"] = 1;
   try {
     Game.memory["big"] = "z".repeat(100 * 1024);
@@ -85,7 +85,7 @@ fn log_entry_limit_and_ring_cap() {
     cfg.log_entry_limit = 2048;
     cfg.log_ring_cap = 64;
     let code = r#"
-function loop() {
+export function loop() {
   try { Game.log("x".repeat(100000)); Game.log("unexpected-success"); }
   catch (e) { Game.log("log-err", e.code); }
   for (let i = 0; i < 300; i++) Game.log("fill", i);   // 环形缓冲覆盖最旧
@@ -181,7 +181,7 @@ fn kill_host_now_reports_killed_and_preserves_state() {
     let mut s = session(demo_world());
     let code = r#"
 Game.memory["persist"] = 7;
-function loop() { Game.memory["persist"] = Game.memory["persist"] + 1; }
+export function loop() { Game.memory["persist"] = Game.memory["persist"] + 1; }
 "#;
     assert!(s.load_code(code).ok);
     s.tick();

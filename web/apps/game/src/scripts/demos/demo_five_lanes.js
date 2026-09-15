@@ -158,7 +158,7 @@ function work(r) {
   }
 }
 
-function loop() {
+export function loop() {
   const rs = Game.robots();
   for (let i = 1; i < rs.length; i++) dockDrive(rs[i], i);
   work(rs[0]);

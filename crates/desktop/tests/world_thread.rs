@@ -69,7 +69,7 @@ function parkBox(r) {
   }
 }
 
-function loop() {
+export function loop() {
   const r = Game.robots()[0];
   const vin = Game.vehicles("in")[0];
   const vout = Game.vehicles("out")[0];
@@ -129,7 +129,7 @@ fn load_step_pause_resume_flow() {
     assert_eq!(status(&h).tick, 0, "未加载代码不得推进");
 
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() {}".to_string(),
+        code: "export function loop() {}".to_string(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -268,7 +268,7 @@ fn full_loop_completes_orders_with_diag_events() {
 fn script_fault_pauses_and_resume_recovers() {
     let h = spawn(B2_ONE.id);
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() { throw new Error('boom'); }".into(),
+        code: "export function loop() { throw new Error('boom'); }".into(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -299,7 +299,7 @@ fn script_fault_pauses_and_resume_recovers() {
     assert!(!status(&h).running, "再次自动暂停");
     // 修码 → 热重载 → 恢复：干净代码持续运行。
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() {}".into(),
+        code: "export function loop() {}".into(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -321,7 +321,7 @@ fn script_fault_pauses_and_resume_recovers() {
 fn hot_reload_preserves_world_and_reset_rebuilds() {
     let h = spawn(B2_ONE.id);
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() {}".into(),
+        code: "export function loop() {}".into(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -334,7 +334,7 @@ fn hot_reload_preserves_world_and_reset_rebuilds() {
 
     // 热重载：世界与 tick 保留（只重建执行环境），加载后仍暂停。
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() {}".into(),
+        code: "export function loop() {}".into(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -368,7 +368,7 @@ fn snapshot_sink_gating_merges_when_slow() {
         *sink_frames.lock().expect("sink 锁") += 1;
     }));
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() {}".into(),
+        code: "export function loop() {}".into(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -404,7 +404,7 @@ fn snapshot_pushes_control_plane_change_while_paused() {
     wait_status(&h, |s| s.scenario == B2_ONE.id, "首发快照已发布");
     h.shared().ack_snapshot(); // 确认初始帧，清在途标记
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() {}".into(),
+        code: "export function loop() {}".into(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -427,7 +427,8 @@ fn language_switch_restarts_host_and_preserves_memory() {
     let h = spawn(B2_ONE.id);
     // JS：写 memory 并推进。
     h.ctrl(Ctrl::LoadCode {
-        code: "Game.memory['n'] = 41;\nfunction loop() { Game.memory['n'] += 1; }".to_string(),
+        code: "Game.memory['n'] = 41;\nexport function loop() { Game.memory['n'] += 1; }"
+            .to_string(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -481,7 +482,7 @@ fn language_switch_restarts_host_and_preserves_memory() {
     );
     // 回 JS：再次切换同样成立。
     h.ctrl(Ctrl::LoadCode {
-        code: "function loop() { Game.log('js n', Game.memory['n']); }".to_string(),
+        code: "export function loop() { Game.log('js n', Game.memory['n']); }".to_string(),
         language: Language::Js,
     })
     .expect("cmd");
@@ -500,7 +501,8 @@ fn drop_host_for_switch_never_reruns_old_code() {
         scenario::build(&B2_ONE),
     );
     assert!(
-        s.load_code("Game.memory['n'] = 1;\nfunction loop() {}").ok,
+        s.load_code("Game.memory['n'] = 1;\nexport function loop() {}")
+            .ok,
         "{:?}",
         s.fault
     );
@@ -508,7 +510,7 @@ fn drop_host_for_switch_never_reruns_old_code() {
     s.drop_host_for_switch();
     assert_eq!(s.stats.host_restarts, restarts, "切换丢弃不是恢复重启路径");
     assert!(
-        s.load_code("function loop() { Game.log('n', Game.memory['n']); }")
+        s.load_code("export function loop() { Game.log('n', Game.memory['n']); }")
             .ok,
         "{:?}",
         s.fault

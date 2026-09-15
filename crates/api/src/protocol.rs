@@ -3,7 +3,8 @@
 //! 传输走宿主进程 stdin/stdout。v2（A1）补全会话语义：消息头携带
 //! 宿主代次 `host_epoch` 与执行编号 `execution_id`；`request_id` 支持
 //! 执行内去重（同号同负载返回原结果，异负载为协议故障），旧代次 /
-//! 旧执行消息一律拒绝（语义在 harness 与宿主两侧执行）。
+//! 旧执行消息一律拒绝（语义在 harness 与宿主两侧执行）。v3（A2）把
+//! init 帧的单串 `source` 换成文件集 `files` + 入口名 `entry`。
 //!
 //! 变更型调用（动作受理、管理操作）与 memory 读写走本协议；数据查询走
 //! 宿主本地镜像，仅在镜像失效时经 `mirror.fetch` 回退重建。
@@ -11,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// 帧硬上限之上的“物理”上限：防御长度前缀被破坏后的巨量读取。
 const ABSOLUTE_FRAME_CAP: u64 = 64 * 1024 * 1024;
@@ -23,7 +24,8 @@ const ABSOLUTE_FRAME_CAP: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MainFrame {
-    /// 发起一次执行。init 携带完整源码并重建执行环境；loop 复用环境。
+    /// 发起一次执行。init 携带完整玩家程序（文件集 + 入口）并重建执行
+    /// 环境；loop 复用环境。
     Exec {
         /// 协议版本（消息头要求，docs/architecture/03 IPC 提交协议）。
         #[serde(default = "protocol_version")]
@@ -36,8 +38,13 @@ pub enum MainFrame {
         tick: u64,
         /// 运行时内中断 deadline（毫秒），由主进程下发。
         budget_ms: u64,
-        /// 仅 init：完整玩家源码（只接受源码文本，不接受预编译产物）。
-        source: Option<String>,
+        /// 仅 init：完整玩家程序（文件名 → 源码；只接受源码文本，不接受
+        /// 预编译产物）。JS 侧按 ESM 模块图解析，Python 侧入口整段执行、
+        /// 其余文件经内存 finder 供 import。
+        files: Option<std::collections::BTreeMap<String, String>>,
+        /// 仅 init：入口文件名（JS 为 ESM 入口模块名；Python 为整段执行
+        /// 的源码文件）。None 时宿主用语言默认名（main.js / main.py）。
+        entry: Option<String>,
         /// 全量查询镜像（JSON 字符串）。init 与每 tick 均携带。
         mirror: Option<String>,
         /// memory 会话代次：宿主据此失效旧句柄缓存。
@@ -56,6 +63,29 @@ pub enum MainFrame {
 
 pub fn protocol_version() -> u32 {
     PROTOCOL_VERSION
+}
+
+/// init 帧携带的完整玩家程序：文件集 + 入口名（宿主侧的最小解析形态；
+/// harness 侧的富形态见 `harness::PlayerProgram`）。
+pub type ResolvedProgram = (std::collections::BTreeMap<String, String>, String);
+
+/// init 帧的程序解析：入口名缺省化 + 入口必须在文件集内。
+/// loop 帧（files=None）返回 Ok(None)。返回 Err 为可读错误（宿主以
+/// 脚本级故障上报）。
+pub fn resolve_program(
+    files: Option<std::collections::BTreeMap<String, String>>,
+    entry: Option<String>,
+    default_entry: &str,
+) -> Result<Option<ResolvedProgram>, String> {
+    let Some(files) = files else { return Ok(None) };
+    if files.is_empty() {
+        return Err("文件集为空".to_string());
+    }
+    let entry = entry.unwrap_or_else(|| default_entry.to_string());
+    if !files.contains_key(&entry) {
+        return Err(format!("入口文件 {entry:?} 不在文件集内"));
+    }
+    Ok(Some((files, entry)))
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +270,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolve_program_branches() {
+        let files = |k: &str| -> std::collections::BTreeMap<String, String> {
+            [(k.to_string(), String::new())].into_iter().collect()
+        };
+        // loop 帧：files=None → Ok(None)。
+        assert!(resolve_program(None, None, "main.js").unwrap().is_none());
+        // 空文件集 → 可读错误。
+        assert_eq!(
+            resolve_program(Some(Default::default()), None, "main.js"),
+            Err("文件集为空".to_string())
+        );
+        // 入口缺省命中。
+        let (f, e) = resolve_program(Some(files("main.js")), None, "main.js")
+            .unwrap()
+            .expect("缺省命中");
+        assert_eq!(e, "main.js");
+        assert!(f.contains_key("main.js"));
+        // 显式入口缺失（含越界形态——入口必须在文件集内，无绕过）。
+        assert!(
+            resolve_program(Some(files("main.js")), Some("../x.js".into()), "main.js")
+                .unwrap_err()
+                .contains("../x.js")
+        );
+        // 缺省入口不在文件集：错误文案指向实际使用的缺省名。
+        assert!(
+            resolve_program(Some(files("lib.js")), None, "main.js")
+                .unwrap_err()
+                .contains("main.js")
+        );
+    }
+
+    #[test]
     fn frame_roundtrip() {
         let f = MainFrame::Exec {
             v: PROTOCOL_VERSION,
@@ -248,7 +310,8 @@ mod tests {
             kind: "loop".into(),
             tick: 7,
             budget_ms: 200,
-            source: None,
+            files: None,
+            entry: None,
             mirror: Some("{}".into()),
             memory_gen: 3,
         };
@@ -268,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_headers_are_strict() {
+    fn session_headers_are_strict() {
         // v2 会话头（host_epoch / execution_id）缺失的帧必须解码失败，
         // 不静默补零——两端严格对齐是旧代次 / 旧执行拒绝的前提。
         let legacy = br#"{"type":"Request","v":2,"request_id":1,"op":"log","payload":"{}"}"#;

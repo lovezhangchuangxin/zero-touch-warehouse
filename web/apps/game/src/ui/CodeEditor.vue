@@ -55,7 +55,7 @@ function loadDemo() {
     <textarea
       v-model="local"
       spellcheck="false"
-      :placeholder="langSel === 'py' ? 'def loop(): …' : 'function loop() { … }'"
+      :placeholder="langSel === 'py' ? 'def loop(): …' : 'export function loop() { … }'"
       class="code mono"
     />
   </section>
