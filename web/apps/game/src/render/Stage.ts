@@ -35,10 +35,11 @@ interface RobotAnim {
 
 // 场景层清理：destroy 释放 GPU 侧对象（纹理共享自 bank，不随销毁）。
 function destroyChildren(layer: Container): void {
-  for (const c of layer.children) {
+  // 先整排摘除再逐个 destroy：destroy 会把自身从 children 里 splice 掉，
+  // 边迭代边销毁会跳掉一半 child（被末尾 removeChildren 摘除却没走 destroy）。
+  for (const c of layer.removeChildren()) {
     c.destroy({ children: true });
   }
-  layer.removeChildren();
 }
 
 export class Stage {
@@ -82,12 +83,19 @@ export class Stage {
       resolution: Math.min(window.devicePixelRatio || 1, 2),
     });
     el.appendChild(app.canvas);
-    const bank = await loadSprites();
-    const stage = new Stage(app, bank);
-    stage.attachControls();
-    stage.resizeOb = new ResizeObserver(() => stage.layout());
-    stage.resizeOb.observe(el);
-    return stage;
+    try {
+      const bank = await loadSprites();
+      const stage = new Stage(app, bank);
+      stage.attachControls();
+      stage.resizeOb = new ResizeObserver(() => stage.layout());
+      stage.resizeOb.observe(el);
+      return stage;
+    } catch (e) {
+      // init 一旦完成 app 就活了（GL 上下文 + 自启 ticker + window 级 resize
+      // 监听），半途失败（精灵清单缺失等）不整包拆除便永久泄漏。
+      app.destroy({ removeView: true }, { children: true });
+      throw e;
+    }
   }
 
   destroy(): void {
@@ -102,7 +110,11 @@ export class Stage {
     canvas.removeEventListener("pointerup", this.onPointerUp);
     canvas.removeEventListener("pointercancel", this.onPointerUp);
     canvas.removeEventListener("dblclick", this.onDblClick);
-    this.app.destroy(true, { children: true });
+    // 第一参不可传 true：v8 里布尔真除了移除画布还会 releaseGlobalResources，
+    // 清空跨 renderer 共享的全局 Batch/Texture 池——主菜单背景与游戏屏两块
+    // 画布并存，销毁其中一块会把另一块正在使用的批次一并打掉，对方下一帧
+    // 取到死批次即抛错、rAF 链断裂，画布自此不再重绘（黑屏）。
+    this.app.destroy({ removeView: true }, { children: true });
   }
 
   // -- 布局与视图控制 ------------------------------------------------------
