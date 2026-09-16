@@ -106,10 +106,26 @@ async fn hot_reload(
     })
 }
 
-/// 重开场景（保留玩家源码并自动重新初始化）。
+/// 重开场景。keep_program（默认 true，游戏内"重开"按钮）保留玩家源码
+/// 并自动重新初始化；主菜单"开始新场景"传 false，落进未加载代码的初态。
 #[tauri::command]
-async fn reset(state: State<'_, App>, scenario: String) -> Result<(), String> {
-    state.handle.ctrl(Ctrl::Reset { scenario })
+async fn reset(
+    state: State<'_, App>,
+    scenario: String,
+    keep_program: Option<bool>,
+) -> Result<(), String> {
+    state.handle.ctrl(Ctrl::Reset {
+        scenario,
+        keep_program: keep_program.unwrap_or(true),
+    })
+}
+
+/// 退出应用（主菜单"退出"）。走 Tauri request_exit → process::exit，
+/// 世界线程与宿主进程不经优雅关闭：宿主在 stdin EOF 后自行退出
+/// （runtime 主循环语义），与关窗退出路径对称，不依赖 Session::drop。
+#[tauri::command]
+async fn quit(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 /// 终止宿主：独立控制路径，不经世界线程命令队列（docs/architecture/03
@@ -175,6 +191,7 @@ fn main() {
             step,
             hot_reload,
             reset,
+            quit,
             kill_host,
             diag_pull,
             diag_ack,

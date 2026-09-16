@@ -60,10 +60,13 @@ pub enum Ctrl {
         entry: String,
         language: crate::hostbin::Language,
     },
-    /// 重开场景：世界 / memory 重建，玩家源码保留并自动重新初始化
-    /// （docs/architecture/02 §场景）。
+    /// 重开场景：世界 / memory 重建。keep_program = true（游戏内"重开"）
+    /// 保留玩家程序并自动重新初始化（docs/architecture/02 §场景）；
+    /// false（主菜单"开始新场景"）连程序一并丢弃，落进未加载代码的
+    /// 干净初态。
     Reset {
         scenario: String,
+        keep_program: bool,
     },
 }
 
@@ -417,7 +420,10 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
             load_program(st, shared, &PlayerProgram::new(files, entry));
             publish(st, shared);
         }
-        Ctrl::Reset { scenario: id } => {
+        Ctrl::Reset {
+            scenario: id,
+            keep_program,
+        } => {
             let Some(spec) = scenario::by_id(&id) else {
                 diag_push(
                     shared,
@@ -441,9 +447,15 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
                 shared,
                 0,
                 "control",
-                json!({ "op": "reset", "ok": true, "scenario": id }),
+                json!({ "op": "reset", "ok": true, "scenario": id, "keep_program": keep_program }),
             );
-            if let Some(program) = st.program.clone() {
+            if !keep_program {
+                // 丢弃型（主菜单开始新场景）：跨 reset 保留的副本必须一并
+                // 清掉——否则游戏内"重开"（keep_program=true）会把吸引模式
+                // 的演示程序复活进玩家的干净对局。
+                st.program = None;
+            }
+            if keep_program && let Some(program) = st.program.clone() {
                 load_program(st, shared, &program);
             }
             publish(st, shared);

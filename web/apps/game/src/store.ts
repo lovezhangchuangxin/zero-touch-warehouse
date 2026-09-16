@@ -26,6 +26,8 @@ export const store = reactive({
   logCursor: 0,
   selectedRobot: null as number | null,
   lastScenario: "",
+  /** 是否已从主菜单开始过对局：主菜单据此决定吸引模式还是展示本局。 */
+  inGame: false,
 });
 
 export function onSnapshot(s: Snapshot): void {

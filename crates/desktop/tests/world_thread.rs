@@ -345,6 +345,7 @@ fn hot_reload_preserves_world_and_reset_rebuilds() {
     h.ctrl(Ctrl::Pause).expect("cmd");
     h.ctrl(Ctrl::Reset {
         scenario: scenario::B2_FIVE.id.to_string(),
+        keep_program: true,
     })
     .expect("cmd");
     wait_status(&h, |s| s.tick == 0 && s.loaded, "重开后自动加载");
@@ -569,6 +570,7 @@ fn multi_file_program_survives_reset_and_failed_load() {
     // Reset：世界重建后自动重载的仍是原两文件程序（tag 再现即证据）。
     h.ctrl(Ctrl::Reset {
         scenario: B2_ONE.id.to_string(),
+        keep_program: true,
     })
     .expect("cmd");
     wait_status(&h, |s| s.loaded && s.tick == 0, "Reset 后自动重载");
@@ -582,5 +584,51 @@ fn multi_file_program_survives_reset_and_failed_load() {
         "Reset 后未恢复原两文件程序：{:?}",
         logs.events
     );
+    h.join();
+}
+
+/// 丢弃型 reset（主菜单开始新场景）必须清掉跨 reset 保留的程序副本：
+/// 否则后续保留型 reset（游戏内"重开"）会把主菜单吸引模式的演示程序
+/// 复活进玩家的干净对局（评审 P1 回归钉）。
+#[test]
+fn reset_without_keep_program_drops_retained_program() {
+    let h = spawn(B2_ONE.id);
+    h.ctrl(prog("export function loop() {}", Language::Js))
+        .expect("cmd");
+    wait_status(&h, |s| s.loaded, "加载成功");
+
+    // 丢弃型 reset：落进未加载代码的干净初态。
+    h.ctrl(Ctrl::Reset {
+        scenario: B2_ONE.id.to_string(),
+        keep_program: false,
+    })
+    .expect("cmd");
+    wait_status(
+        &h,
+        |s| !s.loaded && s.tick == 0 && s.fault_class.is_none(),
+        "丢弃型 reset 落进未加载初态",
+    );
+
+    // 关键断言：保留副本必须已被清空——保留型 reset 不得让旧程序复活。
+    h.ctrl(Ctrl::Reset {
+        scenario: B2_ONE.id.to_string(),
+        keep_program: true,
+    })
+    .expect("cmd");
+    wait_status(&h, |s| !s.loaded, "保留型 reset 不复活已丢弃程序");
+
+    // 丢弃后再加载的新程序不受影响：保留型 reset 照常恢复它。
+    h.ctrl(prog(
+        "Game.memory['fresh'] = 1;\nexport function loop() {}",
+        Language::Js,
+    ))
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded, "丢弃后加载新程序");
+    h.ctrl(Ctrl::Reset {
+        scenario: B2_ONE.id.to_string(),
+        keep_program: true,
+    })
+    .expect("cmd");
+    wait_status(&h, |s| s.loaded, "新程序跨 reset 保留");
     h.join();
 }

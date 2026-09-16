@@ -1,19 +1,31 @@
 <script setup lang="ts">
 // 画布挂载：Vue 侧只做桥接（挂载/卸载与快照喂入），Pixi 对象与渲染
 // 节奏全部在 render/Stage 内，不进响应式系统（docs/architecture/05）。
+// interactive = false 用于主菜单全屏背景：无操作提示、无边框圆角、
+// 不接收指针事件（世界仍照常渲染）。
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Stage } from "../render/Stage";
 import { store } from "../store";
 
+const props = defineProps<{ interactive?: boolean }>();
+
 const el = ref<HTMLDivElement>();
 const ready = ref(false);
+// 卸载竞态守卫：菜单背景画布随浮层频繁挂载/卸载，若 Stage.create 完成
+// 前组件已卸载，必须销毁刚落地的实例，否则 WebGL 上下文与 rAF 泄漏。
 let stage: Stage | null = null;
+let disposed = false;
 
 onMounted(async () => {
   if (!el.value) {
     return;
   }
-  stage = await Stage.create(el.value);
+  const created = await Stage.create(el.value);
+  if (disposed) {
+    created.destroy();
+    return;
+  }
+  stage = created;
   stage.setStatic(store.static);
   if (store.snapshot) {
     stage.render(store.snapshot, store.selectedRobot);
@@ -22,6 +34,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   stage?.destroy();
   stage = null;
 });
@@ -41,10 +54,14 @@ watch(
 </script>
 
 <template>
-  <div ref="el" class="relative min-h-0 overflow-hidden rounded-md border border-line bg-panel">
+  <div
+    ref="el"
+    class="relative min-h-0 overflow-hidden bg-panel"
+    :class="props.interactive === false ? 'pointer-events-none' : 'rounded-md border border-line'"
+  >
     <div v-if="!ready" class="absolute inset-0 grid place-items-center text-dim">加载精灵…</div>
     <div
-      v-else
+      v-else-if="props.interactive !== false"
       class="pointer-events-none absolute bottom-1.5 left-2 z-10 rounded-sm bg-bg/60 px-1.5 py-0.5 text-2xs text-dim"
     >
       拖拽平移 · 滚轮缩放 · 双击适配

@@ -26,12 +26,20 @@ const busy = ref(false);
 const saveError = ref("");
 
 // 两套语言文件集（各自草稿），activeLang 指向当前编辑的那套。
+// 初始语言读设置（主菜单"设置 → 默认脚本语言"，localStorage 持久化）。
+function initialLanguage(): Language {
+  try {
+    return localStorage.getItem("ztw.editor.lang") === "py" ? "py" : "js";
+  } catch {
+    return "js";
+  }
+}
 const sets = ref<Record<Language, EditorFile[]>>({
   js: [makeMainFile("", "js")],
   py: [makeMainFile("", "py")],
 });
-const activeLang = ref<Language>("js");
-const activeId = ref(sets.value.js[0]!.id);
+const activeLang = ref<Language>(initialLanguage());
+const activeId = ref(sets.value[activeLang.value][0]!.id);
 const stateCache = new Map<string, EditorState>();
 
 const files = computed(() => sets.value[activeLang.value]);
@@ -44,7 +52,7 @@ function placeholderFor(language: Language): string {
 
 onMounted(() => {
   if (!host.value) return;
-  const file = sets.value.js[0]!;
+  const file = sets.value[activeLang.value][0]!;
   ed = createCodeEditor(host.value, {
     doc: file.code,
     language: file.language,

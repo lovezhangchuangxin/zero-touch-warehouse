@@ -20,7 +20,20 @@ const USED_IDS = new Set(["marker_select", "icon_battery_low"]);
 
 export type SpriteBank = Map<string, Texture>;
 
-export async function loadSprites(base = "/sprites"): Promise<SpriteBank> {
+// 模块级缓存：主菜单背景与游戏屏各自创建 Stage，切屏销毁重建时
+// 不重复 fetch / 解码图集（Texture 由 Pixi Assets 自身缓存，这里
+// 缓存的是「加载完成」这一异步结果）。
+let bankCache: Promise<SpriteBank> | null = null;
+
+export function loadSprites(base = "/sprites"): Promise<SpriteBank> {
+  bankCache ??= doLoad(base).catch((e) => {
+    bankCache = null; // 失败不驻留：下次重建 Stage 时重试
+    throw e;
+  });
+  return bankCache;
+}
+
+async function doLoad(base: string): Promise<SpriteBank> {
   const manifest = (await (await fetch(`${base}/manifest.json`)).json()) as Manifest;
   const bank: SpriteBank = new Map();
   const wanted = manifest.sprites.filter(

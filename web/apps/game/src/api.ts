@@ -48,8 +48,15 @@ export function hotReload(
   return invoke("hot_reload", { files, entry, language });
 }
 
-export function resetScenario(scenario: string): Promise<void> {
-  return invoke("reset", { scenario });
+/** 重开场景。keepProgram = false（主菜单"开始新场景"）不保留玩家程序，
+ *  落进未加载代码的干净初态；默认 true（游戏内"重开"）。 */
+export function resetScenario(scenario: string, keepProgram = true): Promise<void> {
+  return invoke("reset", { scenario, keepProgram });
+}
+
+/** 退出应用（主菜单"退出"）。 */
+export function quit(): Promise<void> {
+  return invoke("quit");
 }
 
 export function killHost(): Promise<void> {

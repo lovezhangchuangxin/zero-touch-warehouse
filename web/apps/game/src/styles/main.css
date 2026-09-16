@@ -70,6 +70,29 @@
 }
 
 @layer components {
+  /* 主菜单淡出 / 编辑器列滑入：开始对局的转场（同一右侧书脊的接力） */
+  .menu-fade-enter-active,
+  .menu-fade-leave-active {
+    transition: opacity 0.25s ease;
+  }
+  .menu-fade-enter-from,
+  .menu-fade-leave-to {
+    opacity: 0;
+  }
+  @keyframes editor-enter {
+    from {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .editor-enter {
+    animation: editor-enter 0.35s ease-out;
+  }
+
   /* 按钮基类（原全局 button 元素样式），状态类 .btn-on / .btn-danger 叠加 */
   .btn {
     @apply inline-flex cursor-pointer items-center justify-center gap-1 rounded-sm border border-line bg-panel-2 px-2.5 py-1 text-fg transition-colors enabled:hover:border-accent disabled:opacity-40;
@@ -98,5 +121,15 @@
   /* 面板统一头部：小型加宽字距标签 */
   .panel-h {
     @apply flex items-baseline gap-2 text-2xs font-semibold tracking-wider text-dim;
+  }
+  /* 主菜单 / 暂停浮层的菜单项：居中排版，hover 亮起 + 浅底 */
+  .menu-item {
+    @apply flex cursor-pointer items-baseline justify-center gap-2 rounded-sm px-3 py-1.5 text-center text-lg text-dim transition-colors hover:bg-panel/70 hover:text-fg;
+  }
+  .menu-item-on {
+    @apply bg-panel/70 text-fg;
+  }
+  .menu-hint {
+    @apply text-2xs text-dim;
   }
 }
