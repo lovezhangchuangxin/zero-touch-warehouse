@@ -68,6 +68,23 @@ pub enum Ctrl {
         scenario: String,
         keep_program: bool,
     },
+    /// 存档：本 tick 结束后的安全点组装 SaveData（世界 + memory + 已加载
+    /// 程序 + 前端透传的草稿段；docs/architecture/06 存档只在初始化结束
+    /// 且无活动 tick 的安全点取数）。写盘由命令层持回执异步执行——世界
+    /// 线程只负责复制为不可变存档数据。
+    SaveGame {
+        name: Option<String>,
+        drafts: Option<Value>,
+        reply: mpsc::Sender<Result<ztw_api::save::SaveData, String>>,
+    },
+    /// 读档：先在临时会话上恢复世界与 memory 并重新初始化程序，全部
+    /// 成功才替换当前对局（读档初始化失败不破坏现状，docs 08）。回执
+    /// 携带存档内草稿段供前端恢复编辑器。SaveData 装箱——枚举其余
+    /// 变体极小，避免 Ctrl 整体膨胀。
+    LoadGame {
+        data: Box<ztw_api::save::SaveData>,
+        reply: mpsc::Sender<Result<Option<Value>, String>>,
+    },
 }
 
 /// 控制面摘要（供命令层同步读取；详情随快照发布）。
@@ -460,7 +477,101 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
             }
             publish(st, shared);
         }
+        Ctrl::SaveGame {
+            name,
+            drafts,
+            reply,
+        } => {
+            let outcome = capture_save(st, name, drafts);
+            let ok = outcome.is_ok();
+            let _ = reply.send(outcome);
+            diag_push(
+                shared,
+                st.session.world.tick,
+                "control",
+                json!({ "op": "save", "ok": ok }),
+            );
+        }
+        Ctrl::LoadGame { data, reply } => {
+            let outcome = load_game(st, shared, data);
+            let ok = outcome.is_ok();
+            let _ = reply.send(outcome);
+            diag_push(shared, 0, "control", json!({ "op": "load", "ok": ok }));
+            publish(st, shared);
+        }
     }
+}
+
+/// 安全点组装存档数据（Ctrl::SaveGame 的处理体）。世界与 memory 来自
+/// 同一安全点（docs 06）；未加载 / 未初始化的对局没有可存进度。
+fn capture_save(
+    st: &mut RunState,
+    name: Option<String>,
+    drafts: Option<Value>,
+) -> Result<ztw_api::save::SaveData, String> {
+    let program = st
+        .program
+        .as_ref()
+        .ok_or_else(|| "尚未加载程序，没有可保存的进度".to_string())?;
+    if !st.session.initialized {
+        return Err("程序尚未初始化完成，不能存档".to_string());
+    }
+    let memory_root = st.session.memory_snapshot();
+    Ok(ztw_api::save::SaveData::capture(
+        &st.session.world,
+        memory_root,
+        st.session.memory.revision(),
+        program,
+        st.language.as_str(),
+        st.spec.id,
+        name,
+        drafts,
+        crate::saves::now_unix_ms(),
+    ))
+}
+
+/// 读档（Ctrl::LoadGame 的处理体）：临时会话先全部成功才换入——读档
+/// 初始化失败不破坏当前对局（docs/architecture/08 原型 C 存档条款）。
+fn load_game(
+    st: &mut RunState,
+    shared: &Shared,
+    data: Box<ztw_api::save::SaveData>,
+) -> Result<Option<Value>, String> {
+    let Some(spec) = scenario::by_id(&data.scenario_id) else {
+        return Err(format!("存档引用未知场景「{}」", data.scenario_id));
+    };
+    let world = data.restore_world()?;
+    let language = crate::hostbin::Language::parse(&data.program.language)?;
+    let bin = match language {
+        crate::hostbin::Language::Js => st.bins.js.clone(),
+        crate::hostbin::Language::Py => st.bins.py.clone(),
+    };
+    let mut session = Session::new(SessionConfig::new(bin), world);
+    session.memory = ztw_api::memory::MemoryTree::from_snapshot(
+        data.memory.root.clone(),
+        data.memory.revision,
+        session.cfg.memory.clone(),
+    )
+    .map_err(|e| format!("memory 重建失败：{}", e.message))?;
+    let program = PlayerProgram::new(data.program.files, data.program.entry);
+    // 临时会话上重新初始化（普通全局变量重置，docs 06 读档语义）。
+    let outcome = session.load_program(&program);
+    if !outcome.ok {
+        return Err("读档初始化失败（程序未通过初始化），当前对局未受影响".to_string());
+    }
+    // 全部成功，换入当前对局（旧会话随之丢弃，宿主由 Session 收尾）。
+    st.spec = spec;
+    st.language = language;
+    st.session = session;
+    st.program = Some(program);
+    st.running = false;
+    st.stepping = false;
+    st.next_tick_at = None;
+    shared.diag.lock().expect("diag 锁").clear_keep_seq();
+    shared.logs.lock().expect("logs 锁").clear_keep_seq();
+    bootstrap(st, shared);
+    *shared.host_ctl.lock().expect("host_ctl 锁") = Some(st.session.host_control());
+    Ok(data.drafts)
 }
 
 /// 按当前语言取宿主二进制。

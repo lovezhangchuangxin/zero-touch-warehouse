@@ -7,6 +7,7 @@
 
 pub mod diag;
 pub mod hostbin;
+pub mod saves;
 pub mod scenario;
 pub mod snapshot;
 pub mod world_thread;
