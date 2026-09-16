@@ -7,8 +7,7 @@
 //   - crates/api/bindings/bootstrap.js / bootstrap.py —— 绑定层唯一实现；
 //   - web/packages/game-types/src/index.d.ts —— 玩家侧 TS 声明；
 //   - docs/game-design/08-api-design.md —— 文案出处（含总则）。
-// 注意 08 文档中的 find_path / move_to 属后续里程碑，绑定层尚未实现，
-// 故不入表。结果码清单与中文说明经 ../codes.ts 消费，不在本文件复述。
+// 结果码清单与中文说明经 ../codes.ts 消费，不在本文件复述。
 //
 // 文案面向补全悬浮框：signature 展示用（右侧 detail），doc 为正文，
 // 二者均为纯文本（CM6 info 按纯文本渲染）。
@@ -75,7 +74,7 @@ export const GAME_MEMBERS: ApiMember[] = [
     template: "robots()",
     doc:
       "全部机器人视图：id / pos / energy / energy_max / carry / last_result / memory，" +
-      "动作方法 move、charge、take、give、pick、drop。" +
+      "动作方法 move、move_to、charge、take、give、pick、drop。" +
       "基于 tick 快照，机器人动作不改变本 tick 查询结果。",
   },
   {
@@ -152,6 +151,21 @@ export const GAME_MEMBERS: ApiMember[] = [
     signature: "map_size() → [宽, 高]",
     template: "map_size()",
     doc: "地图尺寸 [宽, 高]。坐标原点左上，x 向右，y 向下。",
+  },
+  {
+    name: "find_path",
+    kind: "method",
+    signature: "find_path(start, goal, opts?) → Position[] | [] | null",
+    template: "find_path(${start}, ${goal})",
+    doc:
+      "静态障碍最短路径（纯查询，不消耗行动机会）：返回不含 start 的最短路径；" +
+      "已在到达范围内返回 []；不可达返回 null。障碍是边界、货架、充电桩、" +
+      "装卸位占地与地面货物，机器人不算——寻路回答「物理可达」，动态避让由玩家负责。" +
+      "start / goal 接受坐标或对象（货架 / 桩 / 装卸位 / 机器人取 pos，车辆取 " +
+      "interact_pos，地面货物取所在格）。opts.range 为到达判定半径（正交距离，" +
+      "默认 0）。调用受节点预算约束（20 000 次扩展，正常地图不会触及），超限抛" +
+      "可读错误而非返回结果。空值判断须显式三分支：JS 的 [] 为 truthy、Python 的" +
+      "空列表为 falsy，一律以 === null / is None 判不可达、空列表判「无需移动」。",
   },
   {
     name: "gold",

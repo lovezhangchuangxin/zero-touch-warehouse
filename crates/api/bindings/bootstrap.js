@@ -277,6 +277,28 @@
       const res = rt("robot.drop", payload);
       return res.code;
     };
+    // 复合移动：move_to(x, y, opts) 或 move_to(target, opts)——坐标解析
+    // 本地完成（镜像在宿主），受理 / 缓存 / 寻路全在主进程单源实现
+    // （docs/architecture/04）。非法参数与 move 同款本地 INVALID_ARGUMENT；
+    // NaN / Infinity / 超 i32 范围不静默截断（coordOk 归一拒绝）。
+    view.move_to = function (target, second, opts) {
+      let goal, o;
+      if (typeof target === "number" || typeof second === "number") {
+        if (!coordOk(target) || !coordOk(second)) return E.INVALID_ARGUMENT;
+        goal = P(target, second);
+        o = opts;
+      } else {
+        goal = posOf(target);
+        o = second;
+      }
+      if (goal === null) return E.INVALID_ARGUMENT;
+      const payload = { robot_id: r.id, x: goal[0], y: goal[1] };
+      if (o !== null && o !== undefined && typeof o === "object" && o.range !== undefined) {
+        payload.range = o.range; // 负值 / 错型由服务端拒绝（单源校验）
+      }
+      const res = rt("robot.move_to", payload);
+      return res.code;
+    };
     return view;
   }
   // 目标 / 货物参数接受对象或 id（docs/game-design/08 API 设计）。
@@ -284,6 +306,37 @@
     if (x === null || x === undefined) return null;
     if (typeof x === "number") return x;
     return typeof x.id === "number" ? x.id : null;
+  }
+  // 坐标分量守卫：有限且 |v| < 2^31（`|0` 截断后仍在 i32 内）。NaN /
+  // Infinity 与超范围归一为非法参数（→ INVALID_ARGUMENT / 抛错），不静默
+  // 截 0 或回绕——与 bootstrap.py 的 _num_ok 同口径。
+  function coordOk(v) {
+    return typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 2147483648;
+  }
+  // 坐标参数宽进：Position / 两元素序列（含受控列表代理）/ {x,y} / 视图
+  // 对象（机器人、货架、充电桩、装卸位取 pos，车辆取 interact_pos，地面
+  // 货物取 location）——对象取坐标规则与 move_to 一致（docs/game-design/
+  // 08「寻路」）。受控序列是 Proxy（Array.isArray 为 false），按下标 +
+  // length 判别（docs 08「凡接受坐标的参数同样接受普通或受控的两元素
+  // 序列」的明文承诺）。
+  function posOf(x) {
+    if (x instanceof Position) return x;
+    if (Array.isArray(x) && x.length === 2 && coordOk(x[0]) && coordOk(x[1])) {
+      return P(x[0] | 0, x[1] | 0);
+    }
+    if (x !== null && typeof x === "object") {
+      // 受控列表代理：无 pos/interact_pos/location/x 字段，length 走
+      // list_size、下标走 list_get（两数字），先于视图对象分支判别。
+      if (typeof x.length === "number" && x.length === 2 &&
+          coordOk(x[0]) && coordOk(x[1])) {
+        return P(x[0] | 0, x[1] | 0);
+      }
+      if (x.pos instanceof Position) return x.pos;
+      if (x.interact_pos instanceof Position) return x.interact_pos;
+      if (x.location instanceof Position) return x.location;
+      if (coordOk(x.x) && coordOk(x.y)) return P(x.x | 0, x.y | 0);
+    }
+    return null;
   }
   // 金额显示值 → milli（docs/game-design/08「金额为定点显示值」）。与
   // bootstrap.py 的 _to_milli 位级一致：正数 half-up（floor(x*1000+0.5)），
@@ -677,6 +730,22 @@
       return null;
     },
     map_size() { ensureMirror(); return [M.map_w, M.map_h]; },
+    // 静态障碍最短路径（docs/game-design/08「寻路」）：忠实三分支——
+    // 路径 / []（已在到达范围）/ null（不可达），不遮蔽空数组陷阱。
+    // 计算与配额在主进程（docs/architecture/03：find_path 不进镜像）。
+    find_path(start, goal, opts) {
+      const s = posOf(start);
+      const g = posOf(goal);
+      if (s === null || g === null) {
+        throw ipcError("INVALID_ARGUMENT", "find_path: start/goal 须为坐标或对象");
+      }
+      const payload = { sx: s[0], sy: s[1], gx: g[0], gy: g[1] };
+      if (opts !== null && opts !== undefined && typeof opts === "object" && opts.range !== undefined) {
+        payload.range = opts.range; // 负值 / 错型由服务端拒绝（单源校验）
+      }
+      const res = rt("game.find_path", payload);
+      return res.path === null ? null : res.path.map(function (q) { return P(q[0], q[1]); });
+    },
     get gold() { ensureMirror(); return Number(M.gold_milli) / 1000; },
     get debt() { ensureMirror(); return Number(M.debt_milli) / 1000; },
     get tick() { ensureMirror(); return M.tick; },

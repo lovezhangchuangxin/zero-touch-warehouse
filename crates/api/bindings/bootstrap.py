@@ -267,6 +267,39 @@ def _id_of(x):
     return None
 
 
+def _num_ok(v):
+    """坐标分量守卫：有限且 |v| < 2^31。NaN / Infinity 与超范围归一为
+    非法参数（→ INVALID_ARGUMENT），不裸抛 ValueError/OverflowError——
+    与 bootstrap.js 的 coordOk 同口径。"""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) \
+        and _math.isfinite(v) and abs(v) < 2147483648
+
+
+def _pos_of(x):
+    """坐标参数宽进：Position / 两元素序列（含受控列表）/ {x,y} / 视图
+    对象（机器人、货架、充电桩、装卸位取 pos，车辆取 interact_pos，地面
+    货物取 location）——对象取坐标规则与 move_to 一致（docs/game-design/08）。
+    """
+    if isinstance(x, Position):
+        return x
+    try:
+        if len(x) == 2:
+            a, b = x[0], x[1]
+            if _num_ok(a) and _num_ok(b):
+                return _P(int(a), int(b))
+    except (TypeError, ValueError, KeyError):
+        pass
+    for attr in ("pos", "interact_pos", "location"):
+        p = getattr(x, attr, None)
+        if isinstance(p, Position):
+            return p
+    if isinstance(x, dict):
+        px, py = x.get("x"), x.get("y")
+        if _num_ok(px) and _num_ok(py):
+            return _P(int(px), int(py))
+    return None
+
+
 _MAX_SAFE = 9007199254740991
 
 
@@ -361,6 +394,26 @@ class _RobotView:
         if b is not None:
             payload["box_id"] = b  # 缺省 = 当前携带物
         res = _ipc("robot.drop", payload)
+        return res["code"]
+
+    def move_to(self, target, second=None, opts=None):
+        """复合移动：move_to(x, y, opts) 或 move_to(target, opts)——坐标
+        解析本地完成（镜像在宿主），受理 / 缓存 / 寻路全在主进程单源实现
+        （docs/architecture/04）。非法参数与 move 同款本地 INVALID_ARGUMENT；
+        NaN / Infinity / 超 i32 范围归一拒绝（_num_ok，不裸抛）。
+        """
+        if isinstance(target, (int, float)) or isinstance(second, (int, float)):
+            if not _num_ok(target) or not _num_ok(second):
+                return E["INVALID_ARGUMENT"]
+            goal, real_opts = _P(int(target), int(second)), opts
+        else:
+            goal, real_opts = _pos_of(target), second
+        if goal is None:
+            return E["INVALID_ARGUMENT"]
+        payload = {"robot_id": self.id, "x": goal[0], "y": goal[1]}
+        if isinstance(real_opts, dict) and "range" in real_opts:
+            payload["range"] = real_opts["range"]  # 负值 / 错型由服务端拒绝
+        res = _ipc("robot.move_to", payload)
         return res["code"]
 
     def __repr__(self):
@@ -782,6 +835,23 @@ class Game:
     def map_size(self):
         _ensure_mirror()
         return (M["map_w"], M["map_h"])
+
+    def find_path(self, start, goal, opts=None):
+        """静态障碍最短路径（docs/game-design/08「寻路」）：忠实三分支——
+        路径 / []（已在到达范围）/ None（不可达），不遮蔽空列表陷阱。
+        计算与配额在主进程（docs/architecture/03：find_path 不进镜像）。
+        """
+        s, g = _pos_of(start), _pos_of(goal)
+        if s is None or g is None:
+            raise GameError("INVALID_ARGUMENT",
+                            "find_path: start/goal 须为坐标或对象")
+        payload = {"sx": s[0], "sy": s[1], "gx": g[0], "gy": g[1]}
+        if isinstance(opts, dict) and "range" in opts:
+            payload["range"] = opts["range"]  # 负值 / 错型由服务端拒绝
+        res = _ipc("game.find_path", payload)
+        if res["path"] is None:
+            return None
+        return [_P(q[0], q[1]) for q in res["path"]]
 
     @property
     def gold(self):

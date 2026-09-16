@@ -9,6 +9,7 @@
 import demoOne from "./demos/demo_one.js?raw";
 import demoFiveLanes from "./demos/demo_five_lanes.js?raw";
 import demoFiveNaive from "./demos/demo_five_naive.js?raw";
+import demoMoveto from "./demos/demo_moveto.js?raw";
 import demoPyBasics from "./demos/demo_py_basics.py?raw";
 import demoTradeFast from "./demos/demo_trade_fast.js?raw";
 import demoTradeHoard from "./demos/demo_trade_hoard.js?raw";
@@ -60,6 +61,13 @@ export const DEMO_SCRIPTS: DemoScript[] = [
     desc: "与 JS 同地图对照：切换语言会重启宿主，Game.memory 保留",
     language: "py",
     code: demoPyBasics,
+  },
+  {
+    id: "demo-moveto",
+    name: "寻路巡逻（M4）",
+    desc: "move_to 复合移动与 find_path 查询：四点巡逻，路径缓存跨热重载续走",
+    language: "js",
+    code: demoMoveto,
   },
   {
     id: "demo-trade-fast",

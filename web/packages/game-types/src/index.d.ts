@@ -105,6 +105,24 @@ export type PositionLike = Position | number[] | { x: number; y: number };
 /** 方向常量类型。 */
 export type Direction = Position;
 
+/** find_path / move_to 的坐标宽进形态（对象取坐标规则见 docs/game-design/08「寻路」）。 */
+export type PathTargetLike =
+  | Position
+  | number[]
+  | { x: number; y: number }
+  | RobotView
+  | ShelfView
+  | ChargerView
+  | DockView
+  | VehicleView
+  | BoxView;
+
+/** find_path 的 opts。 */
+export interface PathOpts {
+  /** 到达判定半径（正交距离），默认 find_path 0 / move_to 1。 */
+  range?: number;
+}
+
 // ---------------------------------------------------------------------------
 // 对象视图（查询返回；动作方法立即返回受理码，结算结果下一 tick 查 last_result）
 // ---------------------------------------------------------------------------
@@ -138,6 +156,9 @@ export interface RobotView {
   give(target: TargetLike, boxId?: number): GameCode;
   pick(x: number, y: number): GameCode;
   drop(x: number, y: number, boxId?: number): GameCode;
+  /** 复合移动：寻路并自动提交一步（docs/game-design/08「move_to 与 robot.memory」）。 */
+  move_to(target: PathTargetLike, opts?: PathOpts): GameCode;
+  move_to(x: number, y: number, opts?: PathOpts): GameCode;
 }
 
 export interface ShelfView {
@@ -240,6 +261,11 @@ export interface Game {
     id: number,
   ): RobotView | ShelfView | ChargerView | DockView | VehicleView | BoxView | OrderView | null;
   map_size(): [number, number];
+  /**
+   * 静态障碍最短路径（docs/game-design/08「寻路」），忠实三分支：
+   * Position[] 路径（不含 start）/ []（已在到达范围）/ null（不可达）。
+   */
+  find_path(start: PathTargetLike, goal: PathTargetLike, opts?: PathOpts): Position[] | null;
   readonly gold: number;
   readonly debt: number;
   readonly tick: number;
