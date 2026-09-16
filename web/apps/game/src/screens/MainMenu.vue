@@ -54,7 +54,7 @@ function onQuit() {
   <div class="absolute inset-0 z-20">
     <!-- 背景：全屏专用画布，只渲染世界本身（盖住游戏屏的 HUD 区）。
          外层用 grid：画布根是普通块级子元素，block 容器下高度会塌。 -->
-    <div class="absolute inset-0 grid"><GameCanvas :interactive="false" /></div>
+    <div class="absolute inset-0 grid"><GameCanvas background /></div>
     <!-- 渐晕：世界整体压暗，边缘更重（径向），中央菜单区最亮 -->
     <div class="absolute inset-0 bg-bg/40" />
     <div
