@@ -733,6 +733,37 @@ impl MemoryTree {
         Ok(id)
     }
 
+    /// 服务端 move_to 缓存读取（ops.rs 复合逻辑专用）。`robots/<id>` 不存在
+    /// 时会经 robot_memory 惰性创建空槽（无内容副作用）；`_move` 缺失或
+    /// 形状异常返回原值，由调用方按缓存 miss 整体重寻——缓存只影响效率，
+    /// 不构成权威状态。
+    pub fn server_move_cache_get(&mut self, robot_id: ztw_model::Id) -> Option<MemValue> {
+        let node = self.robot_memory(self.generation, robot_id).ok()?;
+        let slot = self
+            .live(node)
+            .ok()?
+            .entries
+            .iter()
+            .find(|(k, _)| k == "_move")
+            .map(|p| p.1.clone())?;
+        match slot {
+            Slot::Node(c) => self.value_of(c).ok(),
+            Slot::Val(v) => Some(v),
+        }
+    }
+
+    /// 服务端 move_to 缓存写入：绕过 `reserved_key_check`（它挡的是玩家
+    /// 写入，服务端是 `_move` 的唯一管理者），但 write_slot 的限额 / 深度 /
+    /// 原子落位与修订号递增照常。限额拒绝由调用方降级为「不缓存」。
+    pub fn server_move_cache_set(
+        &mut self,
+        robot_id: ztw_model::Id,
+        value: &MemValue,
+    ) -> Result<(), MemOpError> {
+        let node = self.robot_memory(self.generation, robot_id)?;
+        self.write_slot(node, Some("_move"), value)
+    }
+
     fn ensure_robots_map(&mut self) -> Result<NodeId, MemOpError> {
         if let Some(Slot::Node(c)) = self.self_node_slot("robots") {
             return Ok(c);
@@ -903,12 +934,22 @@ impl MemoryTree {
                             format!("robots/{rk} 必须是映射（线上树只能经 r.memory 产生）"),
                         ));
                     };
-                    // 保留键 _move：线上树被 reserved_key_check 挡住，出现
-                    // 即手改档——恢复出来会让 move 绑定与玩家数据冲突。
-                    if mem_pairs.iter().any(|(mk, _)| mk == "_move") {
+                    // `_move`（move_to 路径缓存）自 M4 起由服务端写入线上树，
+                    // 存档中合法——但恒为标量（字符串）；容器形属手改档，
+                    // 恢复会让玩家经 map_get 拿到容器句柄、随后被服务端
+                    // 标量写杀死（破坏「服务端无结构性写」不变量），按坏档拒。
+                    if let Some((_, mv)) = mem_pairs.iter().find(|(mk, _)| mk == "_move")
+                        && !matches!(
+                            mv,
+                            MemValue::Null
+                                | MemValue::Bool(_)
+                                | MemValue::Num(_)
+                                | MemValue::Str(_)
+                        )
+                    {
                         return Err(MemOpError::new(
                             "INVALID_VALUE",
-                            format!("robots/{rk} 含保留键 _move（存档损坏）"),
+                            format!("robots/{rk} 的 _move 必须是标量（存档损坏）"),
                         ));
                     }
                     let s = restore_build(&limits, &mut ctx, rv, Tag::RobotMem)?;

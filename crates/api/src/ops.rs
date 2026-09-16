@@ -17,7 +17,8 @@
 
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use ztw_model::{Id, MemValue, MilliGold};
+use ztw_model::{Id, MemValue, MilliGold, Position};
+use ztw_sim::{PATH_NODE_BUDGET, PathOutcome};
 
 use crate::harness::{DiagTapKind, Session};
 use crate::memory::{NodeKind, ReadResult};
@@ -69,6 +70,27 @@ struct DropArgs {
     y: i32,
     /// 缺省 = 当前携带物；错型 → BAD_PAYLOAD（不静默降级）。
     box_id: Option<Id>,
+}
+
+/// find_path / move_to 的坐标已由绑定层解析为裸坐标（对象取坐标的规则
+/// 见 docs/game-design/08；镜像在宿主本地，解析不产生 IPC）。
+#[derive(Deserialize)]
+struct FindPathArgs {
+    sx: i32,
+    sy: i32,
+    gx: i32,
+    gy: i32,
+    /// 到达判定半径；缺省 0（目的格本身须可通行）。
+    range: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct MoveToArgs {
+    robot_id: Id,
+    x: i32,
+    y: i32,
+    /// 到达判定半径；缺省 1（抵达或正交相邻即到达）。
+    range: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +157,8 @@ pub const OP_FIELDS: &[(&str, &[&str], &[&str])] = &[
     ("robot.give", &["robot_id", "target_id"], &["box_id"]),
     ("robot.pick", &["robot_id", "x", "y"], &[]),
     ("robot.drop", &["robot_id", "x", "y"], &["box_id"]),
+    ("robot.move_to", &["robot_id", "x", "y"], &["range"]),
+    ("game.find_path", &["sx", "sy", "gx", "gy"], &["range"]),
     ("market.take", &["order_id"], &[]),
     ("market.cancel", &["order_id"], &[]),
     ("manage.destroy", &["target_id"], &[]),
@@ -227,6 +251,66 @@ impl Session {
                 let code = self.world.accept_drop(a.robot_id, a.x, a.y, a.box_id);
                 self.diag_accept(op, code, a.robot_id, format!("x={},y={}", a.x, a.y));
                 ok_result(serde_json::json!({ "code": code }))
+            }
+            "robot.move_to" => {
+                let a = parse!(MoveToArgs);
+                if self.in_init {
+                    return self.reject_init_phase(op, Some(a.robot_id));
+                }
+                // 负 range 是参数错误而非"不可达"，按动作受理码族拒绝
+                //（与 robot.move 的 INVALID_ARGUMENT 同口径）。
+                let range = a.range.unwrap_or(1);
+                if range < 0 {
+                    self.diag_accept(
+                        op,
+                        ztw_model::codes::INVALID_ARGUMENT,
+                        a.robot_id,
+                        format!("range={range}"),
+                    );
+                    return ok_result(serde_json::json!({
+                        "code": ztw_model::codes::INVALID_ARGUMENT
+                    }));
+                }
+                match self.move_to_step(a.robot_id, Position::new(a.x, a.y), range) {
+                    Ok((code, detail)) => {
+                        // ARRIVED 与 OK 同为成功码（08 结果码表）：停驻目的地
+                        // 的机器人每 tick 都会 ARRIVED，不得刷 AcceptFail 噪音。
+                        if code != ztw_model::codes::OK && code != ztw_model::codes::ARRIVED {
+                            self.diag_accept(op, code, a.robot_id, detail);
+                        }
+                        ok_result(serde_json::json!({ "code": code }))
+                    }
+                    Err(msg) => err_result("PATH_BUDGET_EXCEEDED", &msg),
+                }
+            }
+            "game.find_path" => {
+                // 纯查询：不占行动机会，init 期放行（docs/architecture/03
+                // 初始化允许查询）；计算与配额在主进程（03「宿主本地查询
+                // 镜像」节明确 find_path 不进镜像）。
+                let a = parse!(FindPathArgs);
+                let range = a.range.unwrap_or(0);
+                if range < 0 {
+                    return err_result("INVALID_ARGUMENT", "range 须为非负整数");
+                }
+                match self.world.find_path(
+                    Position::new(a.sx, a.sy),
+                    Position::new(a.gx, a.gy),
+                    range,
+                    PATH_NODE_BUDGET,
+                ) {
+                    PathOutcome::Path(p) => ok_result(serde_json::json!({
+                        "path": p.iter().map(|q| serde_json::json!([q.x, q.y])).collect::<Vec<_>>()
+                    })),
+                    PathOutcome::AlreadyThere => ok_result(serde_json::json!({ "path": [] })),
+                    PathOutcome::Unreachable => ok_result(serde_json::json!({ "path": null })),
+                    PathOutcome::BudgetExceeded => err_result(
+                        "PATH_BUDGET_EXCEEDED",
+                        &format!(
+                            "寻路节点预算 {PATH_NODE_BUDGET} 耗尽（start=({},{}) goal=({},{})）",
+                            a.sx, a.sy, a.gx, a.gy
+                        ),
+                    ),
+                }
             }
             "market.take" => {
                 let a = parse!(MarketTakeArgs);
@@ -572,6 +656,97 @@ impl Session {
         }
     }
 
+    /// move_to 复合步（docs/game-design/08「move_to 与 robot.memory」）：
+    /// 单源实现于主进程（docs/architecture/04——双语言绑定只做参数宽进与
+    /// 透传，无第二实现面）。次序：NO_SUCH_OBJECT → 到达判定（ARRIVED，
+    /// 优先于行动占用检查）→ ALREADY_ACTED 短路（不寻路不写缓存）→
+    /// 缓存校验 / 失效重寻 → 写 `_move` → accept_move 透传受理码（提交的
+    /// 就是 move 意图，结算语义零新增）。Err = 寻路预算超限（非结果码）。
+    fn move_to_step(
+        &mut self,
+        robot_id: Id,
+        goal: Position,
+        range: i32,
+    ) -> Result<(&'static str, String), String> {
+        let Some(robot) = self.world.robots.get(&robot_id) else {
+            return Ok((
+                ztw_model::codes::NO_SUCH_OBJECT,
+                format!("goal=({},{})", goal.x, goal.y),
+            ));
+        };
+        let pos = robot.pos;
+        // 到达判定优先于行动占用检查（文档冻结语义）。i64 距离：goal 是
+        // 玩家可控的裸 i32，i32 减法在极值处回绕（审查轮 P0）。
+        if (pos.x as i64 - goal.x as i64).abs() + (pos.y as i64 - goal.y as i64).abs()
+            <= range as i64
+        {
+            return Ok((
+                ztw_model::codes::ARRIVED,
+                format!("goal=({},{}) range={range}", goal.x, goal.y),
+            ));
+        }
+        // 本 tick 已行动：短路省寻路，缓存原样保留（下 tick 原路重试）。
+        if self.world.has_pending_intent(robot_id) {
+            return Ok((
+                ztw_model::codes::ALREADY_ACTED,
+                format!("goal=({},{})", goal.x, goal.y),
+            ));
+        }
+        // 缓存校验三失效条件：goal / range 变化；当前位置不在缓存轨迹上
+        //（偏离）；下一步被静态障碍占据。缓存的 path 含寻路时起点——结算
+        // 失败时位置与索引都不变，天然原路重试；受理成功也不提前消费。
+        let cached_next = self
+            .memory
+            .server_move_cache_get(robot_id)
+            .and_then(|v| decode_move_cache(&v))
+            .and_then(|(g, r, path)| {
+                if g != goal || r != range {
+                    return None;
+                }
+                let i = path.iter().position(|p| *p == pos)?;
+                let next = *path.get(i + 1)?;
+                (pos.adjacent(&next) && self.world.statically_passable(next)).then_some(next)
+            });
+        let next = match cached_next {
+            Some(n) => n,
+            None => match self.world.find_path(pos, goal, range, PATH_NODE_BUDGET) {
+                PathOutcome::Path(p) => {
+                    // 缓存轨迹含起点（推进语义见上）；限额拒绝降级为不
+                    // 缓存（每 tick 重寻），不影响移动本身。
+                    let mut trail = Vec::with_capacity(p.len() + 1);
+                    trail.push(pos);
+                    trail.extend_from_slice(&p);
+                    let _ = self
+                        .memory
+                        .server_move_cache_set(robot_id, &encode_move_cache(goal, range, &trail));
+                    p[0]
+                }
+                PathOutcome::AlreadyThere => {
+                    unreachable!("到达判定已先行拦截（dist ≤ range 必先返回 ARRIVED）")
+                }
+                PathOutcome::Unreachable => {
+                    return Ok((
+                        ztw_model::codes::NO_PATH,
+                        format!("goal=({},{}) range={range}", goal.x, goal.y),
+                    ));
+                }
+                PathOutcome::BudgetExceeded => {
+                    return Err(format!(
+                        "寻路节点预算 {PATH_NODE_BUDGET} 耗尽（goal=({},{})）",
+                        goal.x, goal.y
+                    ));
+                }
+            },
+        };
+        let code = self
+            .world
+            .accept_move(robot_id, next.x - pos.x, next.y - pos.y);
+        Ok((
+            code,
+            format!("goal=({},{}) next=({},{})", goal.x, goal.y, next.x, next.y),
+        ))
+    }
+
     /// 初始化阶段禁用动作与管理操作（docs/architecture/03），统一记录诊断。
     pub(crate) fn reject_init_phase(
         &mut self,
@@ -637,6 +812,61 @@ fn mem_needs(op: &str) -> MemNeeds {
 }
 
 /// 标量读取返回普通 JSON 值；容器读取返回句柄描述。
+/// `_move` 缓存线值编码：JSON 字符串，解析后形如
+/// `{"goal":[x,y],"range":n,"path":[[x,y],…]}`，path 为含寻路起点的完整
+/// 轨迹（格式冻结点，docs/game-design/08「move_to 与 robot.memory」）。
+/// 恒为**标量**（Str）：标量替换不杀容器节点，宿主 memory 槽位缓存的
+/// 失效协议（「服务端对玩家树无结构性写」，memory.rs / harness.rs
+/// 不变量注释）由此保持成立。
+fn encode_move_cache(goal: Position, range: i32, trail: &[Position]) -> MemValue {
+    let v = serde_json::json!({
+        "goal": [goal.x, goal.y],
+        "range": range,
+        "path": trail.iter().map(|p| serde_json::json!([p.x, p.y])).collect::<Vec<_>>(),
+    });
+    MemValue::Str(v.to_string())
+}
+
+/// 缓存解码：非字符串或 JSON 形状 / 数值异常（含手改档与旧版本遗留）
+/// 一律 None，调用方按缓存 miss 整体重寻——缓存只影响效率，不构成
+/// 权威状态（自愈）。
+fn decode_move_cache(v: &MemValue) -> Option<(Position, i32, Vec<Position>)> {
+    fn num_int(v: &serde_json::Value) -> Option<i32> {
+        let n = v.as_f64()?;
+        if !n.is_finite() || n.fract() != 0.0 || n < i32::MIN as f64 || n > i32::MAX as f64 {
+            return None;
+        }
+        Some(n as i32)
+    }
+    fn pos_of(v: &serde_json::Value) -> Option<Position> {
+        let items = v.as_array()?;
+        if items.len() != 2 {
+            return None;
+        }
+        Some(Position::new(num_int(&items[0])?, num_int(&items[1])?))
+    }
+    let MemValue::Str(s) = v else {
+        return None;
+    };
+    let root: serde_json::Value = serde_json::from_str(s).ok()?;
+    let goal = pos_of(root.get("goal")?)?;
+    let range = num_int(root.get("range")?)?;
+    if range < 0 {
+        return None;
+    }
+    let path = root
+        .get("path")?
+        .as_array()?
+        .iter()
+        .map(pos_of)
+        .collect::<Option<Vec<_>>>()?;
+    // 空轨迹 = 形状坏（合法轨迹至少含起点与到达格两格）。
+    if path.len() < 2 {
+        return None;
+    }
+    Some((goal, range, path))
+}
+
 fn read_result_json(r: ReadResult) -> serde_json::Value {
     match r {
         ReadResult::Scalar(v) => serde_json::json!({ "t": "scalar", "v": scalar_plain(&v) }),
@@ -722,6 +952,8 @@ mod tests {
             "robot.give" => arm!(GiveArgs),
             "robot.pick" => arm!(PickArgs),
             "robot.drop" => arm!(DropArgs),
+            "robot.move_to" => arm!(MoveToArgs),
+            "game.find_path" => arm!(FindPathArgs),
             "market.take" => arm!(MarketTakeArgs),
             "market.cancel" => arm!(MarketCancelArgs),
             "manage.destroy" => arm!(DestroyArgs),
@@ -928,5 +1160,242 @@ mod tests {
         assert_eq!(reply(&r)["code"], serde_json::json!("UNKNOWN_OP"));
         let r2 = s.handle_op("robot.move", &raw("[1,2]"));
         assert_eq!(reply(&r2)["code"], serde_json::json!("BAD_PAYLOAD"));
+    }
+
+    // -- move_to / find_path（M4；语义见 docs/game-design/08 两节） ------------
+
+    fn move_to(s: &mut Session, x: i32, y: i32, range: Option<i32>) -> serde_json::Value {
+        let range_json = match range {
+            Some(r) => format!(r#","range":{r}"#),
+            None => String::new(),
+        };
+        let r = s.handle_op(
+            "robot.move_to",
+            &raw(&format!(r#"{{"robot_id":1,"x":{x},"y":{y}{range_json}}}"#)),
+        );
+        reply(&r)
+    }
+
+    fn cached_trail(s: &mut Session) -> Option<Vec<Position>> {
+        s.memory
+            .server_move_cache_get(1)
+            .and_then(|v| decode_move_cache(&v))
+            .map(|(_, _, path)| path)
+    }
+
+    /// 到达判定优先于行动占用检查：本 tick 已行动且已到达 → ARRIVED。
+    #[test]
+    fn move_to_arrived_takes_priority_over_already_acted() {
+        let mut s = session(); // 机器人 1 在 (1,1)
+        assert_eq!(
+            reply(&s.handle_op("robot.move", &raw(r#"{"robot_id":1,"dx":1,"dy":0}"#)))["code"],
+            serde_json::json!("OK") // 先占用行动机会
+        );
+        assert_eq!(
+            move_to(&mut s, 2, 1, None), // 距离 1 ≤ 默认 range 1 → 已到达
+            serde_json::json!({ "ok": true, "code": "ARRIVED" })
+        );
+    }
+
+    /// 首次调用写缓存（含起点的完整轨迹）；受理成功不提前消费——settle 前
+    /// 缓存与修订号都不再变化；ALREADY_ACTED 短路不寻路不写缓存。
+    #[test]
+    fn move_to_first_call_writes_cache_and_does_not_preconsume() {
+        let mut s = session();
+        assert_eq!(move_to(&mut s, 3, 1, None)["code"], serde_json::json!("OK"));
+        let trail = cached_trail(&mut s).expect("首次调用应写缓存");
+        // 默认 range 1：到达集含 (2,1)（与 goal 相邻即到达），轨迹止于 (2,1)。
+        assert_eq!(trail, vec![Position::new(1, 1), Position::new(2, 1)]);
+        let rev = s.memory.revision();
+        // 未结算的重复调用：未到达时 ALREADY_ACTED，缓存原样。
+        assert_eq!(
+            move_to(&mut s, 5, 1, None)["code"], // 新目的地未到达
+            serde_json::json!("ALREADY_ACTED")
+        );
+        assert_eq!(s.memory.revision(), rev, "短路不得写缓存");
+        assert_eq!(cached_trail(&mut s), Some(trail), "受理成功不提前消费路径");
+    }
+
+    /// 跨 tick 按实际位置推进缓存轨迹，走完全程以 ARRIVED 收尾。
+    #[test]
+    fn move_to_walks_full_trail_across_ticks() {
+        let mut s = session(); // (1,1) → (5,1)，默认 range 1（到 (4,1) 即到达）
+        for _ in 0..3 {
+            assert_eq!(move_to(&mut s, 5, 1, None)["code"], serde_json::json!("OK"));
+            s.world.settle();
+        }
+        assert_eq!(s.world.robots[&1].pos, Position::new(4, 1));
+        assert_eq!(
+            move_to(&mut s, 5, 1, None)["code"],
+            serde_json::json!("ARRIVED")
+        );
+        assert!(!s.world.has_pending_intent(1), "ARRIVED 不占行动机会");
+    }
+
+    /// 缓存失效条件「下一步被静态障碍占据」：range 0 走到 goal 本身，加墙
+    /// 挡原路 → 重寻绕行并更新缓存轨迹（方向序北优先，绕 y=0）。
+    #[test]
+    fn move_to_replans_when_next_step_blocked() {
+        let mut s = session();
+        assert_eq!(
+            move_to(&mut s, 5, 1, Some(0))["code"],
+            serde_json::json!("OK")
+        );
+        s.world.settle(); // 机器人到 (2,1)，缓存下一步 (3,1)
+        s.world.add_wall(Position::new(3, 1));
+        assert_eq!(
+            move_to(&mut s, 5, 1, Some(0))["code"],
+            serde_json::json!("OK")
+        );
+        let trail = cached_trail(&mut s).expect("重寻应更新缓存");
+        assert_eq!(trail.first(), Some(&Position::new(2, 1)));
+        assert!(
+            !trail.iter().any(|p| *p == Position::new(3, 1)),
+            "新轨迹不得再穿墙格"
+        );
+        assert_eq!(trail.last(), Some(&Position::new(5, 1)));
+    }
+
+    /// 缓存失效条件「当前位置偏离」：位置不在缓存轨迹上 → 整体重寻。
+    #[test]
+    fn move_to_replans_on_deviation() {
+        let mut s = session();
+        assert_eq!(move_to(&mut s, 3, 1, None)["code"], serde_json::json!("OK"));
+        s.world.settle();
+        // 玩家手动移动（或读档回退）到轨迹之外。
+        s.world.robots.get_mut(&1).unwrap().pos = Position::new(6, 6);
+        assert_eq!(move_to(&mut s, 3, 1, None)["code"], serde_json::json!("OK"));
+        let trail = cached_trail(&mut s).expect("偏离应重寻");
+        assert_eq!(trail.first(), Some(&Position::new(6, 6)));
+    }
+
+    /// 结算失败（CELL_CONTESTED）不使缓存失效：下一 tick 原路重试——
+    /// 位置与索引都不变，缓存与修订号原样，重试同一步。
+    #[test]
+    fn move_to_settlement_failure_retries_same_step() {
+        let mut s = session(); // 机器人 1 在 (1,1)（id 更小，落点争抢必胜）
+        let r2 = s.world.add_robot(Position::new(3, 1)); // id 2
+        assert_eq!(
+            reply(&s.handle_op("robot.move", &raw(r#"{"robot_id":1,"dx":1,"dy":0}"#)))["code"],
+            serde_json::json!("OK")
+        ); // 1 号抢 (2,1)
+        let rm = s.handle_op(
+            "robot.move_to",
+            &raw(&format!(r#"{{"robot_id":{r2},"x":1,"y":1,"range":0}}"#)),
+        );
+        assert_eq!(reply(&rm)["code"], serde_json::json!("OK"));
+        let res = s.world.settle();
+        assert_eq!(res[&r2].code, ztw_model::codes::CELL_CONTESTED);
+        assert_eq!(s.world.robots[&r2].pos, Position::new(3, 1));
+        let before = s.memory.server_move_cache_get(r2);
+        let rev = s.memory.revision();
+        // 下一 tick 原路重试：缓存未重写（修订号不变），仍提交同一步。
+        let rm2 = s.handle_op(
+            "robot.move_to",
+            &raw(&format!(r#"{{"robot_id":{r2},"x":1,"y":1,"range":0}}"#)),
+        );
+        assert_eq!(reply(&rm2)["code"], serde_json::json!("OK"));
+        assert_eq!(s.memory.revision(), rev, "原路重试不得重写缓存");
+        assert_eq!(s.memory.server_move_cache_get(r2), before);
+    }
+
+    /// 目的地不可达返回 NO_PATH 且不占行动机会。
+    #[test]
+    fn move_to_no_path_when_enclosed() {
+        let mut s = session();
+        for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+            s.world.add_wall(Position::new(1 + dx, 1 + dy)); // 围死 (1,1)
+        }
+        assert_eq!(
+            move_to(&mut s, 6, 6, None)["code"],
+            serde_json::json!("NO_PATH")
+        );
+        assert!(!s.world.has_pending_intent(1), "NO_PATH 不占行动机会");
+        // 缓存不写入（无可达路径可缓存）。
+        assert_eq!(cached_trail(&mut s), None);
+    }
+
+    /// 目的地或 opts（range）变化 → 缓存失效重寻。
+    #[test]
+    fn move_to_goal_or_range_change_invalidates_cache() {
+        let mut s = session();
+        assert_eq!(
+            move_to(&mut s, 3, 1, Some(0))["code"],
+            serde_json::json!("OK")
+        );
+        s.world.settle(); // (2,1)，缓存 trail [(2,1),(3,1)] goal (3,1) range 0
+        assert_eq!(move_to(&mut s, 3, 3, None)["code"], serde_json::json!("OK"));
+        let trail = cached_trail(&mut s).expect("换目的地应重寻");
+        assert_eq!(trail.first(), Some(&Position::new(2, 1)));
+        // 默认 range 1：到达格是 (3,3) 的邻格——同距两邻中方向序南先
+        // 发现（经 (2,2) 到 (2,3)），不必走到 goal 本身。
+        assert_eq!(trail.last(), Some(&Position::new(2, 3)));
+    }
+
+    /// 负 range 是参数错误（INVALID_ARGUMENT），不是「不可达」。
+    #[test]
+    fn move_to_negative_range_is_invalid_argument() {
+        let mut s = session();
+        assert_eq!(
+            move_to(&mut s, 3, 1, Some(-1))["code"],
+            serde_json::json!("INVALID_ARGUMENT")
+        );
+        // find_path 是查询：参数错误走 GameError（ok:false）。
+        let v = reply(&s.handle_op(
+            "game.find_path",
+            &raw(r#"{"sx":1,"sy":1,"gx":3,"gy":1,"range":-1}"#),
+        ));
+        assert_eq!(v["ok"], serde_json::json!(false));
+        assert_eq!(v["code"], serde_json::json!("INVALID_ARGUMENT"));
+    }
+
+    /// find_path 三分支：路径 / 已在到达范围（[]）/ 不可达（null）。
+    #[test]
+    fn find_path_three_branches() {
+        let mut s = session();
+        let v = reply(&s.handle_op("game.find_path", &raw(r#"{"sx":1,"sy":1,"gx":3,"gy":1}"#)));
+        assert_eq!(v["path"], serde_json::json!([[2, 1], [3, 1]]));
+        let v = reply(&s.handle_op(
+            "game.find_path",
+            &raw(r#"{"sx":1,"sy":1,"gx":2,"gy":1,"range":1}"#),
+        ));
+        assert_eq!(v["path"], serde_json::json!([]));
+        for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+            s.world.add_wall(Position::new(1 + dx, 1 + dy));
+        }
+        let v = reply(&s.handle_op("game.find_path", &raw(r#"{"sx":1,"sy":1,"gx":6,"gy":6}"#)));
+        assert_eq!(v["path"], serde_json::json!(null));
+    }
+
+    /// init 期：find_path 放行（查询），move_to 拒 INIT_PHASE（动作）。
+    #[test]
+    fn init_phase_allows_find_path_rejects_move_to() {
+        let mut s = session();
+        s.in_init = true;
+        let v = reply(&s.handle_op("game.find_path", &raw(r#"{"sx":1,"sy":1,"gx":3,"gy":1}"#)));
+        assert_eq!(v["ok"], serde_json::json!(true));
+        assert_eq!(
+            move_to(&mut s, 3, 1, None)["code"],
+            serde_json::json!("INIT_PHASE")
+        );
+    }
+
+    /// 缓存写入撞 memory 限额 → 静默降级为不缓存，移动照常。
+    #[test]
+    fn move_to_cache_write_limit_degrades_silently() {
+        // 限额在 Session 构造时拷入 MemoryTree，须从 cfg 压入。
+        let mut w = World::new_empty(8, 8, 100_000);
+        w.add_robot(Position::new(1, 1));
+        let mut cfg = SessionConfig::new("ztw-host-js");
+        cfg.memory.max_bytes = 8; // 轨迹必然写不下
+        let mut s = Session::new(cfg, w);
+        assert_eq!(move_to(&mut s, 3, 1, None)["code"], serde_json::json!("OK"));
+        assert_eq!(cached_trail(&mut s), None, "限额拒绝应降级为不缓存");
+        // 移动本身不受影响，后续每 tick 重寻（range 0 确保未到达）。
+        s.world.settle();
+        assert_eq!(
+            move_to(&mut s, 5, 1, Some(0))["code"],
+            serde_json::json!("OK")
+        );
     }
 }

@@ -94,7 +94,7 @@ fn memory_restore_enforces_limits() {
 }
 
 /// 坏档形态逐一拒绝：非映射根 / robots 非映射 / robots 条目非映射 /
-/// robots 键非数字或非规范 id / 根或嵌套映射重复键 / RobotMem 含 _move。
+/// robots 键非数字或非规范 id / 根或嵌套映射重复键。
 #[test]
 fn memory_restore_rejects_corrupt_forms() {
     let lim = MemoryLimits::default();
@@ -141,15 +141,46 @@ fn memory_restore_rejects_corrupt_forms() {
                 "robots".into(),
                 MemValue::Map(vec![(
                     "7".into(),
-                    MemValue::Map(vec![("_move".into(), num(1.0))]),
+                    MemValue::Map(vec![(
+                        "_move".into(),
+                        MemValue::Map(vec![("goal".into(), num(1.0))]),
+                    )]),
                 )]),
             )]),
-            "RobotMem 含保留键 _move",
+            "_move 容器形（服务端恒写标量，容器即手改档——恢复会破坏宿主句柄缓存不变量）",
         ),
     ];
     for (root, why) in cases {
         let err = MemoryTree::from_snapshot(root, 0, lim.clone()).unwrap_err();
         assert_eq!(err.code, "INVALID_VALUE", "{why} 须按坏档拒绝：{err:?}");
+    }
+}
+
+/// `_move`（move_to 路径缓存）自 M4 起由服务端写入线上树（JSON 字符串
+/// 标量），存档恢复原样接受；标量形状异常（非字符串）自愈为缓存 miss，
+/// 不构成坏档。
+#[test]
+fn memory_restore_accepts_move_cache() {
+    let canonical = MemValue::Str(r#"{"goal":[3,4],"range":1,"path":[[1,4],[2,4]]}"#.to_string());
+    // 规范 JSON 字符串与非字符串标量（形状异常、首次 move_to 自愈）都
+    // 原样恢复。
+    for (v, why) in [
+        (canonical.clone(), "规范缓存形状"),
+        (num(1.0), "非字符串标量"),
+    ] {
+        let want = serde_json::to_value(&v).unwrap();
+        let root = MemValue::Map(vec![(
+            "robots".into(),
+            MemValue::Map(vec![("7".into(), MemValue::Map(vec![("_move".into(), v)]))]),
+        )]);
+        let mut tree = MemoryTree::from_snapshot(root, 0, MemoryLimits::default())
+            .unwrap_or_else(|e| panic!("{why} 的 _move 存档应接受：{e:?}"));
+        let got = tree.server_move_cache_get(7).expect("_move 应恢复");
+        assert_eq!(
+            serde_json::to_value(&got).unwrap(),
+            want,
+            "{why} 应原样恢复"
+        );
     }
 }
 
