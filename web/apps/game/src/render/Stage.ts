@@ -9,6 +9,7 @@
 
 import { Application, Container, Graphics, Sprite, type Texture } from "pixi.js";
 import { boxSprite, loadSprites, wallKind, wallTile, type SpriteBank } from "./sprites";
+import { suppressPageSelect } from "../pageSelect";
 import type { Snapshot, StaticInfo } from "../types";
 
 const CELL = 48; // 屏幕像素 / 格（缩放自适应容器）
@@ -91,6 +92,9 @@ export class Stage {
 
   destroy(): void {
     this.resizeOb?.disconnect();
+    // 平移中销毁（HMR 热更等）：清掉页面级禁选遗留。
+    this.releaseSelect?.();
+    this.releaseSelect = null;
     const canvas = this.app.canvas;
     canvas.removeEventListener("wheel", this.onWheel);
     canvas.removeEventListener("pointerdown", this.onPointerDown);
@@ -191,10 +195,18 @@ export class Stage {
     this.applyView();
   };
 
+  /** 页面级文本选择抑制句柄（pageSelect.ts）：平移期间置位，up/销毁释放。 */
+  private releaseSelect: (() => void) | null = null;
+
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0 || !e.isPrimary) {
       return;
     }
+    // 平移期间掐断原生拖拽选择（WebKit 不受指针捕获约束，Splitter 同款
+    // 问题）；pointerdown 的 preventDefault 不影响双击适配（click 系事件
+    // 独立于兼容鼠标事件派发），画布也无需点击聚焦。
+    e.preventDefault();
+    this.releaseSelect ??= suppressPageSelect();
     this.panCtx = { cx: e.clientX, cy: e.clientY, vx: this.view.x, vy: this.view.y };
     this.app.canvas.setPointerCapture(e.pointerId);
     this.app.canvas.style.cursor = "grabbing";
@@ -215,6 +227,8 @@ export class Stage {
       return;
     }
     this.panCtx = null;
+    this.releaseSelect?.();
+    this.releaseSelect = null;
     if (this.app.canvas.hasPointerCapture(e.pointerId)) {
       this.app.canvas.releasePointerCapture(e.pointerId);
     }
