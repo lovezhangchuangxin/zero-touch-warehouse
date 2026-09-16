@@ -822,6 +822,204 @@ impl MemoryTree {
     pub fn snapshot(&mut self) -> MemValue {
         self.value_of(0).unwrap_or(MemValue::Map(Vec::new()))
     }
+
+    /// 读档重建（docs/architecture/06：节点 id 不属于存档公开语义，
+    /// arena 重建并恢复根 / robots / robots\<id\> 的角色标签）。限额与
+    /// 写入路径同标准整体复核（"不得只在存档时检测"）；任何拒绝按坏档
+    /// 处理、不产出半棵树。修订号按存档恢复；generation 归零（读档后
+    /// load_program 的初始化提交自会递增）。
+    pub fn from_snapshot(
+        root: MemValue,
+        revision: u64,
+        limits: MemoryLimits,
+    ) -> Result<MemoryTree, MemOpError> {
+        let MemValue::Map(pairs) = root else {
+            return Err(MemOpError::new(
+                "INVALID_VALUE",
+                "memory 树根必须是映射（存档损坏）",
+            ));
+        };
+        let mut ctx = BuildCtx {
+            // 根占用 arena 下标 0，子树从 1 起（recompute / live 均以 0 为
+            // 根寻址）；子先于父的后序构建照旧，最后把根插回下标 0。
+            base: 1,
+            nodes: Vec::new(),
+            node_total: 0,
+            bytes_total: 0,
+        };
+        let mut root_entries: Vec<(String, Slot)> = Vec::with_capacity(pairs.len());
+        for (k, v) in &pairs {
+            if k.len() > limits.max_string {
+                return Err(MemOpError::new(
+                    "MEMORY_LIMIT",
+                    format!("键长度 {} 超上限 {}", k.len(), limits.max_string),
+                ));
+            }
+            if v.depth() > limits.max_depth {
+                return Err(MemOpError::new(
+                    "MEMORY_LIMIT",
+                    format!("深度超上限 {}", limits.max_depth),
+                ));
+            }
+            // 保留键 robots：角色子树（其下条目必须是映射——线上树只能经
+            // r.memory 产生，标量即坏档；键须为数字机器人 id）。
+            let slot = if k == "robots" {
+                let MemValue::Map(robot_pairs) = v else {
+                    return Err(MemOpError::new(
+                        "INVALID_VALUE",
+                        "robots 保留键必须是映射（存档损坏）",
+                    ));
+                };
+                let mut entries = Vec::with_capacity(robot_pairs.len());
+                for (rk, rv) in robot_pairs {
+                    if rk.parse::<ztw_model::Id>().is_err() {
+                        return Err(MemOpError::new(
+                            "INVALID_VALUE",
+                            format!("robots 条目「{rk}」不是机器人 id（存档损坏）"),
+                        ));
+                    }
+                    let MemValue::Map(_) = rv else {
+                        return Err(MemOpError::new(
+                            "INVALID_VALUE",
+                            format!("robots/{rk} 必须是映射（线上树只能经 r.memory 产生）"),
+                        ));
+                    };
+                    let s = restore_build(&limits, &mut ctx, rv, Tag::RobotMem)?;
+                    entries.push((rk.clone(), s));
+                }
+                let keys_len = robot_pairs.iter().map(|(k, _)| k.len()).sum::<usize>();
+                finish_container(
+                    &mut ctx,
+                    Node {
+                        alive: true,
+                        kind: NodeKind::Map,
+                        tag: Tag::Robots,
+                        entries,
+                    },
+                    keys_len,
+                )
+            } else {
+                restore_build(&limits, &mut ctx, v, Tag::Plain)?
+            };
+            root_entries.push((k.clone(), slot));
+        }
+        // 根落位下标 0；根键字节与 build_inner 的容器口径一致计入预算。
+        let root_keys_len: usize = pairs.iter().map(|(k, _)| k.len()).sum();
+        let node_total_before_root = ctx.node_total;
+        let bytes_before_root = ctx.bytes_total;
+        ctx.nodes.insert(
+            0,
+            Node {
+                alive: true,
+                kind: NodeKind::Map,
+                tag: Tag::Root,
+                entries: root_entries,
+            },
+        );
+        ctx.node_total = node_total_before_root + 1;
+        ctx.bytes_total = bytes_before_root + NODE_BYTES + root_keys_len;
+        if ctx.node_total > limits.max_nodes {
+            return Err(MemOpError::new(
+                "MEMORY_LIMIT",
+                format!("节点数超上限 {}", limits.max_nodes),
+            ));
+        }
+        if ctx.bytes_total > limits.max_bytes {
+            return Err(MemOpError::new(
+                "MEMORY_LIMIT",
+                format!("字节数超上限 {}", limits.max_bytes),
+            ));
+        }
+        let mut t = MemoryTree {
+            arena: ctx.nodes,
+            node_count: 0,
+            bytes: 0,
+            revision,
+            generation: 0,
+            limits,
+        };
+        t.recompute();
+        debug_assert_eq!(
+            (t.node_count, t.bytes),
+            (ctx.node_total, ctx.bytes_total),
+            "读档重建的限额预算须与重算口径一致"
+        );
+        Ok(t)
+    }
+}
+
+/// 容器节点的落位与计账（与 build_inner 同口径：节点 + 键长；后序，
+/// 子先于父）。
+fn finish_container(ctx: &mut BuildCtx, node: Node, keys_len: usize) -> Slot {
+    let id = ctx.base + ctx.nodes.len() as NodeId;
+    ctx.nodes.push(node);
+    ctx.node_total += 1;
+    ctx.bytes_total += NODE_BYTES + keys_len;
+    Slot::Node(id)
+}
+
+/// 读档旁路构建：与 build_inner 同口径的计账与校验，但节点标签由调用
+/// 方指定（RobotMem / Plain）；容器一律后序（子先于父）。
+fn restore_build(
+    limits: &MemoryLimits,
+    ctx: &mut BuildCtx,
+    v: &MemValue,
+    tag: Tag,
+) -> Result<Slot, MemOpError> {
+    match v {
+        MemValue::List(items) => {
+            let mut entries = Vec::with_capacity(items.len());
+            for it in items {
+                let s = restore_build(limits, ctx, it, Tag::Plain)?;
+                entries.push((String::new(), s));
+            }
+            Ok(finish_container(
+                ctx,
+                Node {
+                    alive: true,
+                    kind: NodeKind::List,
+                    tag,
+                    entries,
+                },
+                0,
+            ))
+        }
+        MemValue::Map(pairs) => {
+            let mut entries = Vec::with_capacity(pairs.len());
+            for (k, child) in pairs {
+                if k.len() > limits.max_string {
+                    return Err(MemOpError::new(
+                        "MEMORY_LIMIT",
+                        format!("键长度 {} 超上限 {}", k.len(), limits.max_string),
+                    ));
+                }
+                let s = restore_build(limits, ctx, child, Tag::Plain)?;
+                entries.push((k.clone(), s));
+            }
+            let keys_len = pairs.iter().map(|(k, _)| k.len()).sum::<usize>();
+            Ok(finish_container(
+                ctx,
+                Node {
+                    alive: true,
+                    kind: NodeKind::Map,
+                    tag,
+                    entries,
+                },
+                keys_len,
+            ))
+        }
+        scalar => {
+            scalar
+                .validate(limits.max_string)
+                .map_err(|m| MemOpError::new("INVALID_VALUE", m))?;
+            ctx.node_total += 1;
+            ctx.bytes_total += match scalar {
+                MemValue::Str(s) => NODE_BYTES + s.len(),
+                _ => NODE_BYTES,
+            };
+            Ok(Slot::Val(scalar.clone()))
+        }
+    }
 }
 
 #[cfg(test)]

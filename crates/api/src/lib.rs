@@ -14,6 +14,7 @@ pub mod memory;
 pub mod mirror;
 pub mod ops;
 pub mod protocol;
+pub mod save;
 
 /// 宿主侧 Game 绑定（bootstrap.js）。以源码文本内嵌，由 runtime crate
 /// 在执行环境重建后求值；它属于绑定层，因此以本 crate 为唯一出处。
