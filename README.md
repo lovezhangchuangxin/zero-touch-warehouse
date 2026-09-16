@@ -2,7 +2,7 @@
 
 单机 2D 编程游戏：玩家写代码运营自动化仓库。设计文档见 `docs/`（语义以文档为准）。
 
-## 当前状态：A1 + 里程碑 3（经济系统）
+## 当前状态：A1 + 里程碑 3（经济系统）+ C1（存档与恢复）
 
 A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D（双平台构建
 冒烟）、A1（完整协议与双语言，验收证据见 `records/a1-protocol-playthrough.md`
@@ -14,18 +14,22 @@ A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D�
 信用额度）与商店购买（robot/shelf/charger/dock，装卸位朝向自边界墙
 推导）；经济不变量属性测试（会计恒等式风暴 + 借贷穷举矩阵）与周转 /
 囤货 / 杠杆三策略校准（`records/m3-calibration.md`，`m3-trade` 场景 +
-三支示例脚本可试玩）。无存档（属原型 C）。
+三支示例脚本可试玩）。其上落地 C1 存档与恢复：JSON 信封 + FNV 校验和
+与三道版本门禁、`WorldSnapshot` 镜像 DTO（state_hash 往返 + 读档指纹
+对账）、安全点取数 + 原子写串行队列、自动档轮换与主菜单「继续」、
+编辑器草稿防丢、设置迁移 settings.json（验收证据见
+`records/c1-persistence.md`；不兼容旧档明确报错不迁移）。
 
 ## 布局
 
 | 路径 | 内容 |
 | --- | --- |
 | `crates/model` | 实体、坐标、结果码、memory 线值（纯数据） |
-| `crates/sim` | tick 状态机、六动作受理与三段式结算、市场与车辆生命周期、PRNG |
-| `crates/api` | Game 门面、查询镜像、受控 memory、IPC 协议、绑定层（bootstrap.js / bootstrap.py）、会话层 harness（desktop 世界线程与测试共用） |
+| `crates/sim` | tick 状态机、六动作受理与三段式结算、市场与车辆生命周期、PRNG、存档快照镜像（snapshot） |
+| `crates/api` | Game 门面、查询镜像、受控 memory、IPC 协议、绑定层（bootstrap.js / bootstrap.py）、会话层 harness（desktop 世界线程与测试共用）、存档信封（save） |
 | `crates/runtime` | JS 宿主进程二进制 `ztw-host-js`（rquickjs / quickjs-ng） |
 | `crates/runtime-py` | Python 宿主进程二进制 `ztw-host-py`（PyO3 + vendored CPython、配额分配器、能力收窄） |
-| `crates/desktop` | B2 桌面壳（Tauri 2 世界线程）+ 语言切换 |
+| `crates/desktop` | B2 桌面壳（Tauri 2 世界线程）+ 语言切换 + 存档服务（原子写 / 轮换 / 故障注入旋钮） |
 | `web/` | pnpm monorepo：Vue 3 + Pixi 8 前端与 game-types 包 |
 | `tests/fixtures` | 玩家示例与故障注入脚本（.js / .py 对照） |
 
