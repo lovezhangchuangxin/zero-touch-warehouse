@@ -56,4 +56,14 @@ impl Xoshiro256 {
     pub fn state_words(&self) -> [u64; 4] {
         self.s
     }
+
+    /// 自状态字重建（存档读档路径）。全零退化态防御与 derive 同款；
+    /// 布局冻结约定见模块注释——变更即存档格式变更，须迁移旧档。
+    pub fn from_state_words(s: [u64; 4]) -> Xoshiro256 {
+        let mut s = s;
+        if s == [0, 0, 0, 0] {
+            s[0] = 1; // 全零是 xoshiro 退化态，防御
+        }
+        Xoshiro256 { s }
+    }
 }

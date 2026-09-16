@@ -76,3 +76,8 @@ pub struct LastResult {
     pub arg: String,
     pub code: String,
 }
+
+/// 动作名固定码表（`LastResult.action` 的值域）。结算侧以同名字面量产生，
+/// 快照恢复按此反查 `&'static str`；未知名视为存档损坏（值域冻结的
+/// 一部分，新增动作名须同步此表并递增规则版本）。
+pub const ACTION_NAMES: &[&str] = &["move", "charge", "take", "give", "pick", "drop"];

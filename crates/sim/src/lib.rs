@@ -20,16 +20,23 @@ mod market;
 mod marketgen;
 mod rng;
 mod settle;
+mod snapshot;
 mod world;
 
-pub use intent::{Intent, LastResult, TargetRef};
+pub use intent::{ACTION_NAMES, Intent, LastResult, TargetRef};
 pub use market::{
     BorrowEffect, BoughtKind, BuyEffect, CancelEffect, DestroyEffect, DestroyedKind, RepayEffect,
     TakeEffect,
 };
 pub use marketgen::MarketState;
 pub use rng::Xoshiro256;
+pub use snapshot::{ArrivalSnapshot, LastResultSnapshot, MarketSnapshot, WorldSnapshot};
 pub use world::World;
+
+/// 模拟规则版本指纹（入存档信封，docs/architecture/06 §文件格式与
+/// 落盘）。规则常量或结算语义变更时递增——旧档读档明确报错、不迁移
+/// （该策略仅适用于 1.0 之前）。
+pub const RULES_VERSION: &str = "m3";
 
 // ---------------------------------------------------------------------------
 // 数值锚点（里程碑 3 校准冻结，实测见 records/m3-calibration.md；后续平衡

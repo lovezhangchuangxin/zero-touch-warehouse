@@ -5,3 +5,9 @@ edition = "2024"
 
 [dependencies]
 ztw-model = { path = "../model" }
+# 存档快照 DTO 的 serde 派生（非默认：ztw-sim 默认构建保持零外部依赖，
+# 由 ztw-api 以 features = ["serde"] 启用）。
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]
