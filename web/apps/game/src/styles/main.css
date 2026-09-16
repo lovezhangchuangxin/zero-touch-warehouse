@@ -37,6 +37,13 @@
   #app {
     height: 100%;
   }
+  /* 游戏外壳不留网页感：根层禁过度滚动（macOS 橡皮筋）且不参与滚动，
+     输入路径上的触控板捏合页面缩放由 pageScroll.ts 拦截。 */
+  html,
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
   body {
     @apply bg-bg font-sans text-sm text-fg antialiased;
   }
@@ -46,12 +53,14 @@
   }
   /* 滚动条整体隐藏：外层布局恒不滚动，滚动只发生在各面板内部，
      面板内容溢出由 v-fade 渐隐遮罩提示（macOS WKWebView 与 Windows
-     WebView2 分别命中 webkit 前缀与 scrollbar-width 两套规则）。 */
+     WebView2 分别命中 webkit 前缀与 scrollbar-width 两套规则）。
+     overscroll-behavior 一并压平：面板滚到头就地停住，不弹不外链。 */
   ::-webkit-scrollbar {
     display: none;
   }
   * {
     scrollbar-width: none;
+    overscroll-behavior: none;
   }
   /* 旧令牌桥：editor/theme.ts 以 JS 内联样式消费 --panel 等旧名，
      统一转发到 @theme 变量，CodeMirror 换皮不改名即继续生效。 */
