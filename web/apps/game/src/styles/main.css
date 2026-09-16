@@ -103,7 +103,7 @@
   .btn-danger {
     @apply border-bad/40 text-bad enabled:hover:border-bad enabled:hover:bg-bad/10;
   }
-  /* 下拉 / 输入框基底 */
+  /* 输入框基底（下拉已由 ui/Select.vue 自绘，不再消费此类） */
   .field {
     @apply rounded-sm border border-line bg-panel-2 px-2 py-0.5;
   }

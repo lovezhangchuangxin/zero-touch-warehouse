@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import * as api from "../api";
 import { fmtMilli } from "../format";
 import { store } from "../store";
+import Select from "./Select.vue";
 
 // 顶栏只留操作，按「传输控制 / 速度档 / 场景 / 资金读数 / 危险区」分组；
 // tick / 运行态等持续读数在底部状态栏（StatusBar）。
@@ -25,6 +26,9 @@ const faultClass = computed(
 const faulted = computed(() => faultClass.value != null);
 const scenarios = computed(() => store.static?.scenarios ?? []);
 const scenarioSel = ref("");
+const scenarioOptions = computed(() =>
+  scenarios.value.map((s) => ({ value: s.id, label: `${s.name}（${s.robots} 台）` })),
+);
 // 快照未到时不显示 0.00（误导）；欠款判断用原始 milli 值而非格式化串，
 // 1–9 milli 截断后也是 "0.00" 但欠款真实存在。
 const gold = computed(() => (store.snapshot ? fmtMilli(store.snapshot.gold_milli) : null));
@@ -80,13 +84,13 @@ function onReset() {
       </button>
     </span>
     <span class="v-sep" />
-    <select v-model="scenarioSel" class="field" aria-label="重开场景">
-      <option value="" disabled>重开场景…</option>
-      <!-- 标签整体放单个插值：oxfmt 强制子节点分行，裸文本首尾空白会被编译进 DOM 文本 -->
-      <option v-for="s in scenarios" :key="s.id" :value="s.id">
-        {{ `${s.name}（${s.robots} 台）` }}
-      </option>
-    </select>
+    <Select
+      v-model="scenarioSel"
+      class="max-w-44"
+      :options="scenarioOptions"
+      placeholder="重开场景…"
+      aria-label="重开场景"
+    />
     <button class="btn" @click="onReset">重开</button>
     <span class="flex-1" />
     <!-- 资金读数：玩家持有的金币（含借贷欠款提示） -->

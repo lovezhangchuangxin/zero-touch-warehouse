@@ -18,6 +18,12 @@ import demoTradeLeverage from "./demos/demo_trade_leverage.js?raw";
 /** 玩家代码语言（与桌面端 Language 对应，"js" / "py"）。 */
 export type Language = "js" | "py";
 
+/** 语言下拉共用选项：编辑器语言切换与设置面板默认语言同源。 */
+export const LANG_OPTIONS: { value: Language; label: string }[] = [
+  { value: "js", label: "JavaScript" },
+  { value: "py", label: "Python" },
+];
+
 export interface DemoScript {
   id: string;
   name: string;

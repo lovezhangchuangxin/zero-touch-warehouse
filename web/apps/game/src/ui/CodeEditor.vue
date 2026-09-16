@@ -2,7 +2,7 @@
 import type { EditorState } from "@codemirror/state";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import * as api from "../api";
-import { DEMO_SCRIPTS } from "../scripts";
+import { DEMO_SCRIPTS, LANG_OPTIONS } from "../scripts";
 import type { Language } from "../scripts";
 import { createCodeEditor, type CodeEditorHandle } from "../editor/setup";
 import {
@@ -15,6 +15,7 @@ import {
   type EditorFile,
 } from "../editor/files";
 import FileTree from "./FileTree.vue";
+import Select from "./Select.vue";
 
 // 多文件代码编辑器（CodeMirror 6，docs/architecture/05 §代码编辑器）。
 // 「保存并重载」= 热重载：当前 tick 结束后暂停 → 文件集整包提交并重建
@@ -24,6 +25,8 @@ const host = ref<HTMLElement | null>(null);
 const demoSel = ref("");
 const busy = ref(false);
 const saveError = ref("");
+// 示例下拉是静态集合，整表一次成型
+const demoOptions = DEMO_SCRIPTS.map((d) => ({ value: d.id, label: d.name }));
 
 // 两套语言文件集（各自草稿），activeLang 指向当前编辑的那套。
 // 初始语言读设置（主菜单"设置 → 默认脚本语言"，localStorage 持久化）。
@@ -175,6 +178,10 @@ function renameFile(id: string, name: string) {
 // 载入示例 = 目标语言整套文件替换为单文件示例（示例自包含）。
 // 跨语言载入时当前语言集是幸存方：先把 live state 写入缓存再切，
 // 否则未保存草稿随 switchState 静默丢失；同语言整集替换属预期内丢弃。
+function pickDemo(v: string) {
+  demoSel.value = v; // 先落值再载入，loadDemo 按它找目标示例
+  loadDemo();
+}
 function loadDemo() {
   const d = DEMO_SCRIPTS.find((s) => s.id === demoSel.value);
   if (!d || !ed) return;
@@ -194,19 +201,17 @@ function loadDemo() {
 }
 
 // 语言切换 = 整体切换到另一套文件集（宿主重启在保存时发生，docs 03）。
-const langSel = computed<Language>({
-  get: () => activeLang.value,
-  set: (v) => {
-    if (!ed || v === activeLang.value) return;
-    stateCache.set(activeId.value, ed.view.state);
-    activeLang.value = v;
-    const main = sets.value[v][0]!;
-    const cached = stateCache.get(main.id);
-    ed.switchState(cached ?? ed.newState(main.code, v));
-    if (ed.currentLanguage() !== v) ed.setLanguage(v);
-    activeId.value = main.id;
-  },
-});
+function switchLang(v: string) {
+  const lang: Language = v === "py" ? "py" : "js";
+  if (!ed || lang === activeLang.value) return;
+  stateCache.set(activeId.value, ed.view.state);
+  activeLang.value = lang;
+  const main = sets.value[lang][0]!;
+  const cached = stateCache.get(main.id);
+  ed.switchState(cached ?? ed.newState(main.code, lang));
+  if (ed.currentLanguage() !== lang) ed.setLanguage(lang);
+  activeId.value = main.id;
+}
 </script>
 
 <template>
@@ -214,14 +219,21 @@ const langSel = computed<Language>({
     <div
       class="flex items-center gap-2 overflow-hidden whitespace-nowrap border-b border-line px-2 py-1.5"
     >
-      <select v-model="demoSel" class="field min-w-0 max-w-[9.5rem]" @change="loadDemo">
-        <option value="" disabled>载入示例…</option>
-        <option v-for="d in DEMO_SCRIPTS" :key="d.id" :value="d.id">{{ d.name }}</option>
-      </select>
-      <select v-model="langSel" class="field min-w-0 max-w-[7rem]" aria-label="语言">
-        <option value="js">JavaScript</option>
-        <option value="py">Python</option>
-      </select>
+      <Select
+        :model-value="demoSel"
+        class="min-w-0 max-w-[9.5rem]"
+        :options="demoOptions"
+        placeholder="载入示例…"
+        aria-label="载入示例"
+        @update:model-value="pickDemo"
+      />
+      <Select
+        :model-value="activeLang"
+        class="max-w-[7rem]"
+        :options="LANG_OPTIONS"
+        aria-label="语言"
+        @update:model-value="switchLang"
+      />
       <button class="btn shrink-0" :disabled="busy" @click="save">保存并重载</button>
       <span v-if="saveError" class="min-w-0 truncate text-warn">{{ saveError }}</span>
     </div>

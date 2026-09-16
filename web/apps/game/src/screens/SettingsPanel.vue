@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import { LANG_OPTIONS } from "../scripts";
+import Select from "../ui/Select.vue";
 
 // 设置面板：居中卡片，独立于主菜单 / 暂停浮层的层级（关闭即回到来处）。
 // 首版只有真实可用的默认脚本语言；音量 / 存档为占位行，标明归属版本。
@@ -42,14 +44,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
       <div class="mt-4 flex flex-col gap-4">
         <label class="flex items-center justify-between gap-4">
           <span class="text-sm text-fg">默认脚本语言</span>
-          <select
-            class="field"
-            :value="lang"
-            @change="setLang(($event.target as HTMLSelectElement).value)"
-          >
-            <option value="js">JavaScript</option>
-            <option value="py">Python</option>
-          </select>
+          <Select
+            class="max-w-40"
+            :model-value="lang"
+            :options="LANG_OPTIONS"
+            aria-label="默认脚本语言"
+            @update:model-value="setLang"
+          />
         </label>
         <p class="text-2xs text-dim">对新开的编辑器生效，已打开的会话不变。</p>
         <div class="flex items-center justify-between gap-4 opacity-40">
