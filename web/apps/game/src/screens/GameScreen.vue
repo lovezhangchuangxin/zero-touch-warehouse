@@ -11,7 +11,9 @@ import Splitter from "../ui/Splitter.vue";
 import StatusBar from "../ui/StatusBar.vue";
 import PauseOverlay from "./PauseOverlay.vue";
 import * as api from "../api";
-import { store } from "../store";
+import { settings, updateSettings } from "../settings";
+import { store, applyDrafts } from "../store";
+import type { SaveSummary } from "../types";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 // 游戏屏：分栏网格 + 抽屉 + 状态栏。主菜单 / 设置浮层期间仍保持挂载
@@ -23,18 +25,14 @@ const emit = defineEmits<{ openMenu: []; openSettings: [] }>();
 const tab = ref<"events" | "logs" | "robots" | "market">("events");
 const fault = computed(() => store.snapshot?.fault ?? null);
 
-// 分栏尺寸（px）：编辑器列宽 + 抽屉高度，localStorage 持久化。
-// 钳制保证画布至少保留 ~480×300 的可视区。
-const LAYOUT_KEY = "ztw.layout.v1";
+// 分栏尺寸（px）：编辑器列宽 + 抽屉高度，经 settings.json 持久化（C1
+// 自 localStorage 迁移，挂载前已加载完毕）。钳制保证画布至少保留
+// ~480×300 的可视区。
 const ED_W_DEFAULT = 400;
 const DR_H_DEFAULT = 220;
 function loadLayout(): { edW: number; drH: number } {
-  try {
-    const v = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "");
-    if (typeof v?.edW === "number" && typeof v?.drH === "number") return v;
-  } catch {
-    // 损坏即回默认
-  }
+  const l = settings.layout;
+  if (l && typeof l.edW === "number" && typeof l.drH === "number") return l;
   return { edW: ED_W_DEFAULT, drH: DR_H_DEFAULT };
 }
 const edW = ref(loadLayout().edW);
@@ -46,11 +44,7 @@ function clampDrH(v: number): number {
   return Math.round(Math.min(Math.max(120, window.innerHeight - 400), Math.max(120, v)));
 }
 function persist() {
-  try {
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ edW: edW.value, drH: drH.value }));
-  } catch {
-    // 隐私模式等存储不可用：忽略，仅本次会话生效
-  }
+  void updateSettings({ layout: { edW: edW.value, drH: drH.value } });
 }
 function onEdDrag(d: number) {
   edW.value = clampEdW(edW.value - d); // 向左拖 = 编辑器加宽
@@ -80,6 +74,47 @@ function onWindowResize() {
 onMounted(() => window.addEventListener("resize", onWindowResize));
 onBeforeUnmount(() => window.removeEventListener("resize", onWindowResize));
 
+// ---------------------------------------------------------------------------
+// 存 / 读档编排（暂停浮层触发；编辑器在同屏，草稿经 ref 整包收集）
+// ---------------------------------------------------------------------------
+
+const editor = ref<InstanceType<typeof CodeEditor> | null>(null);
+const pauseSaves = ref<SaveSummary[]>([]);
+const saveNote = ref("");
+const scenarioNames = computed<Record<string, string>>(() =>
+  Object.fromEntries((store.static?.scenarios ?? []).map((s) => [s.id, s.name])),
+);
+
+async function refreshPauseSaves() {
+  try {
+    pauseSaves.value = await api.listSaves();
+  } catch {
+    pauseSaves.value = [];
+  }
+}
+
+/** 暂停点即安全点：整档 = 世界 + memory + 程序 + 编辑器草稿段。 */
+async function onSaveGame(name: string | null) {
+  const drafts = editor.value?.collectDrafts() ?? store.draftsCache;
+  try {
+    const s = await api.saveGame(name, drafts);
+    saveNote.value = `已保存 · ${s.name || "自动档"}（tick ${s.tick}）`;
+  } catch (e) {
+    saveNote.value = `保存失败：${String(e)}`;
+  }
+  await refreshPauseSaves();
+}
+
+async function onLoadGame(id: string) {
+  closePause();
+  try {
+    const drafts = await api.loadGame(id);
+    if (drafts) applyDrafts(drafts);
+  } catch (e) {
+    saveNote.value = `读档失败：${String(e)}`;
+  }
+}
+
 // ESC 暂停浮层：打开即暂停世界，"继续"按打开时的速度恢复。编辑器内
 // 的 Esc（补全取消 / 搜索关闭 / 重命名取消）都会 preventDefault，这里
 // 靠 defaultPrevented 让位；浮层（主菜单 / 设置）打开时不响应。
@@ -91,7 +126,9 @@ function togglePause() {
   } else {
     pauseTps.value = store.snapshot?.tps || 5;
     pauseOpen.value = true;
+    saveNote.value = "";
     void api.pause();
+    void refreshPauseSaves();
   }
 }
 function closePause() {
@@ -178,16 +215,21 @@ onBeforeUnmount(() => clearTimeout(editorEnterTimer));
       <!-- 编辑器列：全高；"开始"时自右滑入（与主菜单列同一书脊） -->
       <Splitter dir="x" @drag="onEdDrag" @end="persist" @reset="resetEd" />
       <div class="grid min-h-0" :class="editorEnter && 'editor-enter'">
-        <CodeEditor class="min-h-0" />
+        <CodeEditor ref="editor" class="min-h-0" />
       </div>
     </main>
     <StatusBar />
     <PauseOverlay
       v-if="pauseOpen"
       :tps="pauseTps"
+      :saves="pauseSaves"
+      :scenario-names="scenarioNames"
+      :note="saveNote"
       @close="closePause"
       @open-settings="emit('openSettings')"
       @open-menu="emit('openMenu')"
+      @save="onSaveGame"
+      @load="onLoadGame"
     />
   </div>
 </template>

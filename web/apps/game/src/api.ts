@@ -3,7 +3,15 @@
 // 游标分页拉取 / 确认；控制命令入队后即返回，状态以快照/轮询为准。
 
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { DiagPage, Snapshot, StatusView, StaticInfo } from "./types";
+import type {
+  DiagPage,
+  DraftsPayload,
+  SaveSummary,
+  SettingsPayload,
+  Snapshot,
+  StatusView,
+  StaticInfo,
+} from "./types";
 
 export function attachChannel(onMessage: (s: Snapshot) => void): Promise<void> {
   const channel = new Channel<Snapshot>();
@@ -77,4 +85,42 @@ export function logsPull(cursor: number, limit: number): Promise<DiagPage> {
 
 export function logsAck(cursor: number): Promise<void> {
   return invoke("logs_ack", { cursor });
+}
+
+// -- 存档与设置（C1，docs/architecture/06；世界线程安全点取数 + 壳层写盘） --
+
+/** 保存进度。name = null → 自动档（轮换保留 3 份）。草稿段透传入档。 */
+export function saveGame(name: string | null, drafts: DraftsPayload | null): Promise<SaveSummary> {
+  return invoke("save_game", { name, drafts });
+}
+
+/** 读档：返回存档内草稿段（编辑器恢复用；读档失败整体 reject）。 */
+export function loadGame(id: string): Promise<DraftsPayload | null> {
+  return invoke("load_game", { id });
+}
+
+export function listSaves(): Promise<SaveSummary[]> {
+  return invoke("list_saves");
+}
+
+export function deleteSave(id: string): Promise<void> {
+  return invoke("delete_save", { id });
+}
+
+/** 草稿防丢（去抖落盘 drafts.json，独立于存档）。 */
+export function saveDrafts(drafts: DraftsPayload): Promise<void> {
+  return invoke("save_drafts", { drafts });
+}
+
+export function loadDrafts(): Promise<DraftsPayload | null> {
+  return invoke("load_drafts");
+}
+
+/** 本机设置（settings.json 原子读写；缺失返回 null）。 */
+export function getSettings(): Promise<SettingsPayload | null> {
+  return invoke("get_settings");
+}
+
+export function setSettings(settings: SettingsPayload): Promise<void> {
+  return invoke("set_settings", { settings });
 }

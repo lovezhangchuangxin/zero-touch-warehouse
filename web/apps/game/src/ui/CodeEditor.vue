@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import type { EditorState } from "@codemirror/state";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as api from "../api";
 import { DEMO_SCRIPTS, LANG_OPTIONS } from "../scripts";
 import type { Language } from "../scripts";
+import type { DraftsPayload } from "../types";
+import { settings } from "../settings";
+import { store } from "../store";
 import { createCodeEditor, type CodeEditorHandle } from "../editor/setup";
 import {
   fileNameFor,
@@ -21,6 +24,10 @@ import Select from "./Select.vue";
 // 「保存并重载」= 热重载：当前 tick 结束后暂停 → 文件集整包提交并重建
 // 执行环境。语言切换走宿主重启（docs 03），js / py 两套文件集草稿各自
 // 保留；已提交 Game.memory 跨语言保留。
+//
+// 草稿持久化（C1）：输入去抖 2s 整包落 drafts.json 防丢 + 刷新
+// store.draftsCache（自动存档的草稿段来源）；读档经 store.pendingDrafts
+// 回填（存档内草稿优先）。
 const host = ref<HTMLElement | null>(null);
 const demoSel = ref("");
 const busy = ref(false);
@@ -28,20 +35,11 @@ const saveError = ref("");
 // 示例下拉是静态集合，整表一次成型
 const demoOptions = DEMO_SCRIPTS.map((d) => ({ value: d.id, label: d.name }));
 
-// 两套语言文件集（各自草稿），activeLang 指向当前编辑的那套。
-// 初始语言读设置（主菜单"设置 → 默认脚本语言"，localStorage 持久化）。
-function initialLanguage(): Language {
-  try {
-    return localStorage.getItem("ztw.editor.lang") === "py" ? "py" : "js";
-  } catch {
-    return "js";
-  }
-}
 const sets = ref<Record<Language, EditorFile[]>>({
   js: [makeMainFile("", "js")],
   py: [makeMainFile("", "py")],
 });
-const activeLang = ref<Language>(initialLanguage());
+const activeLang = ref<Language>(settings.lang);
 const activeId = ref(sets.value[activeLang.value][0]!.id);
 const stateCache = new Map<string, EditorState>();
 
@@ -61,6 +59,7 @@ onMounted(() => {
     language: file.language,
     placeholderFor,
     onSave: () => void save(),
+    onChange: scheduleFlush,
   });
   // dev-only 自动化测试钩子（生产构建剔除）：自动化环境注入不了受信
   // 键盘事件，经 handle.typeAtEnd 以真实打字路径驱动补全等行为。
@@ -71,6 +70,15 @@ onMounted(() => {
   // 编辑器内 keymap 消费时会 preventDefault，这里据此去重——同一次
   // 按键只走一条路径，不会双发热重载。
   window.addEventListener("keydown", onGlobalKey);
+  // 启动恢复防丢草稿（读档回填若先到则跳过——存档内草稿优先）。
+  void api
+    .loadDrafts()
+    .then((d) => {
+      if (d && !store.pendingDrafts) applyDrafts(d);
+    })
+    .catch(() => {
+      // 无桥或读取失败：空草稿起步
+    });
 });
 
 onBeforeUnmount(() => {
@@ -78,6 +86,7 @@ onBeforeUnmount(() => {
   if (import.meta.env.DEV) {
     delete (window as unknown as { __ztwEditor?: unknown }).__ztwEditor;
   }
+  flushDrafts(); // 卸载前尽力把草稿落盘
   ed?.destroy();
   ed = null;
   stateCache.clear();
@@ -98,6 +107,89 @@ function docOf(f: EditorFile): string {
   }
   return stateCache.get(f.id)?.doc.toString() ?? f.code;
 }
+
+// ---------------------------------------------------------------------------
+// 草稿整包：收集（供存档段 / 防丢文件）、去抖落盘、回填
+// ---------------------------------------------------------------------------
+
+/** 两语言文件集整包（文件名 → 源码；入口文件随语言固定）。 */
+function collectDrafts(): DraftsPayload {
+  const map = (lang: Language): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const f of sets.value[lang]) {
+      out[f.name] = docOf(f);
+    }
+    return out;
+  };
+  return { files: { js: map("js"), py: map("py") }, active: activeLang.value };
+}
+
+const FLUSH_MS = 2000;
+let flushTimer = 0;
+let flushing = false;
+
+/** 内容或结构变化 → 去抖落盘（重排为立即刷新也不加倍写）。 */
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = window.setTimeout(() => {
+    flushTimer = 0;
+    flushDrafts();
+  }, FLUSH_MS);
+}
+
+function flushDrafts() {
+  if (flushing) return;
+  flushing = true;
+  const drafts = collectDrafts();
+  store.draftsCache = drafts;
+  void api
+    .saveDrafts(drafts)
+    .catch(() => {
+      // 落盘失败：缓存仍在，自动存档 / 下次去抖重试
+    })
+    .finally(() => {
+      flushing = false;
+    });
+}
+
+/** 读档回填（存档内草稿段或启动恢复）：整包替换两套文件集，文件 id
+ *  重新分配（id 不属于草稿公开语义），编辑器切到活动语言入口文件。 */
+function applyDrafts(d: DraftsPayload) {
+  if (!ed) return;
+  for (const lang of ["js", "py"] as const) {
+    const map = d.files[lang] ?? {};
+    const list: EditorFile[] = [];
+    const entryName = fileNameFor(lang);
+    if (map[entryName] !== undefined) {
+      list.push(makeMainFile(map[entryName], lang));
+    }
+    for (const name of Object.keys(map).sort()) {
+      if (name === entryName) continue;
+      if (isValidFileName(name, lang)) list.push(makeFile(name, lang, map[name]));
+    }
+    if (list.length === 0) list.push(makeMainFile("", lang));
+    for (const f of sets.value[lang]) stateCache.delete(f.id);
+    sets.value[lang] = list;
+  }
+  const targetLang: Language = d.active === "py" ? "py" : "js";
+  const main = sets.value[targetLang][0]!;
+  stateCache.set(activeId.value, ed.view.state);
+  activeLang.value = targetLang;
+  ed.switchState(ed.newState(main.code, main.language));
+  if (ed.currentLanguage() !== main.language) ed.setLanguage(main.language);
+  activeId.value = main.id;
+  flushDrafts();
+}
+
+// 读档草稿回填（watch token：同引用重复设置也能触发）。
+watch(
+  () => store.pendingDrafts?.token,
+  (tok) => {
+    if (tok && store.pendingDrafts) applyDrafts(store.pendingDrafts.drafts);
+  },
+);
+
+defineExpose({ collectDrafts, applyDrafts });
 
 let pendingSave = false;
 
@@ -125,6 +217,7 @@ async function save() {
       const code = map[f.name];
       if (code !== undefined) f.code = code;
     }
+    flushDrafts(); // 已提交内容与草稿模型对齐，顺带整包落盘
   } catch (e) {
     saveError.value = `重载失败：${String(e)}`;
   } finally {
@@ -154,6 +247,7 @@ function createFile() {
   const file = makeFile(nextFileName(files.value, activeLang.value), activeLang.value);
   files.value.push(file);
   selectFile(file.id);
+  scheduleFlush();
 }
 
 function deleteFile(id: string) {
@@ -166,6 +260,7 @@ function deleteFile(id: string) {
   }
   set.splice(set.indexOf(file), 1);
   stateCache.delete(id);
+  scheduleFlush();
 }
 
 function renameFile(id: string, name: string) {
@@ -173,6 +268,7 @@ function renameFile(id: string, name: string) {
   if (!file || isMain(file) || !isValidFileName(name, file.language)) return;
   if (files.value.some((f) => f.name === name)) return;
   file.name = name;
+  scheduleFlush();
 }
 
 // 载入示例 = 目标语言整套文件替换为单文件示例（示例自包含）。
@@ -198,6 +294,7 @@ function loadDemo() {
   ed.switchState(ed.newState(main.code, main.language));
   activeId.value = main.id;
   demoSel.value = "";
+  scheduleFlush();
 }
 
 // 语言切换 = 整体切换到另一套文件集（宿主重启在保存时发生，docs 03）。
@@ -211,6 +308,7 @@ function switchLang(v: string) {
   ed.switchState(cached ?? ed.newState(main.code, lang));
   if (ed.currentLanguage() !== lang) ed.setLanguage(lang);
   activeId.value = main.id;
+  scheduleFlush(); // 活动语言是草稿段的一部分
 }
 </script>
 

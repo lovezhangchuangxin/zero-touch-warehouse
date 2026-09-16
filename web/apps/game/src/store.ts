@@ -7,7 +7,7 @@
 
 import { reactive } from "vue";
 import * as api from "./api";
-import type { DiagEvent, Snapshot, StatusView, StaticInfo } from "./types";
+import type { DiagEvent, DraftsPayload, Snapshot, StatusView, StaticInfo } from "./types";
 
 const UI_EVENT_KEEP = 600;
 const UI_LOG_KEEP = 400;
@@ -28,7 +28,17 @@ export const store = reactive({
   lastScenario: "",
   /** 是否已从主菜单开始过对局：主菜单据此决定吸引模式还是展示本局。 */
   inGame: false,
+  /** 编辑器草稿的最新整包（CodeEditor 去抖刷新；自动存档的草稿段来源）。 */
+  draftsCache: null as DraftsPayload | null,
+  /** 待编辑器应用的草稿（读档回填；token 单调，watch 按 token 触发）。 */
+  pendingDrafts: null as { token: number; drafts: DraftsPayload } | null,
 });
+
+/** 读档后回填编辑器草稿（存档内草稿段优先于防丢文件）。 */
+let draftsToken = 0;
+export function applyDrafts(drafts: DraftsPayload): void {
+  store.pendingDrafts = { token: ++draftsToken, drafts };
+}
 
 export function onSnapshot(s: Snapshot): void {
   // 场景切换（reset）后清面板积压并重拉场景静态信息：墙格 / 尺寸 /

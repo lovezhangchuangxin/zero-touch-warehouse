@@ -2,6 +2,8 @@
 // 经济值为十进制字符串（防 JSON 浮点精度，docs/architecture/02 数学规则），
 // 坐标为 [x, y] 数组，Option 一律映射 null。
 
+import type { Language } from "./scripts";
+
 export interface BoxView {
   id: number;
   goods_type: string;
@@ -148,4 +150,38 @@ export interface DiagPage {
   events: DiagEvent[];
   next: number;
   gap: { from: number; to: number } | null;
+}
+
+// ---------------------------------------------------------------------------
+// 存档与设置（C1，与 crates/desktop/src/saves.rs、main.rs 命令输出对应）
+// ---------------------------------------------------------------------------
+
+/** 存档摘要（list_saves / save_game 回执）。毫秒时间戳为字符串：经 Tauri
+ *  IPC 会过 JS Number，超 2^53 丢精度（docs/architecture/06 §文件格式）。 */
+export interface SaveSummary {
+  /** 相对存档根的稳定 id（正斜杠分隔）。 */
+  id: string;
+  scenario: string;
+  name: string | null;
+  auto: boolean;
+  tick: number;
+  created_at_ms: string;
+  language: string;
+  /** false = 未过版本 / 校验和门禁（灰条展示，error 给原因）。 */
+  ok: boolean;
+  error: string | null;
+}
+
+/** 编辑器草稿段（存档内与 drafts.json 防丢文件共用同一形状；与已加载
+ *  程序分开保存，不冒充正在运行的代码）。 */
+export interface DraftsPayload {
+  /** 双语言文件集草稿（文件名 → 源码；入口文件随语言固定）。 */
+  files: Record<Language, Record<string, string>>;
+  active: Language;
+}
+
+/** 本机设置（settings.json；不入 Cloud 同步集）。 */
+export interface SettingsPayload {
+  lang: Language;
+  layout: { edW: number; drH: number } | null;
 }

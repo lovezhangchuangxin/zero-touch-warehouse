@@ -38,6 +38,8 @@ export interface CodeEditorOptions {
   placeholderFor: (language: Language) => string;
   /** Cmd/Ctrl+S（编辑器聚焦时）。全局捕获在 CodeEditor.vue。 */
   onSave: () => void;
+  /** 文档内容变化（草稿去抖落盘的信号源；不含选区等非内容事务）。 */
+  onChange?: () => void;
 }
 
 export interface CodeEditorHandle {
@@ -103,6 +105,9 @@ export function createCodeEditor(host: HTMLElement, opts: CodeEditorOptions): Co
     gameDocTooltip,
     search({ top: true }),
     ...gameThemeExtension,
+    EditorView.updateListener.of((u) => {
+      if (u.docChanged) opts.onChange?.();
+    }),
     langCompartment.of([languageSupport(language), indentUnit.of(indentFor(language))]),
     placeholderCompartment.of(placeholder(opts.placeholderFor(language))),
   ];
