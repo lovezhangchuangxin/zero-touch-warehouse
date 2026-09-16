@@ -12,12 +12,13 @@
 //! take / give / pick / drop 与机器人间被动转交；车辆离场 → 订单完成 → 收款 →
 //! 装卸位释放闭环；market.cancel 与最小 manage_destroy；xoshiro 分流 PRNG
 //! 承担装卸位分配。M3 起市场生成器落地（marketgen）与借贷 / 商店管理
-//! 操作（market）；find_path 属后续里程碑。
+//! 操作（market）。M4 起 find_path 落地（`path`：静态障碍等代价 BFS）。
 
 mod accept;
 mod intent;
 mod market;
 mod marketgen;
+mod path;
 mod rng;
 mod settle;
 mod snapshot;
@@ -29,6 +30,7 @@ pub use market::{
     TakeEffect,
 };
 pub use marketgen::MarketState;
+pub use path::PathOutcome;
 pub use rng::Xoshiro256;
 pub use snapshot::{ArrivalSnapshot, LastResultSnapshot, MarketSnapshot, WorldSnapshot};
 pub use world::World;
@@ -71,6 +73,12 @@ pub const CREDIT_LIMIT_MILLI: MilliGold = 1_000_000;
 
 /// 板面刷新间隔（docs/game-design/09：30–60 tick 窗口内取 40）。
 pub const MARKET_REFRESH_INTERVAL: u64 = 40;
+
+/// find_path / move_to 单次调用的节点预算（允许的格子扩展次数，
+/// docs/game-design/08「寻路」与 docs/architecture/03 结构性限额）。
+/// 50×50 地图全部格子上界 2 500，此值为其 8 倍余量——正常玩法永不
+/// 触发，仅作主进程无界工作防线；超限报可读错误而非 NO_PATH。
+pub const PATH_NODE_BUDGET: u32 = 20_000;
 /// 板面价差修复裕量（千分比）：同型最好买卖对价差率低于该值（含交叉）
 /// 时刷新环移除较旧者。须大于取消手续费率（100‰）——「任一时刻同类型
 /// bid < ask」与「价差恒大于手续费率」两条不变量由此成立（见 marketgen.rs

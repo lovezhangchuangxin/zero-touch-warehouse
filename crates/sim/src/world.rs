@@ -224,6 +224,12 @@ impl World {
     // 静态查询
     // -----------------------------------------------------------------------
 
+    /// 本 tick 该机器人是否已有受理通过的意图（ALREADY_ACTED 判定口径；
+    /// move_to 复合逻辑在寻路前短路用，与 accept_move 的检查同源）。
+    pub fn has_pending_intent(&self, robot_id: Id) -> bool {
+        self.intents.iter().any(|i| i.robot_id() == robot_id)
+    }
+
     /// 静态可通行判定：界内且非墙、非货架、非充电桩、非装卸位、非地面货物。
     /// 装卸位两格（锚点 + 库内第二格）均计入障碍，停靠货车不再另行占格；
     /// 机器人不是静态障碍。
@@ -279,7 +285,7 @@ impl World {
         let Some(robot) = self.robots.get(&robot_id) else {
             return Err(codes::NO_SUCH_OBJECT);
         };
-        if self.intents.iter().any(|i| i.robot_id() == robot_id) {
+        if self.has_pending_intent(robot_id) {
             return Err(codes::ALREADY_ACTED);
         }
         Ok(robot)
