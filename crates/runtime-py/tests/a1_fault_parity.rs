@@ -32,6 +32,23 @@ fn session_with(bin: impl AsRef<std::path::Path>, fault: &str) -> Session {
     )
 }
 
+/// stderr 标记等待：标记由后台读线程异步收割，宿主打完标记后帧处理
+/// 立即返回——tick 归来时缓冲可能尚未收齐（Windows CI 慢机实测竞态）。
+/// 轮询至截止再断言（与 desktop 测试 wait_status 同款 CI 余量）。
+fn wait_stderr_contains(s: &Session, needle: &str, why: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let text = s.stderr_text();
+        if text.contains(needle) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("{why}：{text}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// 故障类别的跨宿主可比较投影（HostTerminated 携带 reason）。
 fn class_tag(c: &FaultClass) -> String {
     match c {
@@ -324,11 +341,13 @@ fn knob_dup_request_matches_both_hosts() {
         assert!(s.load_code(code).ok, "{:?}", s.fault);
         obs.push(obs_after_tick(&mut s).normalized());
         assert_eq!(s.logs.len(), 1, "重发不重复执行：{:?}", s.logs);
-        assert!(
-            s.stderr_text().contains("故障注入 dup_request:1"),
-            "{}：重发注入必须真实发生（静默丢失正是对账要抓的形态）：{}",
-            bin.display(),
-            s.stderr_text()
+        wait_stderr_contains(
+            &s,
+            "故障注入 dup_request:1",
+            &format!(
+                "{}：重发注入必须真实发生（静默丢失正是对账要抓的形态）",
+                bin.display()
+            ),
         );
     }
     assert_eq!(obs[0], obs[1], "两宿主结局投影必须一致");
@@ -442,11 +461,10 @@ fn knob_dup_complete_matches_both_hosts() {
         // dup_complete 注入点在各宿主 main.rs 本地（对账测试的防区），
         // 且残留帧被丢弃无任何主进程副作用——静默丢失只有 stderr 标记
         // 可证（注入分支连发前打印）。
-        assert!(
-            s.stderr_text().contains("故障注入 dup_complete"),
-            "{}：连发注入必须真实发生：{}",
-            bin.display(),
-            s.stderr_text()
+        wait_stderr_contains(
+            &s,
+            "故障注入 dup_complete",
+            &format!("{}：连发注入必须真实发生", bin.display()),
         );
         hashes.push(s.world.state_hash());
     }
