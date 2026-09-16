@@ -5,6 +5,7 @@ records/*
 !records/a1-findings.md
 !records/a1-protocol-playthrough.md
 !records/c1-persistence.md
+!records/m4-pathfinding.md
 .DS_Store
 .zcode/
 

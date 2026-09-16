@@ -2,7 +2,7 @@
 
 单机 2D 编程游戏：玩家写代码运营自动化仓库。设计文档见 `docs/`（语义以文档为准）。
 
-## 当前状态：A1 + 里程碑 3（经济系统）+ C1（存档与恢复）
+## 当前状态：A1 + 里程碑 3（经济系统）+ C1（存档与恢复）+ M4-A（寻路 API）
 
 A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D（双平台构建
 冒烟）、A1（完整协议与双语言，验收证据见 `records/a1-protocol-playthrough.md`
@@ -18,7 +18,12 @@ A0（JS 最小闭环）、B1（模拟核心）、B2（桌面壳 + 前端）、D�
 与三道版本门禁、`WorldSnapshot` 镜像 DTO（state_hash 往返 + 读档指纹
 对账）、安全点取数 + 原子写串行队列、自动档轮换与主菜单「继续」、
 编辑器草稿防丢、设置迁移 settings.json（验收证据见
-`records/c1-persistence.md`；不兼容旧档明确报错不迁移）。
+`records/c1-persistence.md`；不兼容旧档明确报错不迁移）。其上落地
+M4-A 寻路 API：`Game.find_path`（静态障碍等代价 BFS、三分支返回、
+方向序 tie-break 冻结）与 `robot.move_to`（复合移动：主进程单源受理、
+`_move` 缓存按实际位置推进、结算失败原路重试、节点预算防线），双语言
+绑定零语义漂移、协议与版本面零 bump（验收证据见
+`records/m4-pathfinding.md`，示例「寻路巡逻（M4）」可试玩）。
 
 ## 布局
 
@@ -80,3 +85,6 @@ hook 只是快速反馈、可被绕过，强制门禁在 CI。常用任务见 `j
   且增益 0；世界不变量断言器不校验悬挂引用（docked_vehicle 等）。
 - 界面管理操作按钮（take/cancel/buy/borrow 的 UI 面）属里程碑 4 编辑器
   完善，当前管理操作全部经玩家代码。
+- apiData.ts / game-types 与绑定层仍手动同步（无机械锚点，目标态为
+  crates/api 同源生成）；旧 demos 未迁移到 move_to（M3 校准证据联动，
+  留教学场景里程碑）。
