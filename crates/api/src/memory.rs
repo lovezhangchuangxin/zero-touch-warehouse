@@ -848,7 +848,14 @@ impl MemoryTree {
             bytes_total: 0,
         };
         let mut root_entries: Vec<(String, Slot)> = Vec::with_capacity(pairs.len());
+        let mut root_seen = std::collections::BTreeSet::new();
         for (k, v) in &pairs {
+            if !root_seen.insert(k.as_str()) {
+                return Err(MemOpError::new(
+                    "INVALID_VALUE",
+                    format!("根下重复键「{k}」（存档损坏）"),
+                ));
+            }
             if k.len() > limits.max_string {
                 return Err(MemOpError::new(
                     "MEMORY_LIMIT",
@@ -862,7 +869,9 @@ impl MemoryTree {
                 ));
             }
             // 保留键 robots：角色子树（其下条目必须是映射——线上树只能经
-            // r.memory 产生，标量即坏档；键须为数字机器人 id）。
+            // r.memory 产生，标量即坏档；键须为机器人 id 的规范十进制串，
+            // "007" 这类非规范形会与 robot_memory 按 "7" 寻址产生第二个
+            // 同语义条目）。
             let slot = if k == "robots" {
                 let MemValue::Map(robot_pairs) = v else {
                     return Err(MemOpError::new(
@@ -871,19 +880,37 @@ impl MemoryTree {
                     ));
                 };
                 let mut entries = Vec::with_capacity(robot_pairs.len());
+                let mut robots_seen = std::collections::BTreeSet::new();
                 for (rk, rv) in robot_pairs {
-                    if rk.parse::<ztw_model::Id>().is_err() {
+                    if !rk
+                        .parse::<ztw_model::Id>()
+                        .is_ok_and(|id| id.to_string() == *rk)
+                    {
                         return Err(MemOpError::new(
                             "INVALID_VALUE",
-                            format!("robots 条目「{rk}」不是机器人 id（存档损坏）"),
+                            format!("robots 条目「{rk}」不是规范机器人 id（存档损坏）"),
                         ));
                     }
-                    let MemValue::Map(_) = rv else {
+                    if !robots_seen.insert(rk.as_str()) {
+                        return Err(MemOpError::new(
+                            "INVALID_VALUE",
+                            format!("robots 下重复键「{rk}」（存档损坏）"),
+                        ));
+                    }
+                    let MemValue::Map(mem_pairs) = rv else {
                         return Err(MemOpError::new(
                             "INVALID_VALUE",
                             format!("robots/{rk} 必须是映射（线上树只能经 r.memory 产生）"),
                         ));
                     };
+                    // 保留键 _move：线上树被 reserved_key_check 挡住，出现
+                    // 即手改档——恢复出来会让 move 绑定与玩家数据冲突。
+                    if mem_pairs.iter().any(|(mk, _)| mk == "_move") {
+                        return Err(MemOpError::new(
+                            "INVALID_VALUE",
+                            format!("robots/{rk} 含保留键 _move（存档损坏）"),
+                        ));
+                    }
                     let s = restore_build(&limits, &mut ctx, rv, Tag::RobotMem)?;
                     entries.push((rk.clone(), s));
                 }
@@ -986,11 +1013,18 @@ fn restore_build(
         }
         MemValue::Map(pairs) => {
             let mut entries = Vec::with_capacity(pairs.len());
+            let mut seen = std::collections::BTreeSet::new();
             for (k, child) in pairs {
                 if k.len() > limits.max_string {
                     return Err(MemOpError::new(
                         "MEMORY_LIMIT",
                         format!("键长度 {} 超上限 {}", k.len(), limits.max_string),
+                    ));
+                }
+                if !seen.insert(k.as_str()) {
+                    return Err(MemOpError::new(
+                        "INVALID_VALUE",
+                        format!("映射下重复键「{k}」（存档损坏）"),
                     ));
                 }
                 let s = restore_build(limits, ctx, child, Tag::Plain)?;

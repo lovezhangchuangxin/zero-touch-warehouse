@@ -87,6 +87,10 @@ onBeforeUnmount(() => {
     delete (window as unknown as { __ztwEditor?: unknown }).__ztwEditor;
   }
   flushDrafts(); // 卸载前尽力把草稿落盘
+  // 清掉在途去抖定时器：滞后触发时 ed 已销毁，docOf 会回落陈旧的
+  // f.code 覆盖刚写的内容。
+  clearTimeout(flushTimer);
+  flushTimer = 0;
   ed?.destroy();
   ed = null;
   stateCache.clear();
@@ -138,7 +142,12 @@ function scheduleFlush() {
 }
 
 function flushDrafts() {
-  if (flushing) return;
+  if (flushing) {
+    // 上一次 IPC 写入仍在途：尾部编辑补排一次，否则去抖到期被吞后
+    // 无限期待在内存。
+    scheduleFlush();
+    return;
+  }
   flushing = true;
   const drafts = collectDrafts();
   store.draftsCache = drafts;
@@ -153,9 +162,11 @@ function flushDrafts() {
 }
 
 /** 读档回填（存档内草稿段或启动恢复）：整包替换两套文件集，文件 id
- *  重新分配（id 不属于草稿公开语义），编辑器切到活动语言入口文件。 */
+ *  重新分配（id 不属于草稿公开语义），编辑器切到活动语言入口文件。
+ *  载荷形状守卫：drafts.json 被手改成合法 JSON 但形状不对时静默跳过
+ *  （与 settings 的 coerce 同款宽容），不抛进 watch 回调。 */
 function applyDrafts(d: DraftsPayload) {
-  if (!ed) return;
+  if (!ed || !d || typeof d.files !== "object") return;
   for (const lang of ["js", "py"] as const) {
     const map = d.files[lang] ?? {};
     const list: EditorFile[] = [];
@@ -173,7 +184,9 @@ function applyDrafts(d: DraftsPayload) {
   }
   const targetLang: Language = d.active === "py" ? "py" : "js";
   const main = sets.value[targetLang][0]!;
-  stateCache.set(activeId.value, ed.view.state);
+  // 旧对局的编辑器状态随整包替换一并丢弃：入口文件 id（main:js/py）跨档
+  // 复用，若按旧 activeId 塞回缓存，非活动语言会被旧内容顶替并在随后的
+  // flushDrafts 里固化进 drafts.json。
   activeLang.value = targetLang;
   ed.switchState(ed.newState(main.code, main.language));
   if (ed.currentLanguage() !== main.language) ed.setLanguage(main.language);

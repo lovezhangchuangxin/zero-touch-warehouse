@@ -28,7 +28,9 @@ async function loadSave(id: string) {
     if (drafts) applyDrafts(drafts);
   } catch (e) {
     console.warn("读档失败", e);
-    // 读档失败留在主菜单语义（世界未被破坏，可重试）
+    // 失败整体回滚到主菜单语义：世界未被破坏（临时会话初始化失败不换
+    // 入），inGame 一并回退，避免主菜单因 inGame 卡真而不再跑吸引模式。
+    store.inGame = false;
     menuOpen.value = true;
   }
 }
@@ -42,9 +44,15 @@ async function loadSave(id: string) {
 const AUTOSAVE_MS = 5 * 60_000;
 let autosaveTimer = 0;
 
+/** 定时路径：对局中且无浮层才写自动档（menuOpen 门只服务定时器——
+ *  回主菜单的即席存档经 saveNow 直达，否则 watch 触发时门必挡）。 */
 function autoSave() {
   if (!store.inGame || menuOpen.value || settingsOpen.value) return;
   if (!store.snapshot?.loaded) return;
+  saveNow();
+}
+
+function saveNow() {
   void api.saveGame(null, store.draftsCache).catch((e) => {
     console.warn("自动存档失败", e);
   });
@@ -56,7 +64,7 @@ onMounted(() => {
 onBeforeUnmount(() => clearInterval(autosaveTimer));
 // 回主菜单（暂停中）顺手存一次：最自然的"离开即保存"点。
 watch(menuOpen, (open) => {
-  if (open && store.inGame) autoSave();
+  if (open && store.inGame && store.snapshot?.loaded) saveNow();
 });
 </script>
 

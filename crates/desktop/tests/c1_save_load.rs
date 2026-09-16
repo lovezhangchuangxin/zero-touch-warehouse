@@ -372,10 +372,10 @@ fn store_write_safety_matrix() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// 自动档轮换：连续 5 次自动存档只保留 AUTO_SLOTS 份，且最新内容是
-/// 最后一次写入。
+/// 自动档轮换：连续 5 次自动存档只保留 AUTO_SLOTS 份，且恰好是最近
+/// 3 份（精确 mark 集合 {2,3,4}——槽 1 固钉式假轮换会被此断言拦下）。
 #[test]
-fn auto_rotation_keeps_slots() {
+fn auto_rotation_keeps_latest_slots() {
     let (store, dir) = tmp_store("rotation");
     for i in 0..5u64 {
         let d = mini_save(B2_ONE.id, 1000 + i, i);
@@ -386,14 +386,79 @@ fn auto_rotation_keeps_slots() {
     }
     let autos: Vec<_> = store.list().into_iter().filter(|s| s.auto).collect();
     assert_eq!(autos.len() as u32, AUTO_SLOTS, "自动档只保留轮换槽数");
-    // 全部可读，且最新一次（mark=4）在场。
-    let marks: Vec<i64> = autos
+    let mut marks: Vec<i64> = autos
         .iter()
         .filter(|s| s.ok)
         .map(|s| store.read(&s.id).unwrap().world.gold_milli)
         .collect();
-    assert!(marks.contains(&(500_000 + 4)), "最新自动档在场：{marks:?}");
+    marks.sort_unstable();
+    assert_eq!(
+        marks,
+        vec![500_000 + 2, 500_000 + 3, 500_000 + 4],
+        "轮换必须保留最近 3 份（最旧两份被覆盖）"
+    );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 并发写回归（docs 06 写入任务串行 / 旧序号不覆盖新档）：同目标两张
+/// 票并发执行，无论锁序如何，盘上终态必须完好可读、新序号内容在场、
+/// 无残留 tmp。
+#[test]
+fn concurrent_writes_latest_wins_without_corruption() {
+    let (store, dir) = tmp_store("concurrent");
+    // 布满 3 槽（mark 0..2）使两张票命中同一 auto 槽（最旧）。
+    for i in 0..3u64 {
+        let d = mini_save(B2_ONE.id, 7000 + i, i);
+        let t = store.ticket_auto(B2_ONE.id);
+        store
+            .write(&t, &ztw_api::save::encode(&d), 7000 + i)
+            .unwrap();
+    }
+    let t_old = store.ticket_auto(B2_ONE.id);
+    let t_new = store.ticket_auto(B2_ONE.id);
+    let d_old = mini_save(B2_ONE.id, 8001, 11);
+    let d_new = mini_save(B2_ONE.id, 8002, 22);
+    // 两写必须过同一 store（序号门按实例记账）——scope 线程共享借用。
+    std::thread::scope(|s| {
+        let h = s.spawn(|| {
+            let _ = store.write(&t_old, &ztw_api::save::encode(&d_old), 8001);
+        });
+        let _ = store.write(&t_new, &ztw_api::save::encode(&d_new), 8002);
+        h.join().unwrap();
+    });
+    // 每槽必须完好可读，内容只能是初始 {0,1,2}、旧写 11、新写 22 之一
+    // ——交错混合体会让 read 失败或 mark 越界。
+    let marks: Vec<i64> = (1..=3)
+        .map(|n| {
+            store
+                .read(&format!("{}/auto/auto-{n}.json", B2_ONE.id))
+                .map(|d| d.world.gold_milli - 500_000)
+        })
+        .collect::<Result<_, _>>()
+        .expect("并发写后所有槽必须完好可读");
+    assert!(marks.contains(&22), "新序号内容必须在场：{marks:?}");
+    assert!(
+        marks.iter().all(|&m| [0, 1, 2, 11, 22].contains(&m)),
+        "并发写不得产出损坏混合内容：{marks:?}"
+    );
+    let tmps = walk_tmps(&dir);
+    assert!(tmps.is_empty(), "无残留临时文件：{tmps:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn walk_tmps(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_tmps(&p));
+            } else if p.extension().is_some_and(|x| x == "tmp") {
+                out.push(p.display().to_string());
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

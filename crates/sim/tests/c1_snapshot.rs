@@ -132,3 +132,49 @@ fn unknown_action_name_rejected() {
     let err = World::from_snapshot(snap).expect_err("未知动作名须拒绝");
     assert!(err.contains("teleport"), "错误须点名未知动作名：{err}");
 }
+
+/// 动作名码表的「产出侧」防线：六种意图全部真实结算一遍，断言结算
+/// 产出的动作名集合恰好等于码表——结算侧新增动作名而漏更码表时，
+/// 同版本自产自销的存档自己都读不回，此处在写入方向即拦下。顺带
+/// 覆盖 market = None（固定挂单场景）的快照往返。
+#[test]
+fn settled_action_names_match_code_table() {
+    let mut w = World::new_empty(10, 10, 1_000_000).with_seed(11);
+    let r1 = w.add_robot(Position::new(1, 1));
+    let r2 = w.add_robot(Position::new(1, 2));
+    w.add_charger(Position::new(0, 0)); // 充电 tick 时与 (0,1) 相邻
+    let box_id = w.add_ground_box("water", Position::new(2, 1));
+    let mut seen: Vec<String> = Vec::new();
+    let step = |w: &mut World, seen: &mut Vec<String>| {
+        w.settle();
+        seen.extend(w.last_results.values().map(|r| r.action.to_string()));
+        w.end_tick();
+    };
+    // pick（拾 (2,1) 地面箱）→ give（r1 → 相邻空载 r2）→ take（r1 ← r2）
+    // → drop（放回 (2,1)）→ move（(1,1)→(0,1)）→ charge（(0,0) 桩）。
+    assert_eq!(w.accept_pick(r1, 2, 1), codes::OK);
+    step(&mut w, &mut seen);
+    assert_eq!(w.accept_give(r1, r2, None), codes::OK);
+    step(&mut w, &mut seen);
+    assert_eq!(w.accept_take(r1, r2, box_id), codes::OK);
+    step(&mut w, &mut seen);
+    assert_eq!(w.accept_drop(r1, 2, 1, None), codes::OK);
+    step(&mut w, &mut seen);
+    assert_eq!(w.accept_move(r1, -1, 0), codes::OK);
+    step(&mut w, &mut seen);
+    assert_eq!(w.accept_charge(r1), codes::OK);
+    step(&mut w, &mut seen);
+    let mut expected: Vec<&str> = ztw_sim::ACTION_NAMES.to_vec();
+    expected.sort_unstable();
+    let mut got = seen;
+    got.sort_unstable();
+    got.dedup();
+    assert_eq!(
+        got,
+        expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        "结算产出的动作名必须与码表一致"
+    );
+    // 固定挂单世界（无市场）往返同样无损。
+    let restored = World::from_snapshot(w.to_snapshot()).expect("合法快照");
+    assert_eq!(restored.state_hash(), w.state_hash());
+}

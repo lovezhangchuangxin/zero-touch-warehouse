@@ -94,7 +94,7 @@ fn memory_restore_enforces_limits() {
 }
 
 /// 坏档形态逐一拒绝：非映射根 / robots 非映射 / robots 条目非映射 /
-/// robots 键非数字 id。
+/// robots 键非数字或非规范 id / 根或嵌套映射重复键 / RobotMem 含 _move。
 #[test]
 fn memory_restore_rejects_corrupt_forms() {
     let lim = MemoryLimits::default();
@@ -117,6 +117,34 @@ fn memory_restore_rejects_corrupt_forms() {
                 MemValue::Map(vec![("seven".into(), MemValue::Map(vec![]))]),
             )]),
             "robots 键非数字",
+        ),
+        (
+            MemValue::Map(vec![(
+                "robots".into(),
+                MemValue::Map(vec![("007".into(), MemValue::Map(vec![]))]),
+            )]),
+            "robots 键非规范十进制（007 ≠ 7 的寻址形态）",
+        ),
+        (
+            MemValue::Map(vec![("a".into(), num(1.0)), ("a".into(), num(2.0))]),
+            "根下重复键",
+        ),
+        (
+            MemValue::Map(vec![(
+                "m".into(),
+                MemValue::Map(vec![("k".into(), num(1.0)), ("k".into(), num(2.0))]),
+            )]),
+            "嵌套映射重复键",
+        ),
+        (
+            MemValue::Map(vec![(
+                "robots".into(),
+                MemValue::Map(vec![(
+                    "7".into(),
+                    MemValue::Map(vec![("_move".into(), num(1.0))]),
+                )]),
+            )]),
+            "RobotMem 含保留键 _move",
         ),
     ];
     for (root, why) in cases {

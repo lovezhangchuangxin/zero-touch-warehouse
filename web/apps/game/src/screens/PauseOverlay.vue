@@ -29,6 +29,13 @@ function onSave() {
   emit("save", name || null);
   nameInput.value = "";
 }
+
+/** Enter 提交须让路 IME 组合输入：中文输入法里 Enter 是「上屏候选词」，
+ *  isComposing / keyCode 229 期间触发保存会拿到未上屏原文并清空组词。 */
+function onEnter(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return;
+  onSave();
+}
 </script>
 
 <template>
@@ -52,7 +59,7 @@ function onSave() {
               class="min-w-0 flex-1 rounded-sm border border-line bg-bg px-2 py-1.5 text-sm text-fg placeholder:text-dim focus:border-accent focus:outline-none"
               placeholder="存档名（可空）"
               maxlength="32"
-              @keydown.enter.prevent="onSave"
+              @keydown.enter.prevent="onEnter"
             />
             <button class="btn shrink-0" @click="onSave">保存进度</button>
           </div>

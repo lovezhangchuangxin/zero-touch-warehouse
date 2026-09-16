@@ -111,7 +111,11 @@ async function onLoadGame(id: string) {
     const drafts = await api.loadGame(id);
     if (drafts) applyDrafts(drafts);
   } catch (e) {
+    // 失败回到暂停浮层：note 才有可见载体，世界也回到读档前的暂停。
     saveNote.value = `读档失败：${String(e)}`;
+    pauseTps.value = store.snapshot?.tps || 5;
+    pauseOpen.value = true;
+    void api.pause();
   }
 }
 

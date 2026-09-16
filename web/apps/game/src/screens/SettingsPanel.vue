@@ -86,6 +86,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
             :saves="saves"
             :scenario-names="scenarioNames"
             deletable
+            :loadable="false"
             empty-hint="暂无存档"
             @delete="onDelete"
           />

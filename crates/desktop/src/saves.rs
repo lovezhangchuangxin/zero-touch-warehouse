@@ -124,7 +124,7 @@ impl SaveStore {
     }
 
     /// 自动档轮换槽位：`saves/<场景>/auto/auto-<n>.json`，n ∈ 1..=3；
-    /// 有空槽用空槽，全满覆 created_at 最旧者。文件名最终落定在 write。
+    /// 有空槽用空槽，全满覆 created_at 最旧者（字段在信封 `save` 段内）。
     pub fn ticket_auto(&self, scenario: &str) -> SaveTicket {
         let dir = self.root.join(scenario).join("auto");
         let mut free: Option<u32> = None;
@@ -138,7 +138,11 @@ impl SaveStore {
             let created = fs::read_to_string(&p)
                 .ok()
                 .and_then(|t| raw_header(&t))
-                .and_then(|h| h.get("created_at_ms").and_then(Value::as_u64))
+                .and_then(|h| {
+                    h.get("save")
+                        .and_then(|s| s.get("created_at_ms"))
+                        .and_then(Value::as_u64)
+                })
                 .unwrap_or(u64::MAX);
             if oldest.is_none_or(|(c, _)| created < c) {
                 oldest = Some((created, n));
@@ -148,23 +152,22 @@ impl SaveStore {
         self.alloc_ticket(dir.join(format!("auto-{n}.json")), true)
     }
 
-    /// 执行写（调用方经 spawn_blocking）。新鲜度门：序号不再是该目标
-    /// 最新值时拒绝执行替换（旧请求不覆盖新档）。成功返回存档相对 id。
+    /// 执行写（调用方经 spawn_blocking）。写入任务串行（docs 06:61）：
+    /// 门锁贯穿新鲜度检查到原子替换——序号门没有 check-then-IO 的
+    /// TOCTOU 窗口，同目标的 tmp / rename 不可能交错；旧序号在锁内
+    /// 复核必被拒。成功返回存档相对 id。
     pub fn write(
         &self,
         ticket: &SaveTicket,
         text: &str,
         created_ms: u64,
     ) -> Result<String, String> {
+        let mut gate = self.gate.lock().expect("存档写入门锁");
         if self.knob("stale_seq") {
-            let mut g = self.gate.lock().expect("存档写入门锁");
-            *g.issued.get_mut(&ticket.target).expect("票已分配") += 1;
+            *gate.issued.get_mut(&ticket.target).expect("票已分配") += 1;
         }
-        {
-            let g = self.gate.lock().expect("存档写入门锁");
-            if g.issued.get(&ticket.target) != Some(&ticket.seq) {
-                return Err("写入请求已被更新的存档请求取代（旧序号不覆盖新档）".to_string());
-            }
+        if gate.issued.get(&ticket.target) != Some(&ticket.seq) {
+            return Err("写入请求已被更新的存档请求取代（旧序号不覆盖新档）".to_string());
         }
         let mut bytes = text.to_string();
         if self.knob("corrupt_payload") {
@@ -288,8 +291,9 @@ impl SaveStore {
             },
             Err(e) => {
                 let mut s = fallback;
-                // 门禁失败但 JSON 头可读时尽量带出字段（灰条展示）。
-                if let Some(h) = raw_header(&text) {
+                // 门禁失败但 JSON 可读时尽量带出字段（灰条展示；字段在
+                // 信封 save 段内）。
+                if let Some(h) = raw_header(&text).and_then(|h| h.get("save").cloned()) {
                     s.name = h.get("name").and_then(Value::as_str).map(String::from);
                     s.tick = h.get("tick").and_then(Value::as_u64).unwrap_or(0);
                     s.created_at_ms = h
@@ -306,7 +310,9 @@ impl SaveStore {
 
     fn resolve(&self, id: &str) -> Result<PathBuf, String> {
         let p = Path::new(id);
-        if p.is_absolute() || id.contains("..") || id.contains('\\') {
+        // 冒号一并拒绝：Windows 盘符相对路径（"C:foo"）非绝对、无 .. 与
+        // 反斜杠，join 会整体替换为盘符相对路径逃出存档根（防御纵深）。
+        if p.is_absolute() || id.contains("..") || id.contains('\\') || id.contains(':') {
             return Err(format!("非法存档 id「{id}」"));
         }
         Ok(self.root.join(p))
@@ -353,15 +359,23 @@ fn sync_dir(p: &Path) {
 // 设置 / 草稿文件（同一原子写纪律；docs 06 §文件格式与落盘）
 // ---------------------------------------------------------------------------
 
-/// 原子写 JSON 文件（临时 + fsync + 替换 + 目录刷新）。
+/// 原子写 JSON 文件（临时 + fsync + 替换 + 目录刷新）。tmp 名掺入全局
+/// 计数器：并发写同一目标（如连续 set_settings）不会交错共享同一个
+/// tmp——最坏是末位者胜，不产出损坏文件。
 pub fn write_json_atomic(path: &Path, v: &Value) -> Result<(), String> {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = path.parent().expect("路径必有父目录");
     fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
-    let tmp = path.with_extension("json.tmp");
+    let text = serde_json::to_string(v).map_err(|e| format!("JSON 序列化失败：{e}"))?;
+    let tmp = PathBuf::from(format!(
+        "{}.{}.tmp",
+        path.display(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     {
         use std::io::Write;
         let mut f = fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败：{e}"))?;
-        f.write_all(serde_json::to_string(v).unwrap_or_default().as_bytes())
+        f.write_all(text.as_bytes())
             .map_err(|e| format!("写入临时文件失败：{e}"))?;
         f.sync_all().map_err(|e| format!("刷新临时文件失败：{e}"))?;
     }
@@ -375,7 +389,7 @@ pub fn read_json(path: &Path) -> Result<Option<Value>, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
             .map(Some)
-            .map_err(|e| format!("设置文件损坏：{e}")),
+            .map_err(|e| format!("JSON 文件损坏（{path:?}）：{e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("读取失败：{e}")),
     }

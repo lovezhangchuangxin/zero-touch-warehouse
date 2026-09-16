@@ -503,7 +503,9 @@ fn handle(st: &mut RunState, shared: &Shared, cmd: Ctrl) {
 }
 
 /// 安全点组装存档数据（Ctrl::SaveGame 的处理体）。世界与 memory 来自
-/// 同一安全点（docs 06）；未加载 / 未初始化的对局没有可存进度。
+/// 同一安全点（docs 06）；未加载 / 未初始化的对局没有可存进度。故障态
+/// （脚本错误未恢复）允许存档：安全点的世界与 memory 仍一致，玩家可借
+/// 存档保留故障现场——读档会重跑初始化，属可接受语义。
 fn capture_save(
     st: &mut RunState,
     name: Option<String>,
@@ -546,7 +548,10 @@ fn load_game(
         crate::hostbin::Language::Js => st.bins.js.clone(),
         crate::hostbin::Language::Py => st.bins.py.clone(),
     };
-    let mut session = Session::new(SessionConfig::new(bin), world);
+    // 继承当前会话 cfg（预算 / 限额随读档传播），只换宿主二进制。
+    let mut cfg = st.session.cfg.clone();
+    cfg.host_bin = bin;
+    let mut session = Session::new(cfg, world);
     session.memory = ztw_api::memory::MemoryTree::from_snapshot(
         data.memory.root.clone(),
         data.memory.revision,
@@ -557,7 +562,12 @@ fn load_game(
     // 临时会话上重新初始化（普通全局变量重置，docs 06 读档语义）。
     let outcome = session.load_program(&program);
     if !outcome.ok {
-        return Err("读档初始化失败（程序未通过初始化），当前对局未受影响".to_string());
+        let why = outcome
+            .fault
+            .as_ref()
+            .map(|f| format!("：{}（{}）", f.code, f.message))
+            .unwrap_or_default();
+        return Err(format!("读档初始化失败{why}，当前对局未受影响"));
     }
     // 全部成功，换入当前对局（旧会话随之丢弃，宿主由 Session 收尾）。
     st.spec = spec;

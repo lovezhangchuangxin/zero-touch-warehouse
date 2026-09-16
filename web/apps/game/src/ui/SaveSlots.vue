@@ -3,12 +3,15 @@ import { computed } from "vue";
 import type { SaveSummary } from "../types";
 
 // 存档列表（主菜单读档 / 暂停浮层存读档 / 设置面板存档管理三处复用）。
-// 损坏档（ok=false）灰条展示原因、不可载入；删除仅管理场景开放。
+// 损坏档（ok=false）灰条展示原因、不可载入；删除仅管理场景开放；纯
+// 管理场景（设置面板）不显示「载入」（loadable=false）。
 const props = defineProps<{
   saves: SaveSummary[];
   /** 场景 id → 显示名（StaticInfo.scenarios；缺省回退 id）。 */
   scenarioNames?: Record<string, string>;
   deletable?: boolean;
+  /** 是否显示「载入」按钮（管理场景 false，避免无侦听的死按钮）。 */
+  loadable?: boolean;
   emptyHint?: string;
 }>();
 const emit = defineEmits<{ load: [id: string]; delete: [id: string] }>();
@@ -68,7 +71,12 @@ function scenarioOf(s: SaveSummary): string {
           {{ s.error }}
         </div>
       </div>
-      <button class="btn shrink-0 px-2 py-1 text-xs" :disabled="!s.ok" @click="emit('load', s.id)">
+      <button
+        v-if="loadable !== false"
+        class="btn shrink-0 px-2 py-1 text-xs"
+        :disabled="!s.ok"
+        @click="emit('load', s.id)"
+      >
         载入
       </button>
       <button v-if="deletable" class="btn shrink-0 px-2 py-1 text-xs" @click="emit('delete', s.id)">
