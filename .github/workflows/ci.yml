@@ -61,7 +61,7 @@ jobs:
       # 钉版内容在 scripts/fetch-python.mjs（TAG/SHA256），缓存键只随脚本
       # 变化；未命中时 fetch 步骤下载（约 25-47MB）。
       - name: python dist cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: target/python
           key: py-dist-${{ runner.os }}-${{ hashFiles('scripts/fetch-python.mjs') }}
@@ -74,7 +74,7 @@ jobs:
 
       # web/ pnpm 依赖缓存（store 按 OS 分目录；oxlint/oxfmt/vite 均为平台二进制）。
       - name: pnpm store cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/Library/pnpm/store
@@ -141,7 +141,7 @@ jobs:
 
       - name: Upload cargo timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cargo-timings-${{ runner.os }}
           path: target/cargo-timings/*.html
